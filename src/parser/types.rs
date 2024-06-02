@@ -77,6 +77,8 @@ pub enum AccessType {
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum Keyword {
+    NOT,
+
     // Variable Stuff
     SHARED,
 
@@ -196,7 +198,6 @@ pub enum Operator {
     GTLT,
     OR,
     AND,
-    NOT,
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]

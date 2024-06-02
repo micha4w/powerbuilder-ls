@@ -61,8 +61,16 @@ impl FileTokenizer {
         });
         match c {
             Some('\n') => {
-                self.pos.line += 1;
-                self.pos.column = 0;
+                loop {
+                    match self._peek(0) {
+                        Some('\n') => {
+                            self.pos.line += 1;
+                            self.pos.column = 0;
+                            self._next();
+                        }
+                        _ => break,
+                    };
+                }
                 '\n'
             }
             Some(';') | None => '\n',
@@ -75,7 +83,7 @@ impl FileTokenizer {
             Some('&') => loop {
                 match self._peek(0) {
                     Some(' ' | '\t') => match self._peek(1) {
-                        Some(' ' | '\t') => {}
+                        Some(' ' | '\t') => self._next(),
                         _ => break '&',
                     },
                     Some('\n') => {
@@ -122,7 +130,6 @@ impl FileTokenizer {
 
             "AND" => TokenType::Operator(Operator::AND),
             "OR" => TokenType::Operator(Operator::OR),
-            "NOT" => TokenType::Operator(Operator::NOT),
             "FALSE" | "TRUE" => TokenType::Literal(Literal::BOOLEAN),
 
             _ => TokenType::Literal(Literal::VARIABLE),
