@@ -5,5 +5,20 @@
         "./Cargo.toml",
         "./Cargo.toml",
         "./Cargo.toml"
+    ],
+    "rust-analyzer.showUnlinkedFileNotification": false,
+    "cSpell.words": [
+        "COLONCOLON",
+        "DIVEQ",
+        "DOTDOTDOT",
+        "GTLT",
+        "LCURLY",
+        "LPAREN",
+        "MINUSEQ",
+        "MINUSMINUS",
+        "MULTEQ",
+        "PLUSEQ",
+        "RCURLY",
+        "RPAREN"
     ]
 }

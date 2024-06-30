@@ -2,7 +2,9 @@ use std::fmt;
 
 use strum_macros::EnumString;
 
-#[derive(Clone, Copy, Default, PartialEq)]
+use super::parser_types::{DataType, DataTypeType};
+
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Position {
     pub line: usize,
     pub column: usize,
@@ -13,7 +15,7 @@ impl fmt::Display for Position {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
@@ -54,13 +56,26 @@ pub enum Literal {
     TIME,
     STRING,
     ENUM,
-    VARIABLE,
     BOOLEAN,
+}
+
+impl Literal {
+    pub fn is_type(&self, data_type: &DataTypeType) -> bool {
+        match self {
+            Literal::NUMBER => data_type.is_numeric(),
+            Literal::DATE => DataTypeType::Primitive(Type::DATE).is_convertible(data_type),
+            Literal::TIME => DataTypeType::Primitive(Type::TIME).is_convertible(data_type),
+            Literal::STRING => DataTypeType::Primitive(Type::STRING).is_convertible(data_type),
+            Literal::BOOLEAN => DataTypeType::Primitive(Type::BOOLEAN).is_convertible(data_type),
+            Literal::ENUM => false, // TODO scrape https://docs.appeon.com/pb2022/powerscript_reference
+        }
+    }
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum ScopeModif {
     GLOBAL,
+    SHARED,
     LOCAL,
 }
 
@@ -73,6 +88,8 @@ pub enum AccessType {
     PRIVATEREAD,
     PROTECTEDREAD,
     PROTECTEDWRITE,
+    SYSTEMREAD,
+    SYSTEMWRITE,
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
@@ -80,20 +97,38 @@ pub enum Keyword {
     NOT,
 
     // Variable Stuff
-    SHARED,
-
-    WINDOW,
+    // WINDOW,
     INDIRECT,
     VARIABLES,
 
     FORWARD,
+    TYPE,
+    PROTOTYPES,
+    WITHIN,
+    AUTOINSTANTIATE,
+    ALIAS,
+    LIBRARY,
+    SYSTEM,
+    RPCFUNC,
 
     READONLY,
     REF,
+    CONSTANT,
+
+    THIS,
+    SUPER,
+    PARENT,
+    SQLCA,
 
     // Control flow
     FUNCTION,
     SUBROUTINE,
+    ON,
+    EVENT,
+
+    CALL,
+    POST,
+    TRIGGER,
 
     IF,
     THEN,
@@ -105,8 +140,10 @@ pub enum Keyword {
     EXIT,
     CONTINUE,
     RETURN,
+    THROWS,
 
     FOR,
+    TO,
     STEP,
     NEXT,
 
@@ -122,64 +159,63 @@ pub enum Keyword {
     THROW,
     RELEASE,
 
+    GOTO,
+    HALT,
+
     END,
 
     // SQL
-    IS,
+    // Mixed SQL
+    XOR,
     CLOSE,
-    CREATE,
-    DESTROY,
-    USING,
-    SELECT,
-    DELETE,
-    INSERT,
-    DESCRIBE,
-
-    // Stuff
-    POST,
-    TRIGGER,
-    PROTOTYPES,
-    TYPE,
-    ON,
-    TO,
-    FROM,
-    NULL,
-    UPDATE,
-    DYNAMIC,
-    WITHIN,
-    EVENT,
     OPEN,
-    GOTO,
 
-    CALL,
-    HALT,
-    SUPER,
-    LIBRARY,
-    SYSTEM,
-    RPCFUNC,
-    ALIAS,
-    THROWS,
-    AUTOINSTANTIATE,
-    DESCRIPTOR,
-    SQLCA,
-    IMMEDIATE,
-    EXECUTE,
+    COMMIT,
+    CONNECT,
     DECLARE,
-    PROCEDURE,
+    DELETE,
+    DESCRIBE,
+    DISCONNECT,
+    EXECUTE,
+    FETCH,
+    INSERT,
+    PREPARE,
+    ROLLBACK,
+    SELECT,
+    SELECTBLOB,
+    UPDATE,
+    UPDATEBLOB,
+    SET,
+    CURRENT,
+    IS,
+    USING,
+    NULL,
+    FROM,
     INTO,
     VALUES,
     WHERE,
-    COMMIT,
+    FIRST,
+    PRIOR,
+    LAST,
+    IMMEDIATE,
+    DESCRIPTOR,
     CURSOR,
-    PREPARE,
-    FETCH,
-    SET,
-    CONNECT,
-    DISCONNECT,
-    CONSTANT,
-    SELECTBLOB,
-    UPDATEBLOB,
-    ROLLBACK,
+    PROCEDURE,
+    OF,
+
+    CREATE,
+    DESTROY,
+
+    DYNAMIC,
+
+    // Reserved
+    NAMESPACE,
+    INTRINSIC,
+    WITH,
+    _DEBUG,
+    ENUMERATED,
+    EXTERNAL,
+    NATIVE
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
@@ -198,6 +234,32 @@ pub enum Operator {
     GTLT,
     OR,
     AND,
+}
+
+impl Operator {
+    pub fn precedence(&self) -> u8 {
+        match self {
+            Operator::CARAT => 1,
+
+            Operator::MULT => 2,
+            Operator::DIV => 2,
+
+            Operator::PLUS => 3,
+            Operator::MINUS => 3,
+
+            Operator::EQ => 4,
+            Operator::GT => 4,
+            Operator::GTE => 4,
+            Operator::LT => 4,
+            Operator::LTE => 4,
+            Operator::GTLT => 4,
+
+            // NOT => 5,
+            Operator::AND => 6,
+
+            Operator::OR => 7,
+        }
+    }
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
@@ -227,29 +289,7 @@ pub enum Symbol {
 
     DOTDOTDOT,
     DOT,
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TokenType {
-    Type(Type),
-    ScopeModif(ScopeModif),
-    AccessType(AccessType),
-    Keyword(Keyword),
-
-    Literal(Literal),
-    Symbol(Symbol),
-    Operator(Operator),
-    SpecialAssignment(SpecialAssignment),
-
-    COMMENT,
-    NEWLINE,
-    SPACE,
-    INVALID,
-}
-
-pub struct Token {
-    pub token_type: TokenType,
-    pub content: String,
-    pub range: Range,
-    pub error: Option<String>,
+    PLUSPLUS,
+    MINUSMINUS,
 }

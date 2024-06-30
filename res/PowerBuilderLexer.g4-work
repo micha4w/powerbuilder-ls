@@ -86,7 +86,9 @@ SELECTBLOB: 'SELECTBLOB';
 UPDATEBLOB: 'UPDATEBLOB';
 ROLLBACK: 'ROLLBACK';
 // Operators
+// TODO TICK???
 
+TICK:               '`';
 TQ:                 '???';
 DOUBLE_PIPE:        '||';
 AT: '@';

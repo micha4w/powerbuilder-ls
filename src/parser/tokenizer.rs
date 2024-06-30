@@ -1,107 +1,121 @@
-use std::{collections::VecDeque, fs::File, io::Read, str::FromStr};
+use std::{fs::File, io::Read, mem::replace, path::Path, str::FromStr};
 
 use anyhow::Result;
 use encoding_rs_io::DecodeReaderBytesBuilder;
+use multipeek::{multipeek, MultiPeek};
 
-use super::types::*;
+use super::tokenizer_types::*;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TokenType {
+    Type(Type),
+    ScopeModif(ScopeModif),
+    AccessType(AccessType),
+    Keyword(Keyword),
+
+    Literal(Literal),
+    Symbol(Symbol),
+    Operator(Operator),
+    SpecialAssignment(SpecialAssignment),
+
+    ID,
+    COMMENT,
+    NEWLINE,
+    INVALID,
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub token_type: TokenType,
+    pub content: String,
+    pub range: Range,
+    pub error: Option<String>,
+}
 
 pub struct FileTokenizer {
-    chars: std::vec::IntoIter<char>,
-    peek_chars: VecDeque<char>,
+    chars: MultiPeek<std::vec::IntoIter<char>>,
 
     buildup: String,
 
     pos: Position,
+    next: Option<Token>,
+    previous: Token,
 }
 
 impl FileTokenizer {
-    pub fn open(path: &str) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mut reader = DecodeReaderBytesBuilder::new().build(file);
         let mut buf = String::new();
         reader.read_to_string(&mut buf)?;
 
         let out = Self {
-            chars: buf.chars().collect::<Vec<_>>().into_iter(),
-            peek_chars: VecDeque::new(),
+            chars: multipeek(buf.chars().collect::<Vec<_>>().into_iter()),
             buildup: String::new(),
-            pos: Position { line: 0, column: 0 },
+            pos: Position { line: 1, column: 0 },
+            next: None,
+            previous: Token {
+                token_type: TokenType::INVALID,
+                content: String::new(),
+                range: Range::default(),
+                error: None,
+            },
         };
+
         Ok(out)
     }
 
-    fn __get_char(&mut self) -> Option<char> {
+    pub fn skip_headers(&mut self) -> Option<()> {
+        if self.chars.peek_nth(0)? == &'H' && self.chars.peek_nth(1)? == &'A' {
+            self.next();
+            self.next();
+        }
+
+        while self.chars.peek()? == &'$' {
+            while self.next()? != '\n' {}
+        }
+
+        Some(())
+    }
+
+    fn next(&mut self) -> Option<char> {
+        let c = self.chars.next()?;
+
+        self.pos.column += 1;
+        self.buildup.push(c);
+
+        if c == '\n' {
+            self.pos.line += 1;
+            self.pos.column = 0;
+        }
+
+        Some(c)
+    }
+
+    fn skip_white_spaces(&mut self) -> Option<()> {
         loop {
-            match self.chars.next()? {
-                '\r' => {}
-                c => {
-                    break Some(c);
+            let c = self.chars.peek()?;
+            match c {
+                ' ' | '\t' | '\r' => {
+                    self.next();
                 }
-            };
-        }
-    }
-
-    fn _next(&mut self) -> Option<char> {
-        self.peek_chars.pop_front().or_else(|| self.__get_char())
-    }
-
-    fn _peek(&mut self, n: usize) -> Option<char> {
-        for _ in self.peek_chars.len()..=n {
-            let c = self.__get_char()?;
-            self.peek_chars.push_back(c);
-        }
-        Some(self.peek_chars[n])
-    }
-
-    fn seek(&mut self) -> char {
-        let c = self._next();
-        c.map(|c| {
-            self.pos.column += 1;
-            self.buildup.push(c)
-        });
-        match c {
-            Some('\n') => {
-                loop {
-                    match self._peek(0) {
-                        Some('\n') => {
-                            self.pos.line += 1;
-                            self.pos.column = 0;
-                            self._next();
-                        }
-                        _ => break,
-                    };
-                }
-                '\n'
-            }
-            Some(';') | None => '\n',
-            Some(' ' | '\t') => loop {
-                match self._peek(0) {
-                    Some(' ' | '\t') => self._next(),
-                    _ => break ' ',
-                };
-            },
-            Some('&') => loop {
-                match self._peek(0) {
-                    Some(' ' | '\t') => match self._peek(1) {
-                        Some(' ' | '\t') => self._next(),
-                        _ => break '&',
-                    },
-                    Some('\n') => {
-                        self.chars.next();
-                        break ' ';
+                '&' => {
+                    self.next();
+                    loop {
+                        match self.chars.peek()? {
+                            ' ' | '\t' | '\r' => {
+                                self.next();
+                            }
+                            '\n' => {
+                                self.next();
+                                break;
+                            }
+                            _ => return Some(()),
+                        };
                     }
-                    _ => break '&',
-                };
-            },
-            Some(c) => c.to_owned(),
-        }
-    }
-
-    fn peek(&mut self) -> char {
-        match self._peek(0) {
-            Some(';' | '\n') | None => '\n',
-            Some(' ' | '\t' | '&') => ' ',
-            Some(c) => c.to_owned(),
+                }
+                _ => return Some(()),
+            }
         }
     }
 
@@ -115,6 +129,7 @@ impl FileTokenizer {
         if let Ok(token_type) = ScopeModif::from_str(token) {
             return TokenType::ScopeModif(token_type);
         }
+        // TODO only get close and open and close keyword if there are no ()
         if let Ok(token_type) = AccessType::from_str(token) {
             return TokenType::AccessType(token_type);
         }
@@ -125,43 +140,40 @@ impl FileTokenizer {
             "CHARACTER" => TokenType::Type(Type::CHAR),
             "DEC" => TokenType::Type(Type::DECIMAL),
             "INTEGER" => TokenType::Type(Type::INT),
-            "UINT" => TokenType::Type(Type::UINT),
-            "ULONG" => TokenType::Type(Type::ULONG),
+            "UNSIGNEDINTEGER" => TokenType::Type(Type::UINT),
+            "UNSIGNEDLONG" => TokenType::Type(Type::ULONG),
 
             "AND" => TokenType::Operator(Operator::AND),
             "OR" => TokenType::Operator(Operator::OR),
             "FALSE" | "TRUE" => TokenType::Literal(Literal::BOOLEAN),
 
-            _ => TokenType::Literal(Literal::VARIABLE),
+            _ => TokenType::ID,
         }
     }
 
     fn get_token(&mut self) -> Option<Token> {
-        self._peek(0)?;
-
         self.buildup.clear();
 
         let start_pos = self.pos;
         let mut error = None;
-        let token_type = match self.seek() {
+        let token_type = match self.next()? {
             '\n' | ';' => TokenType::NEWLINE,
-            ' ' => TokenType::SPACE,
             c if c.is_alphabetic() || c == '_' => loop {
-                match self.peek() {
-                    '_' | '$' | '#' | '%' | '-' => {
-                        self.seek();
+                match self.chars.peek() {
+                    Some('_' | '$' | '#' | '%' | '-') => {
+                        self.next();
                     }
-                    c if c.is_alphanumeric() => {
-                        self.seek();
+                    Some(c) if c.is_alphanumeric() => {
+                        self.next();
                     }
-                    '!' => {
-                        self.seek();
+                    Some('!') => {
+                        self.next();
                         break TokenType::Literal(Literal::ENUM);
                     }
                     _ => break self.keyword_to_token(&self.buildup.to_uppercase()),
                 };
             },
-            char @ ('.' | '0'..='9') => {
+            c @ ('.' | '0'..='9') => {
                 enum Stage {
                     Number,
                     Fraction,
@@ -170,36 +182,78 @@ impl FileTokenizer {
                 let mut stage = Stage::Number;
 
                 let mut token_type = None;
-                if char == '.' {
-                    token_type = match self.peek() {
-                        '0'..='9' => {
+                if c == '.' {
+                    token_type = match self.chars.peek() {
+                        Some('0'..='9') => {
                             stage = Stage::Fraction;
                             None
                         }
-                        // '.' => {
-                        //     if self.peek_nth(1) == Ok('.') {
-                        //         // These will never return EOF
-                        //         self.seek()?;
-                        //         self.seek()?;
-                        //         Some(TokenType::Symbol(Symbol::DOTDOTDOT))
-                        //     } else {
-                        //         None
-                        //     }
-                        // }
+                        Some('.') => {
+                            if self.chars.peek_nth(1) == Some(&'.') {
+                                self.next();
+                                self.next();
+                                Some(TokenType::Symbol(Symbol::DOTDOTDOT))
+                            } else {
+                                None
+                            }
+                        }
                         _ => Some(TokenType::Symbol(Symbol::DOT)),
+                    }
+                } else {
+                    let next = |this: &mut FileTokenizer, n: usize| {
+                        *this.chars.peek_nth(n).unwrap_or(&'\0')
+                    };
+                    if ('0'..='9').contains(&next(self, 0))
+                        && ('0'..='9').contains(&next(self, 1))
+                        && ('0'..='9').contains(&next(self, 2))
+                        && '-' == next(self, 3)
+                        && ('0'..='9').contains(&next(self, 4))
+                        && ('0'..='9').contains(&next(self, 5))
+                        && '-' == next(self, 6)
+                        && ('0'..='9').contains(&next(self, 7))
+                        && ('0'..='9').contains(&next(self, 8))
+                    {
+                        for _ in 0..=8 {
+                            self.next();
+                        }
+                        token_type = Some(TokenType::Literal(Literal::DATE))
+                    } else if ('0'..='9').contains(&next(self, 0))
+                        && ':' == next(self, 1)
+                        && ('0'..='9').contains(&next(self, 2))
+                        && ('0'..='9').contains(&next(self, 3))
+                        && ':' == next(self, 4)
+                        && ('0'..='9').contains(&next(self, 5))
+                        && ('0'..='9').contains(&next(self, 6))
+                    {
+                        for _ in 0..=6 {
+                            self.next();
+                        }
+
+                        if self.chars.peek() == Some(&'.') {
+                            self.next();
+                            loop {
+                                match self.chars.peek() {
+                                    Some('0'..='9') => {
+                                        self.next();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
+
+                        token_type = Some(TokenType::Literal(Literal::TIME))
                     }
                 }
 
                 match token_type {
-                    // TODO date/time
                     Some(token_type) => token_type,
                     None => loop {
-                        match self.peek() {
-                            '0'..='9' => {
-                                self.seek();
+                        match self.chars.peek() {
+                            Some('0'..='9') => {
+                                self.next();
                             }
-                            '.' => {
-                                self.seek();
+                            Some('.') => {
+                                self.next();
                                 match stage {
                                     Stage::Number => stage = Stage::Fraction,
                                     Stage::Fraction => error = Some("Multiple Dots inside Number"),
@@ -208,19 +262,19 @@ impl FileTokenizer {
                                     }
                                 }
                             }
-                            'e' | 'E' => {
+                            Some('e' | 'E') => {
                                 match stage {
                                     Stage::Number | Stage::Fraction => stage = Stage::Exponent,
                                     Stage::Exponent => {
                                         error = Some("Multiple exponents inside Number")
                                     }
                                 }
-                                match self.peek() {
-                                    '-' | '+' => {
-                                        self.seek();
-                                        match self.peek() {
-                                            '0'..='9' => {
-                                                self.seek();
+                                match self.chars.peek() {
+                                    Some('-' | '+') => {
+                                        self.next();
+                                        match self.chars.peek() {
+                                            Some('0'..='9') => {
+                                                self.next();
                                             }
                                             _ => error = Some("Exponent Missing"),
                                         }
@@ -238,106 +292,125 @@ impl FileTokenizer {
                 }
             }
             del @ ('\'' | '"') => loop {
-                match self.peek() {
-                    char @ ('\'' | '"') => {
-                        self.seek();
-                        if del == char {
+                match self.chars.peek() {
+                    Some(&c @ ('\'' | '"')) => {
+                        self.next();
+                        if del == c {
                             break TokenType::Literal(Literal::STRING);
                         }
                     }
-                    '~' => match self.peek() {
-                        '\n' => {}
+                    Some('~') => match self.chars.peek() {
+                        Some('\n') => {}
                         _ => {
-                            self.seek();
+                            self.next();
                         }
                     },
-                    '\n' => {
+                    Some('&') => {
+                        self.next();
+                        loop {
+                            match self.chars.peek()? {
+                                ' ' | '\t' | '\r' => {
+                                    self.next();
+                                }
+                                '\n' => {
+                                    self.next();
+                                    break;
+                                }
+                                _ => break,
+                            };
+                        }
+                    }
+                    Some('\n') => {
                         error = Some("String not closed");
                         break TokenType::Literal(Literal::STRING);
                     }
                     _ => {
-                        self.seek();
+                        self.next();
                     }
                 }
             },
-            '/' => match self.peek() {
-                '/' => {
-                    self.seek();
+            '/' => match self.chars.peek() {
+                Some('/') => {
+                    self.next();
                     loop {
-                        match self.seek() {
-                            '\n' => break,
+                        match self.next() {
+                            Some('\n') | None => break,
                             _ => {}
                         }
                     }
                     TokenType::COMMENT
                 }
-                '*' => {
-                    self.seek();
+                Some('*') => {
+                    self.next();
                     loop {
-                        match self.seek() {
-                            '*' => {
-                                if self.seek() == '/' {
+                        match self.next() {
+                            Some('*') => {
+                                if self.next() == Some('/') {
                                     break;
                                 }
                             }
-                            '\n' => {
-                                if self._peek(0) == None {
-                                    error = Some("Multiline comment not closed");
-                                }
-                            }
+                            None => error = Some("Multiline comment not closed"),
                             _ => {}
                         }
                     }
                     TokenType::COMMENT
                 }
-                '=' => {
-                    self.seek();
+                Some('=') => {
+                    self.next();
                     TokenType::SpecialAssignment(SpecialAssignment::DIVEQ)
                 }
                 _ => TokenType::Operator(Operator::DIV),
             },
-            '*' => match self.peek() {
-                '=' => {
-                    self.seek();
+            '*' => match self.chars.peek() {
+                Some('=') => {
+                    self.next();
                     TokenType::SpecialAssignment(SpecialAssignment::MULTEQ)
                 }
                 _ => TokenType::Operator(Operator::MULT),
             },
-            '+' => match self.peek() {
-                '=' => {
-                    self.seek();
+            '+' => match self.chars.peek() {
+                Some('=') => {
+                    self.next();
                     TokenType::SpecialAssignment(SpecialAssignment::PLUSEQ)
+                }
+                Some('+') => {
+                    self.next();
+                    TokenType::Symbol(Symbol::PLUSPLUS)
                 }
                 _ => TokenType::Operator(Operator::PLUS),
             },
-            '-' => match self.peek() {
-                '=' => {
-                    self.seek();
+            '-' => match self.chars.peek() {
+                Some('=') => {
+                    self.next();
                     TokenType::SpecialAssignment(SpecialAssignment::MINUSEQ)
+                }
+                Some('-') => {
+                    self.next();
+                    TokenType::Symbol(Symbol::MINUSMINUS)
                 }
                 _ => TokenType::Operator(Operator::MINUS),
             },
-            '<' => match self.peek() {
-                '=' => {
-                    self.seek();
+            '<' => match self.chars.peek() {
+                Some('=') => {
+                    self.next();
                     TokenType::Operator(Operator::LTE)
                 }
-                '>' => {
-                    self.seek();
+                Some('>') => {
+                    self.next();
                     TokenType::Operator(Operator::GTLT)
                 }
                 _ => TokenType::Operator(Operator::LT),
             },
-            '>' => match self.peek() {
-                '=' => {
-                    self.seek();
+            '>' => match self.chars.peek() {
+                Some('=') => {
+                    self.next();
                     TokenType::Operator(Operator::GTE)
                 }
                 _ => TokenType::Operator(Operator::GT),
             },
-            ':' => match self.peek() {
-                ':' => {
-                    self.seek();
+            ':' => match self.chars.peek() {
+                Some(':') => {
+                    self.next();
                     TokenType::Symbol(Symbol::COLONCOLON)
                 }
                 _ => TokenType::Symbol(Symbol::COLON),
@@ -373,14 +446,37 @@ impl Iterator for FileTokenizer {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.next.is_some() {
+            return self.next.take();
+        }
+
         loop {
-            match self.get_token() {
-                Some(Token {
-                    token_type: TokenType::SPACE,
-                    ..
-                }) => {}
-                token => break token,
-            }
+            self.skip_white_spaces()?;
+            let token = self.get_token()?;
+
+            let previous = replace(&mut self.previous, token.clone());
+
+            match (previous.token_type, token.token_type) {
+                (_, TokenType::COMMENT) => continue,
+                (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
+
+                // Because there is SQL OPEN and PB open(aw_window)
+                (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => continue,
+                (TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE), cur) => {
+                    self.next = Some(token);
+
+                    break match cur {
+                        TokenType::Symbol(Symbol::LBRACE) => Some(Token {
+                            token_type: TokenType::ID,
+                            ..previous
+                        }),
+                        _ => Some(previous),
+                    };
+                }
+                _ => {}
+            };
+
+            break Some(token);
         }
     }
 }

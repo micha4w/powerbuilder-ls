@@ -49,7 +49,7 @@ body_rule
    | event_body
    ;
 
-forward_decl
+forward_declt
    : FORWARD (datatype_decl | variable_decl | global_variables_decl)+ END FORWARD
    ;
 
