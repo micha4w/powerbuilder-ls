@@ -46,11 +46,11 @@ impl Class {
 }
 
 pub trait Lintable {
-    fn lint(&self, lsp: &mut LSPData, file: &mut FileData);
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData);
 }
 
 impl Lintable for parser::LValue {
-    fn lint(&self, lsp: &mut LSPData, file: &mut FileData) {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData) {
         match &self.lvalue_type {
             parser::LValueType::Super => todo!(),
             parser::LValueType::Variable(var) => todo!("Check if variable exists"),
@@ -93,7 +93,7 @@ impl Lintable for parser::LValue {
 
 impl Lintable for parser::Expression {
     // TODO set the types during linting
-    fn lint(&self, lsp: &mut LSPData, file: &mut FileData) {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData) {
         match &self.expression_type {
             parser::ExpressionType::Literal(_) => {}
             parser::ExpressionType::ArrayLiteral(expressions) => {
@@ -210,7 +210,7 @@ impl Lintable for parser::Expression {
 }
 
 impl Lintable for parser::Statement {
-    fn lint(&self, lsp: &mut LSPData, file: &mut FileData) {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData) {
         match &self.statement_type {
             parser::StatementType::IncrementDecrement(inc_dec) => {
                 if !inc_dec.value.get_type().is_numeric() {
@@ -381,7 +381,6 @@ impl FileData {
 }
 
 struct File {
-    lsp: Weak<RefCell<LSPData>>,
     data: FileData,
 
     top_levels: Vec<parser::TopLevel>,
@@ -390,9 +389,8 @@ struct File {
 }
 
 impl File {
-    fn new(data: Weak<RefCell<LSPData>>, path: PathBuf, shallow: bool) -> anyhow::Result<File> {
+    fn new(path: PathBuf, shallow: bool) -> anyhow::Result<File> {
         Ok(File {
-            lsp: data,
             data: FileData {
                 classes: Vec::new(),
 
@@ -411,7 +409,7 @@ impl File {
         })
     }
 
-    fn lint(&mut self) {
+    fn lint(&mut self, lsp: &mut LSP) {
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
                 parser::TopLevelType::DatatypeDecl(scope, vars) => {
@@ -445,13 +443,7 @@ impl File {
                 parser::TopLevelType::FunctionForwardDecl => todo!(),
                 parser::TopLevelType::FunctionsForwardDecl(functions) => {
                     for function in functions {
-                        match self
-                            .lsp
-                            .upgrade()
-                            .unwrap()
-                            .borrow_mut()
-                            .find_function(function)
-                        {
+                        match lsp.find_function(function) {
                             Some((usage, _)) => {
                                 if let Some(declaration) = usage.declaration {
                                     self.data.diagnostics.push(parser::Diagnostic {
@@ -533,7 +525,10 @@ impl File {
                     // }
 
                     statements.iter().for_each(|statement| {
-                        statement.lint(&mut self.lsp.upgrade().unwrap().borrow_mut(), &mut self.data)
+                        statement.lint(
+                            lsp,
+                            &mut self.data,
+                        )
                     });
                 }
                 parser::TopLevelType::OnBody(_, _) => {
@@ -581,7 +576,7 @@ pub struct LSPOptions {
     root: PathBuf,
 }
 
-struct LSPData {
+pub struct LSP {
     files: Vec<File>,
     global_variables: Vec<(Usage, Rc<parser::Variable>)>,
     global_functions: Vec<(Usage, Rc<parser::Function>)>,
@@ -589,7 +584,7 @@ struct LSPData {
     options: LSPOptions,
 }
 
-impl LSPData {
+impl LSP {
     // tODO find global function
     fn find_function(
         &mut self,
@@ -606,45 +601,32 @@ impl LSPData {
         //     )
         // })
     }
-}
 
-pub struct LSP {
-    data: Rc<RefCell<LSPData>>,
-}
-
-impl LSP {
     pub fn new() -> anyhow::Result<LSP> {
         Ok(LSP {
-            data: Rc::new(
-                LSPData {
-                    files: Vec::new(),
-                    global_variables: Vec::new(),
-                    global_functions: Vec::new(),
+            files: Vec::new(),
+            global_variables: Vec::new(),
+            global_functions: Vec::new(),
 
-                    options: LSPOptions {
-                        root: current_dir()?,
-                    },
-                }
-                .into(),
-            ),
+            options: LSPOptions {
+                root: current_dir()?,
+            },
         })
     }
 
     pub fn add_file(&mut self, path: PathBuf, shallow: bool) -> anyhow::Result<()> {
-        let mut data = self.data.borrow_mut();
-
-        match data.files.iter_mut().find(|file| file.path == path) {
+        match self.files.iter_mut().find(|file| file.path == path) {
             Some(file) => {
                 if file.shallow {
                     file.shallow = false;
-                    file.lint();
+                    file.lint(self);
                 }
             }
             None => {
-                let file = File::new(Rc::downgrade(&self.data), path, shallow)?;
+                let mut file = File::new(path, shallow)?;
+                file.lint(self);
 
-                data.files.push(file);
-                data.files.last_mut().unwrap().lint();
+                self.files.push(file);
             }
         }
 
