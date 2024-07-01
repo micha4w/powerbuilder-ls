@@ -92,6 +92,50 @@ pub enum AccessType {
     SYSTEMWRITE,
 }
 
+impl AccessType {
+    pub fn is_read(&self) -> bool {
+        match self {
+            AccessType::PUBLIC
+            | AccessType::PRIVATE
+            | AccessType::PROTECTED
+            | AccessType::PRIVATEWRITE
+            | AccessType::PROTECTEDWRITE
+            | AccessType::SYSTEMWRITE => false,
+
+            AccessType::SYSTEMREAD | AccessType::PRIVATEREAD | AccessType::PROTECTEDREAD => true,
+        }
+    }
+
+    pub fn is_write(&self) -> bool {
+        match self {
+            AccessType::PUBLIC
+            | AccessType::PRIVATE
+            | AccessType::PROTECTED
+            | AccessType::PRIVATEREAD
+            | AccessType::PROTECTEDREAD
+            | AccessType::SYSTEMREAD => false,
+
+            AccessType::SYSTEMWRITE | AccessType::PRIVATEWRITE | AccessType::PROTECTEDWRITE => true,
+        }
+    }
+
+    pub fn is_general(&self) -> bool {
+        !self.is_write() && !self.is_read()
+    }
+
+    pub fn strictness(&self) -> u8 {
+        match self {
+            AccessType::PUBLIC => 0,
+
+            AccessType::PROTECTED | AccessType::PROTECTEDREAD | AccessType::PROTECTEDWRITE => 1,
+
+            AccessType::PRIVATE | AccessType::PRIVATEWRITE | AccessType::PRIVATEREAD => 2,
+
+            AccessType::SYSTEMREAD | AccessType::SYSTEMWRITE => 3,
+        }
+    }
+}
+
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum Keyword {
     NOT,
@@ -215,7 +259,7 @@ pub enum Keyword {
     _DEBUG,
     ENUMERATED,
     EXTERNAL,
-    NATIVE
+    NATIVE,
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]

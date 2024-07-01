@@ -142,10 +142,7 @@ impl Parser<'_> {
                 Some(_) => {
                     let token = self.expect(TokenType::ID)?;
                     range.end = token.range.end;
-                    DataTypeType::Complex(
-                        Some(token.content),
-                        self.next()?.content,
-                    )
+                    DataTypeType::Complex(Some(token.content), self.next()?.content)
                 }
                 None => DataTypeType::Complex(None, token.content),
             },
@@ -163,7 +160,10 @@ impl Parser<'_> {
             TokenType::Symbol(tokens::Symbol::LPAREN) => {
                 self.next();
                 let expression = self.parse_expression()?;
-                end = self.expect(TokenType::Symbol(tokens::Symbol::RPAREN))?.range.end;
+                end = self
+                    .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
+                    .range
+                    .end;
 
                 ExpressionType::Parenthesized(Box::new(expression))
             }
@@ -185,7 +185,10 @@ impl Parser<'_> {
                         }
                     }
                 }
-                end = self.expect(TokenType::Symbol(tokens::Symbol::RCURLY))?.range.end;
+                end = self
+                    .expect(TokenType::Symbol(tokens::Symbol::RCURLY))?
+                    .range
+                    .end;
 
                 ExpressionType::ArrayLiteral(expressions)
             }
@@ -360,7 +363,7 @@ impl Parser<'_> {
                     }
 
                     let func = Rc::new(Function {
-                        returns: DataType{
+                        returns: DataType {
                             data_type: DataTypeType::Unknown,
                             range: Range::default(),
                         },
@@ -390,8 +393,11 @@ impl Parser<'_> {
                 }
                 _ => {
                     let var = Rc::new(Variable {
-                        access: None,
-                        data_type: DataType{
+                        access: Access {
+                            read: None,
+                            write: None,
+                        },
+                        data_type: DataType {
                             data_type: DataTypeType::Unknown,
                             range: Range::default(),
                         },
@@ -449,7 +455,7 @@ impl Parser<'_> {
             }
             TokenType::Keyword(tokens::Keyword::SUBROUTINE) => {
                 self.next()?;
-                DataType{
+                DataType {
                     data_type: DataTypeType::Void,
                     range: Range::default(),
                 }
@@ -471,7 +477,10 @@ impl Parser<'_> {
                 }
                 TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
                     self.next()?;
-                    end = self.expect(TokenType::Symbol(tokens::Symbol::RPAREN))?.range.end;
+                    end = self
+                        .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
+                        .range
+                        .end;
                     break;
                 }
                 _ => {}
@@ -496,6 +505,16 @@ impl Parser<'_> {
             }
         }
 
+        match self.peek()?.token_type {
+            TokenType::Keyword(tokens::Keyword::RPCFUNC) => {
+                self.next();
+            }
+            TokenType::Keyword(tokens::Keyword::LIBRARY) => {
+                self.next();
+                self.expect(TokenType::Literal(tokens::Literal::STRING));
+            }
+            _ => {}
+        }
         self.expect(TokenType::NEWLINE).split_eof()?;
 
         Ok(Function {
@@ -511,12 +530,85 @@ impl Parser<'_> {
     fn parse_variable_declaration(&mut self) -> ParseResult<Statement> {
         let start = self.peek()?.range.start;
 
-        let access = if let TokenType::AccessType(access) = self.peek()?.token_type {
-            self.next();
-            Some(access)
-        } else {
-            None
+        let base = match self.peek()?.token_type {
+            TokenType::AccessType(
+                access_type @ (tokens::AccessType::PUBLIC
+                | tokens::AccessType::PRIVATE
+                | tokens::AccessType::PROTECTED),
+            ) => {
+                self.next();
+                Some(access_type)
+            }
+            _ => None,
         };
+
+        let mut access = Access {
+            read: base,
+            write: base,
+        };
+
+        loop {
+            if let TokenType::AccessType(access_type) = self.peek()?.token_type {
+                let token = self.next()?;
+                match access_type {
+                    tokens::AccessType::PUBLIC
+                    | tokens::AccessType::PRIVATE
+                    | tokens::AccessType::PROTECTED => {
+                        self.error(&"Only one Access Right allowed".into(), &token.range);
+                    }
+                    tokens::AccessType::PRIVATEWRITE
+                    | tokens::AccessType::PROTECTEDWRITE
+                    | tokens::AccessType::SYSTEMWRITE => {
+                        if let Some(write) = &mut access.write {
+                            if write.is_general() {
+                                if access_type.strictness() < write.strictness() {
+                                    *write = access_type;
+                                } else {
+                                    self.error(
+                                        &"Write Access needs to be less Strict than general Access"
+                                            .into(),
+                                        &token.range,
+                                    );
+                                }
+                            } else {
+                                self.error(
+                                    &"Cannot supply more than one Write Access".into(),
+                                    &token.range,
+                                );
+                            }
+                        } else {
+                            access.write = Some(access_type);
+                        }
+                    }
+                    tokens::AccessType::PRIVATEREAD
+                    | tokens::AccessType::PROTECTEDREAD
+                    | tokens::AccessType::SYSTEMREAD => {
+                        if let Some(read) = &mut access.read {
+                            if read.is_general() {
+                                if access_type.strictness() < read.strictness() {
+                                    *read = access_type;
+                                } else {
+                                    self.error(
+                                        &"Read Access needs to be less Strict than general Access"
+                                            .into(),
+                                        &token.range,
+                                    );
+                                }
+                            } else {
+                                self.error(
+                                    &"Cannot supply more than one Read Access".into(),
+                                    &token.range,
+                                );
+                            }
+                        } else {
+                            access.read = Some(access_type);
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
 
         let constant = self
             .optional(TokenType::Keyword(tokens::Keyword::CONSTANT))?
@@ -527,7 +619,10 @@ impl Parser<'_> {
         let name = self.expect(TokenType::ID)?;
 
         let mut end = name.range.end;
-        if self.optional(TokenType::Symbol(tokens::Symbol::LBRACE))?.is_some() {
+        if self
+            .optional(TokenType::Symbol(tokens::Symbol::LBRACE))?
+            .is_some()
+        {
             let mut first = true;
             loop {
                 match self.peek()?.token_type {
@@ -544,19 +639,25 @@ impl Parser<'_> {
                 first = false;
 
                 self.expect(TokenType::Literal(tokens::Literal::NUMBER))?;
-                if self.optional(TokenType::Keyword(tokens::Keyword::TO))?.is_some() {
+                if self
+                    .optional(TokenType::Keyword(tokens::Keyword::TO))?
+                    .is_some()
+                {
                     self.expect(TokenType::Literal(tokens::Literal::NUMBER))?;
                 }
             }
 
-            data_type = DataType{
+            data_type = DataType {
                 range: data_type.range,
                 data_type: DataTypeType::Array(Box::new(data_type)),
             }
         }
 
         let expression;
-        if self.optional(TokenType::Operator(tokens::Operator::EQ))?.is_some() {
+        if self
+            .optional(TokenType::Operator(tokens::Operator::EQ))?
+            .is_some()
+        {
             let ex = self.parse_expression()?;
             end = ex.range.end;
             expression = Some(ex);
@@ -611,58 +712,57 @@ impl Parser<'_> {
                 _ => {
                     let expression = self.parse_expression()?;
                     match self.peek()?.token_type {
-                        TokenType::Operator(tokens::Operator::EQ) | TokenType::SpecialAssignment(_) => {
-                            match expression.expression_type {
-                                ExpressionType::LValue(lvalue) => {
-                                    let operator = self.next()?;
-                                    let value = self.parse_expression()?;
-                                    self.expect(TokenType::NEWLINE)?;
+                        TokenType::Operator(tokens::Operator::EQ)
+                        | TokenType::SpecialAssignment(_) => match expression.expression_type {
+                            ExpressionType::LValue(lvalue) => {
+                                let operator = self.next()?;
+                                let value = self.parse_expression()?;
+                                self.expect(TokenType::NEWLINE)?;
 
-                                    Ok(Statement {
-                                        range: Range {
-                                            start: expression.range.start,
-                                            end: value.range.end,
-                                        },
-                                        statement_type: StatementType::Assignment(lvalue, value),
-                                    })
-                                }
-                                _ => {
-                                    return self.fatal(
-                                        &"Trying to assign to a non LValue".to_string(),
-                                        &expression.range,
-                                        true,
-                                    )
-                                }
+                                Ok(Statement {
+                                    range: Range {
+                                        start: expression.range.start,
+                                        end: value.range.end,
+                                    },
+                                    statement_type: StatementType::Assignment(lvalue, value),
+                                })
                             }
-                        }
-                        TokenType::Symbol(operator @ (tokens::Symbol::PLUSPLUS | tokens::Symbol::MINUSMINUS)) => {
-                            match expression.expression_type {
-                                ExpressionType::LValue(lvalue) => {
-                                    let token = self.next()?;
-                                    self.expect(TokenType::NEWLINE)?;
+                            _ => {
+                                return self.fatal(
+                                    &"Trying to assign to a non LValue".to_string(),
+                                    &expression.range,
+                                    true,
+                                )
+                            }
+                        },
+                        TokenType::Symbol(
+                            operator @ (tokens::Symbol::PLUSPLUS | tokens::Symbol::MINUSMINUS),
+                        ) => match expression.expression_type {
+                            ExpressionType::LValue(lvalue) => {
+                                let token = self.next()?;
+                                self.expect(TokenType::NEWLINE)?;
 
-                                    Ok(Statement {
-                                        range: Range {
-                                            start: lvalue.range.start,
-                                            end: token.range.end,
+                                Ok(Statement {
+                                    range: Range {
+                                        start: lvalue.range.start,
+                                        end: token.range.end,
+                                    },
+                                    statement_type: StatementType::IncrementDecrement(
+                                        IncrementDecrementStatement {
+                                            value: lvalue,
+                                            operator,
                                         },
-                                        statement_type: StatementType::IncrementDecrement(
-                                            IncrementDecrementStatement {
-                                                value: lvalue,
-                                                operator,
-                                            },
-                                        ),
-                                    })
-                                }
-                                _ => {
-                                    return self.fatal(
-                                        &"Trying to assign to a non LValue".to_string(),
-                                        &expression.range,
-                                        true,
-                                    )
-                                }
+                                    ),
+                                })
                             }
-                        }
+                            _ => {
+                                return self.fatal(
+                                    &"Trying to assign to a non LValue".to_string(),
+                                    &expression.range,
+                                    true,
+                                )
+                            }
+                        },
                         _ => Ok(Statement {
                             range: expression.range,
                             statement_type: StatementType::Expression(expression),
@@ -775,14 +875,20 @@ impl Parser<'_> {
     }
 
     fn parse_on(&mut self) -> ParseResult<TopLevel> {
-        let start = self.expect(TokenType::Keyword(tokens::Keyword::ON))?.range.start;
+        let start = self
+            .expect(TokenType::Keyword(tokens::Keyword::ON))?
+            .range
+            .start;
 
         self.expect(TokenType::ID)?;
         self.expect(TokenType::Symbol(tokens::Symbol::DOT))?;
         let token = self.next()?;
         match token.token_type {
             TokenType::Keyword(
-                tokens::Keyword::OPEN | tokens::Keyword::CLOSE | tokens::Keyword::CREATE | tokens::Keyword::DESTROY,
+                tokens::Keyword::OPEN
+                | tokens::Keyword::CLOSE
+                | tokens::Keyword::CREATE
+                | tokens::Keyword::DESTROY,
             ) => {
                 self.expect(TokenType::NEWLINE).split_eof()?;
             }
@@ -933,19 +1039,30 @@ impl Parser<'_> {
                 TokenType::AccessType(new_access)
                     if self.peek_nth(1)?.token_type == TokenType::Symbol(tokens::Symbol::COLON) =>
                 {
-                    access = Some(new_access);
+                    let token = self.next()?;
 
-                    self.next()?;
+                    if new_access.is_general() {
+                        access = Some(new_access);
+                    } else {
+                        self.error(
+                            &"Access Section must be a General Access Type".into(),
+                            &token.range,
+                        );
+                    }
+
                     self.next()?;
                     self.expect(TokenType::NEWLINE)?;
                 }
                 _ => {
                     if let Ok(statement) = self.parse_variable_declaration().split_eof()? {
                         if let StatementType::Declaration(mut var) = statement.statement_type {
-                            if var.access.is_none() {
-                                var.access = access;
-                            }
-                            declarations.push(Rc::new(var));
+                            declarations.push(Rc::new(Variable {
+                                access: Access {
+                                    read: var.access.read.or(access),
+                                    write: var.access.write.or(access),
+                                },
+                                ..var
+                            }));
                         } else {
                             unreachable!();
                         }
@@ -1027,7 +1144,9 @@ impl Parser<'_> {
     fn parse_top_level(&mut self) -> ParseResult<TopLevel> {
         match self.peek()?.token_type {
             TokenType::Keyword(tokens::Keyword::FORWARD) => match self.peek_nth(1)?.token_type {
-                TokenType::Keyword(tokens::Keyword::PROTOTYPES) => self.parse_functions_forward_decl(),
+                TokenType::Keyword(tokens::Keyword::PROTOTYPES) => {
+                    self.parse_functions_forward_decl()
+                }
                 TokenType::NEWLINE => self.parse_forward_decl(),
                 _ => {
                     let range = self.peek()?.range;
@@ -1037,7 +1156,8 @@ impl Parser<'_> {
             TokenType::AccessType(_) => self.parse_function(),
             TokenType::Keyword(tokens::Keyword::ON) => self.parse_on(),
             TokenType::Keyword(tokens::Keyword::TYPE) => {
-                if let TokenType::Keyword(tokens::Keyword::VARIABLES) = self.peek_nth(1)?.token_type {
+                if let TokenType::Keyword(tokens::Keyword::VARIABLES) = self.peek_nth(1)?.token_type
+                {
                     self.parse_type_variables_decl()
                 } else {
                     self.parse_datatype_decl()

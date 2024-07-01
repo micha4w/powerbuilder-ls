@@ -37,7 +37,7 @@ pub enum DataTypeType {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DataType {
     pub data_type: DataTypeType,
-    pub range: Range
+    pub range: Range,
 }
 
 impl DataTypeType {
@@ -72,9 +72,15 @@ impl DataTypeType {
 }
 
 #[derive(Debug, Clone)]
+pub struct Access {
+    pub read: Option<tokens::AccessType>,
+    pub write: Option<tokens::AccessType>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Variable {
     pub constant: bool,
-    pub access: Option<tokens::AccessType>,
+    pub access: Access,
     pub data_type: DataType,
     pub name: String,
     pub initial_value: Option<Expression>,
@@ -93,6 +99,28 @@ pub struct Function {
     pub arguments: Vec<(DataType, String)>,
 
     pub range: Range,
+}
+
+impl Function {
+    pub fn is_callable(
+        &self,
+        other: &Function,
+        min_access: &tokens::AccessType,
+    ) -> bool {
+        self.name == other.name
+            && min_access.strictness() >= self.access.map(|access| access.strictness()).unwrap_or(0)
+            && self
+                .returns
+                .data_type
+                .is_convertible(&other.returns.data_type)
+            && self.arguments.iter().zip(other.arguments.iter()).all(
+                |((self_type, _), (other_type, _))| {
+                    other_type
+                        .data_type
+                        .is_convertible(&self_type.data_type)
+                },
+            )
+    }
 }
 
 #[derive(Debug)]
@@ -174,21 +202,19 @@ impl Expression {
                 | tokens::Operator::GTLT
                 | tokens::Operator::OR
                 | tokens::Operator::AND => DataTypeType::Primitive(tokens::Type::BOOLEAN),
-                tokens::Operator::PLUS if first.get_type() == DataTypeType::Primitive(tokens::Type::STRING) => {
+                tokens::Operator::PLUS
+                    if first.get_type() == DataTypeType::Primitive(tokens::Type::STRING) =>
+                {
                     DataTypeType::Primitive(tokens::Type::STRING)
                 }
                 _ => first.get_type(),
             },
             ExpressionType::Create(class) => DataTypeType::Complex(None, class.clone()),
-            ExpressionType::CreateUsing(expr) => {
-                match expr.expression_type {
-                    ExpressionType::Literal(tokens::Literal::STRING) => {
-                        todo!("Read out the variable")
-                    }
-                    _ => {
-                        DataTypeType::Complex(None, "powerobject".to_owned())
-                    }
+            ExpressionType::CreateUsing(expr) => match expr.expression_type {
+                ExpressionType::Literal(tokens::Literal::STRING) => {
+                    todo!("Read out the variable")
                 }
+                _ => DataTypeType::Complex(None, "powerobject".to_owned()),
             },
             ExpressionType::BooleanNot(_) => DataTypeType::Primitive(tokens::Type::BOOLEAN),
             ExpressionType::Parenthesized(paren) => paren.get_type(),
