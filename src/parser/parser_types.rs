@@ -25,7 +25,7 @@ impl<T> KeepEOF<T> for ParseResult<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum DataTypeType {
+pub enum DataType {
     Primitive(tokens::Type),
     Complex(Option<String>, String),
     Enum(String), // TODO
@@ -34,16 +34,10 @@ pub enum DataTypeType {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct DataType {
-    pub data_type: DataTypeType,
-    pub range: Range,
-}
-
-impl DataTypeType {
+impl DataType {
     pub fn is_numeric(&self) -> bool {
         match self {
-            DataTypeType::Primitive(
+            DataType::Primitive(
                 tokens::Type::ANY
                 | tokens::Type::INT
                 | tokens::Type::UINT
@@ -55,16 +49,43 @@ impl DataTypeType {
                 | tokens::Type::DOUBLE
                 | tokens::Type::DECIMAL,
             ) => true,
-            DataTypeType::Unknown => true,
+            DataType::Unknown => true,
             _ => false,
         }
     }
 
-    pub fn is_convertible(&self, other: &DataTypeType) -> bool {
+    pub fn numeric_precedence(&self) -> Option<u8> {
+        match self {
+            DataType::Primitive(primitive) => match primitive {
+                tokens::Type::INT => Some(0),
+                tokens::Type::UINT => Some(1),
+                tokens::Type::LONG => Some(2),
+                tokens::Type::ULONG => Some(3),
+                tokens::Type::LONGLONG => Some(4),
+                tokens::Type::LONGPTR => Some(5),
+                tokens::Type::REAL => Some(6),
+                tokens::Type::DOUBLE => Some(7),
+                tokens::Type::DECIMAL => Some(8),
+                tokens::Type::ANY => Some(9),
+                tokens::Type::BLOB
+                | tokens::Type::BOOLEAN
+                | tokens::Type::BYTE
+                | tokens::Type::CHAR
+                | tokens::Type::DATE
+                | tokens::Type::DATETIME
+                | tokens::Type::STRING
+                | tokens::Type::TIME => None,
+            },
+            DataType::Unknown => Some(10),
+            _ => None,
+        }
+    }
+
+    pub fn is_convertible(&self, other: &DataType) -> bool {
         match (self, other) {
-            (DataTypeType::Unknown, _) | (_, DataTypeType::Unknown) => true,
-            (DataTypeType::Array(self_type), DataTypeType::Array(other_type)) => {
-                self_type.data_type.is_convertible(&other_type.data_type)
+            (DataType::Unknown, _) | (_, DataType::Unknown) => true,
+            (DataType::Array(self_type), DataType::Array(other_type)) => {
+                self_type.is_convertible(&other_type)
             }
             _ => self == other || (self.is_numeric() && other.is_numeric()),
         }
@@ -102,24 +123,28 @@ pub struct Function {
 }
 
 impl Function {
-    pub fn is_callable(
-        &self,
-        other: &Function,
-        min_access: &tokens::AccessType,
-    ) -> bool {
+    pub fn equals(&self, other: &Function) -> bool {
+        self.returns == other.returns && self.conflicts(other)
+    }
+
+    pub fn conflicts(&self, other: &Function) -> bool {
+        self.name == other.name
+            && self
+                .arguments
+                .iter()
+                .zip(other.arguments.iter())
+                .all(|((self_type, _), (other_type, _))| other_type == self_type)
+    }
+
+    pub fn is_callable(&self, other: &Function, min_access: &tokens::AccessType) -> bool {
         self.name == other.name
             && min_access.strictness() >= self.access.map(|access| access.strictness()).unwrap_or(0)
+            && self.returns.is_convertible(&other.returns)
             && self
-                .returns
-                .data_type
-                .is_convertible(&other.returns.data_type)
-            && self.arguments.iter().zip(other.arguments.iter()).all(
-                |((self_type, _), (other_type, _))| {
-                    other_type
-                        .data_type
-                        .is_convertible(&self_type.data_type)
-                },
-            )
+                .arguments
+                .iter()
+                .zip(other.arguments.iter())
+                .all(|((self_type, _), (other_type, _))| other_type.is_convertible(&self_type))
     }
 }
 
@@ -149,19 +174,19 @@ pub struct LValue {
 }
 
 impl LValue {
-    pub fn get_type(&self) -> DataTypeType {
-        match &self.lvalue_type {
-            LValueType::Super => DataTypeType::Unknown,
-            LValueType::Variable(var) => var.data_type.data_type.clone(),
-            LValueType::Function(func, _) => func.returns.data_type.clone(),
-            LValueType::Method(_, func, _) => func.returns.data_type.clone(),
-            LValueType::Member(_, var) => var.data_type.data_type.clone(),
-            LValueType::Index(var, _) => match var.get_type() {
-                DataTypeType::Array(data_type) => data_type.data_type,
-                _ => DataTypeType::Unknown,
-            },
-        }
-    }
+    // pub fn get_type(&self) -> DataType {
+    //     match &self.lvalue_type {
+    //         LValueType::Super => DataType::Unknown,
+    //         LValueType::Variable(var) => var.data_type.clone(),
+    //         LValueType::Function(func, _) => func.returns.clone(),
+    //         LValueType::Method(_, func, _) => func.returns.clone(),
+    //         LValueType::Member(_, var) => var.data_type.clone(),
+    //         LValueType::Index(var, _) => match var.get_type() {
+    //             DataType::Array(data_type) => *data_type,
+    //             _ => DataType::Unknown,
+    //         },
+    //     }
+    // }
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +194,7 @@ pub enum ExpressionType {
     Literal(tokens::Literal),
     ArrayLiteral(Vec<Expression>),
     Operation(Box<Expression>, tokens::Operator, Box<Expression>),
+    IncrementDecrement(Box<Expression>, tokens::Symbol),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
     Create(String),
@@ -184,64 +210,60 @@ pub struct Expression {
 
 impl Expression {
     // TODO cache type??
-    pub fn get_type(&self) -> DataTypeType {
-        match &self.expression_type {
-            ExpressionType::ArrayLiteral(arr) => {
-                if arr.is_empty() {
-                    DataTypeType::Unknown
-                } else {
-                    arr[0].get_type()
-                }
-            }
-            ExpressionType::Operation(first, operator, _) => match operator {
-                tokens::Operator::EQ
-                | tokens::Operator::GT
-                | tokens::Operator::GTE
-                | tokens::Operator::LT
-                | tokens::Operator::LTE
-                | tokens::Operator::GTLT
-                | tokens::Operator::OR
-                | tokens::Operator::AND => DataTypeType::Primitive(tokens::Type::BOOLEAN),
-                tokens::Operator::PLUS
-                    if first.get_type() == DataTypeType::Primitive(tokens::Type::STRING) =>
-                {
-                    DataTypeType::Primitive(tokens::Type::STRING)
-                }
-                _ => first.get_type(),
-            },
-            ExpressionType::Create(class) => DataTypeType::Complex(None, class.clone()),
-            ExpressionType::CreateUsing(expr) => match expr.expression_type {
-                ExpressionType::Literal(tokens::Literal::STRING) => {
-                    todo!("Read out the variable")
-                }
-                _ => DataTypeType::Complex(None, "powerobject".to_owned()),
-            },
-            ExpressionType::BooleanNot(_) => DataTypeType::Primitive(tokens::Type::BOOLEAN),
-            ExpressionType::Parenthesized(paren) => paren.get_type(),
-            ExpressionType::LValue(val) => val.get_type(),
-            ExpressionType::Literal(literal) => match literal {
-                tokens::Literal::NUMBER => DataTypeType::Primitive(tokens::Type::DECIMAL),
-                tokens::Literal::DATE => DataTypeType::Primitive(tokens::Type::DATE),
-                tokens::Literal::TIME => DataTypeType::Primitive(tokens::Type::TIME),
-                tokens::Literal::STRING => DataTypeType::Primitive(tokens::Type::STRING),
-                tokens::Literal::BOOLEAN => DataTypeType::Primitive(tokens::Type::BOOLEAN),
-                tokens::Literal::ENUM => todo!(),
-            },
-        }
-    }
+    // pub fn get_type(&self) -> DataType {
+    //     match &self.expression_type {
+    //         ExpressionType::ArrayLiteral(arr) => {
+    //             if arr.is_empty() {
+    //                 DataType::Unknown
+    //             } else {
+    //                 arr[0].get_type()
+    //             }
+    //         }
+    //         ExpressionType::Operation(first, operator, _) => match operator {
+    //             tokens::Operator::EQ
+    //             | tokens::Operator::GT
+    //             | tokens::Operator::GTE
+    //             | tokens::Operator::LT
+    //             | tokens::Operator::LTE
+    //             | tokens::Operator::GTLT
+    //             | tokens::Operator::OR
+    //             | tokens::Operator::AND => DataType::Primitive(tokens::Type::BOOLEAN),
+    //             tokens::Operator::PLUS
+    //                 if first.get_type() == DataType::Primitive(tokens::Type::STRING) =>
+    //             {
+    //                 DataType::Primitive(tokens::Type::STRING)
+    //             }
+    //             _ => first.get_type(),
+    //         },
+    //         ExpressionType::Create(class) => DataType::Complex(None, class.clone()),
+    //         ExpressionType::CreateUsing(expr) => match expr.expression_type {
+    //             ExpressionType::Literal(tokens::Literal::STRING) => {
+    //                 todo!("Read out the variable")
+    //             }
+    //             _ => DataType::Complex(None, "powerobject".to_owned()),
+    //         },
+    //         ExpressionType::BooleanNot(_) => DataType::Primitive(tokens::Type::BOOLEAN),
+    //         ExpressionType::Parenthesized(paren) => paren.get_type(),
+    //         ExpressionType::LValue(val) => val.get_type(),
+    //         ExpressionType::Literal(literal) => match literal {
+    //             tokens::Literal::NUMBER => DataType::Primitive(tokens::Type::DECIMAL),
+    //             tokens::Literal::DATE => DataType::Primitive(tokens::Type::DATE),
+    //             tokens::Literal::TIME => DataType::Primitive(tokens::Type::TIME),
+    //             tokens::Literal::STRING => DataType::Primitive(tokens::Type::STRING),
+    //             tokens::Literal::BOOLEAN => DataType::Primitive(tokens::Type::BOOLEAN),
+    //             tokens::Literal::ENUM => todo!(),
+    //         },
+    //         ExpressionType::IncrementDecrement(lvalue, _) => lvalue.get_type(),
+    //     }
+    // }
 }
 
 #[derive(Debug)]
 pub struct IfStatement {
     pub condition: Expression,
     pub statements: Vec<Statement>,
+    pub elseif_statements: Vec<(Expression, Vec<Statement>)>,
     pub else_statements: Vec<Statement>,
-}
-
-#[derive(Debug)]
-pub struct IncrementDecrementStatement {
-    pub value: LValue,
-    pub operator: tokens::Symbol,
 }
 
 #[derive(Debug)]
@@ -255,31 +277,45 @@ pub struct ForLoopStatement {
     pub start: Expression,
     pub stop: Expression,
     pub step: Option<Expression>,
-    pub variable: Variable,
+    pub variable: Rc<Variable>,
     pub statements: Vec<Statement>,
 }
 
 #[derive(Debug)]
 pub struct WhileLoopStatement {
     pub condition: Expression,
-    pub is_do_while: bool,
+    pub is_inversed: bool,
+    pub is_until: bool,
     pub statements: Vec<Statement>,
+}
+
+#[derive(Debug)]
+pub enum CaseSpecifierType {
+    Literals(tokens::Literal),
+    To(tokens::Literal, tokens::Literal),
+    Is(tokens::Operator, tokens::Literal),
+    Else,
+}
+
+#[derive(Debug)]
+pub struct CaseSpecifier {
+    pub specifier_type: CaseSpecifierType,
+    pub range: Range,
 }
 
 #[derive(Debug)]
 pub struct ChooseCaseStatement {
     pub choose: Expression,
-    pub cases: Vec<(tokens::Literal, Vec<Statement>)>,
+    pub cases: Vec<(Vec<CaseSpecifier>, Vec<Statement>)>,
 }
 #[derive(Debug)]
 pub enum StatementType {
-    IncrementDecrement(IncrementDecrementStatement),
     Expression(Expression),
     If(IfStatement),
     Throw(Expression),
     Assignment(LValue, Expression),
     TryCatch(TryCatchStatement),
-    Declaration(Variable),
+    Declaration(Rc<Variable>),
     ForLoop(ForLoopStatement),
     WhileLoop(WhileLoopStatement),
     Choose(ChooseCaseStatement),
@@ -305,6 +341,7 @@ pub enum TopLevelType {
     VariableDecl(Rc<Variable>),
     ConstantDecl,
     FunctionForwardDecl,
+    ExternalFunctions(Vec<Rc<Function>>),
     FunctionsForwardDecl(Vec<Rc<Function>>),
     FunctionBody(Rc<Function>, Vec<Statement>),
     OnBody(String, Vec<Statement>),

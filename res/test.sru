@@ -33,8 +33,12 @@ end subroutine
 
 public function boolean of_preactivate ();// Called before step becomes visible
 // if return false then don't make visible
+	string x = 10
+
+	x = 'wow'
+	x = true
 	
-	return true
+	return x
 end function
 
 public subroutine of_stepadded ();// Called when this step has added into w_wizmain

@@ -173,17 +173,47 @@ impl FileTokenizer {
                     _ => break self.keyword_to_token(&self.buildup.to_uppercase()),
                 };
             },
-            c @ ('.' | '0'..='9') => {
+            c @ ('+' | '-' | '.' | '0'..='9') => {
                 enum Stage {
                     Number,
                     Fraction,
                     Exponent,
                 }
                 let mut stage = Stage::Number;
-
-                let mut token_type = None;
-                if c == '.' {
-                    token_type = match self.chars.peek() {
+                let token_type = if c == '+' {
+                    match self.chars.peek() {
+                        Some('.' | '0'..='9') => {
+                            stage = Stage::Fraction;
+                            None
+                        }
+                        Some('=') => {
+                            self.next();
+                            Some(TokenType::SpecialAssignment(SpecialAssignment::PLUSEQ))
+                        }
+                        Some('+') => {
+                            self.next();
+                            Some(TokenType::Symbol(Symbol::PLUSPLUS))
+                        }
+                        _ => Some(TokenType::Operator(Operator::PLUS)),
+                    }
+                } else if c == '-' {
+                    match self.chars.peek() {
+                        Some('.' | '0'..='9') => {
+                            stage = Stage::Fraction;
+                            None
+                        }
+                        Some('=') => {
+                            self.next();
+                            Some(TokenType::SpecialAssignment(SpecialAssignment::MINUSEQ))
+                        }
+                        Some('-') => {
+                            self.next();
+                            Some(TokenType::Symbol(Symbol::MINUSMINUS))
+                        }
+                        _ => Some(TokenType::Operator(Operator::MINUS)),
+                    }
+                } else if c == '.' {
+                    match self.chars.peek() {
                         Some('0'..='9') => {
                             stage = Stage::Fraction;
                             None
@@ -216,7 +246,7 @@ impl FileTokenizer {
                         for _ in 0..=8 {
                             self.next();
                         }
-                        token_type = Some(TokenType::Literal(Literal::DATE))
+                        Some(TokenType::Literal(Literal::DATE))
                     } else if ('0'..='9').contains(&next(self, 0))
                         && ':' == next(self, 1)
                         && ('0'..='9').contains(&next(self, 2))
@@ -241,9 +271,11 @@ impl FileTokenizer {
                             }
                         }
 
-                        token_type = Some(TokenType::Literal(Literal::TIME))
+                        Some(TokenType::Literal(Literal::TIME))
+                    } else {
+                        None
                     }
-                }
+                };
 
                 match token_type {
                     Some(token_type) => token_type,
@@ -333,9 +365,11 @@ impl FileTokenizer {
                 Some('/') => {
                     self.next();
                     loop {
-                        match self.next() {
+                        match self.chars.peek() {
                             Some('\n') | None => break,
-                            _ => {}
+                            _ => {
+                                self.next();
+                            }
                         }
                     }
                     TokenType::COMMENT
@@ -367,28 +401,6 @@ impl FileTokenizer {
                     TokenType::SpecialAssignment(SpecialAssignment::MULTEQ)
                 }
                 _ => TokenType::Operator(Operator::MULT),
-            },
-            '+' => match self.chars.peek() {
-                Some('=') => {
-                    self.next();
-                    TokenType::SpecialAssignment(SpecialAssignment::PLUSEQ)
-                }
-                Some('+') => {
-                    self.next();
-                    TokenType::Symbol(Symbol::PLUSPLUS)
-                }
-                _ => TokenType::Operator(Operator::PLUS),
-            },
-            '-' => match self.chars.peek() {
-                Some('=') => {
-                    self.next();
-                    TokenType::SpecialAssignment(SpecialAssignment::MINUSEQ)
-                }
-                Some('-') => {
-                    self.next();
-                    TokenType::Symbol(Symbol::MINUSMINUS)
-                }
-                _ => TokenType::Operator(Operator::MINUS),
             },
             '<' => match self.chars.peek() {
                 Some('=') => {
@@ -446,36 +458,39 @@ impl Iterator for FileTokenizer {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next.is_some() {
-            return self.next.take();
+        if let Some(token) = self.next.take() {
+            self.previous = token.clone();
+            return Some(token);
         }
 
         loop {
             self.skip_white_spaces()?;
             let token = self.get_token()?;
+            // println!("got: {token:?}");
 
-            let previous = replace(&mut self.previous, token.clone());
-
-            match (previous.token_type, token.token_type) {
+            match (self.previous.token_type, token.token_type) {
                 (_, TokenType::COMMENT) => continue,
                 (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
 
                 // Because there is SQL OPEN and PB open(aw_window)
-                (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => continue,
+                (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
+                    self.previous = token;
+                    continue;
+                }
                 (TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE), cur) => {
                     self.next = Some(token);
 
-                    break match cur {
-                        TokenType::Symbol(Symbol::LBRACE) => Some(Token {
-                            token_type: TokenType::ID,
-                            ..previous
-                        }),
-                        _ => Some(previous),
-                    };
+                    if let TokenType::Symbol(Symbol::LBRACE) = cur {
+                        self.previous.token_type = TokenType::ID;
+                    }
+                    // println!("{:?}", self.previous.clone());
+                    break Some(self.previous.clone());
                 }
                 _ => {}
             };
 
+            self.previous = token.clone();
+            // println!("{token:?}");
             break Some(token);
         }
     }
