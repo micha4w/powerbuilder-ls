@@ -1,4 +1,3 @@
-use std::borrow::BorrowMut;
 use std::{iter::Filter, rc::Rc};
 
 use multipeek::{multipeek, MultiPeek};
@@ -125,31 +124,35 @@ impl Parser<'_> {
     // }
 
     fn parse_type(&mut self) -> ParseResult<DataType> {
-        let token = self.next()?;
+        let token = self.expect(TokenType::ID)?;
 
-        let data_type = match token.token_type {
-            TokenType::Type(tokens::Type::DECIMAL) => {
-                if self
+        Ok(
+            if token.content.eq_ignore_ascii_case("decimal")
+                || token.content.eq_ignore_ascii_case("dec")
+            {
+                let precission = self
                     .optional(TokenType::Symbol(tokens::Symbol::LCURLY))?
-                    .is_some()
-                {
-                    self.expect(TokenType::Literal(tokens::Literal::NUMBER))?;
-                    self.expect(TokenType::Symbol(tokens::Symbol::RCURLY))?;
-                }
-                DataType::Primitive(tokens::Type::DECIMAL)
-            }
-            TokenType::Type(data_type) => DataType::Primitive(data_type),
-            TokenType::ID => match self.optional(TokenType::Symbol(tokens::Symbol::TICK))? {
-                Some(_) => {
-                    let token = self.expect(TokenType::ID)?;
-                    DataType::Complex(Some(token.content), self.next()?.content)
-                }
-                None => DataType::Complex(None, token.content),
-            },
-            _ => self.fatal(&"Expected a type".to_owned(), &token.range, true)?,
-        };
+                    .map(|_| {
+                        let precission = self
+                            .expect(TokenType::Literal(tokens::Literal::NUMBER))?
+                            .content;
 
-        Ok(data_type)
+                        self.expect(TokenType::Symbol(tokens::Symbol::RCURLY))?;
+
+                        Ok(precission)
+                    })
+                    .transpose()?;
+
+                DataType::Decimal(precission)
+            } else {
+                if let Some(_) = self.optional(TokenType::Symbol(tokens::Symbol::TICK))? {
+                    let group = self.expect(TokenType::ID)?;
+                    DataType::Complex(group.content, token.content)
+                } else {
+                    DataType::ID(token.content)
+                }
+            },
+        )
     }
 
     fn parse_expression(&mut self) -> ParseResult<Expression> {
@@ -199,7 +202,10 @@ impl Parser<'_> {
 
                 ExpressionType::BooleanNot(Box::new(expression))
             }
-            TokenType::ID => {
+            TokenType::Keyword(tokens::Keyword::THIS)
+            | TokenType::Keyword(tokens::Keyword::SUPER)
+            | TokenType::Keyword(tokens::Keyword::PARENT)
+            | TokenType::ID => {
                 let lvalue = self.parse_lvalue()?;
                 end = lvalue.range.end;
 
@@ -295,28 +301,36 @@ impl Parser<'_> {
 
     fn parse_lvalue(&mut self) -> ParseResult<LValue> {
         let mut previous = match self.peek()?.token_type {
-            TokenType::Keyword(tokens::Keyword::SUPER) => {
-                let sup = self.next()?;
-                Some(LValue {
-                    lvalue_type: LValueType::Super,
-                    range: sup.range,
-                })
-            }
+            TokenType::Keyword(tokens::Keyword::SUPER) => Some(LValue {
+                lvalue_type: LValueType::Super,
+                range: self.next()?.range,
+            }),
+            TokenType::Keyword(tokens::Keyword::THIS) => Some(LValue {
+                lvalue_type: LValueType::This,
+                range: self.next()?.range,
+            }),
+            TokenType::Keyword(tokens::Keyword::PARENT) => Some(LValue {
+                lvalue_type: LValueType::Parent,
+                range: self.next()?.range,
+            }),
             _ => None,
         };
 
         loop {
-            match &previous {
+            match &mut previous {
                 Some(prev) => match self.peek()?.token_type {
                     TokenType::Symbol(tokens::Symbol::COLONCOLON) => {
                         let colon = self.next()?;
 
-                        if let LValueType::Super = prev.lvalue_type {
-                        } else {
-                            self.error(
-                                &"Only super methods can be indexed using '::'".to_owned(),
-                                &colon.range,
-                            );
+                        match prev.lvalue_type {
+                            LValueType::Super => {}
+                            LValueType::Variable(_) => prev.lvalue_type = LValueType::Super,
+                            _ => {
+                                self.error(
+                                    &"Only super methods can be indexed using '::'".to_owned(),
+                                    &colon.range,
+                                );
+                            }
                         }
                     }
                     TokenType::Symbol(tokens::Symbol::DOT) => {
@@ -348,14 +362,89 @@ impl Parser<'_> {
                     }
                     _ => break,
                 },
+
                 None => {}
             }
 
-            let name = self.expect(TokenType::ID)?;
+            match (self.peek()?.token_type, self.peek_nth(1)?.token_type) {
+                (
+                    TokenType::Keyword(tokens::Keyword::STATIC)
+                    | TokenType::Keyword(tokens::Keyword::DYNAMIC)
+                    | TokenType::Keyword(tokens::Keyword::EVENT)
+                    | TokenType::Keyword(tokens::Keyword::POST),
+                    _,
+                )
+                | (_, TokenType::Symbol(tokens::Symbol::LPAREN)) => {
+                    let mut dynamics = 0;
+                    let mut events = 0;
+                    let mut posts = 0;
+                    let mut statics = 0;
+                    loop {
+                        match self.peek()?.token_type {
+                            TokenType::Keyword(tokens::Keyword::STATIC) => {
+                                self.next()?;
+                                statics += 1;
+                            }
+                            TokenType::Keyword(tokens::Keyword::DYNAMIC) => {
+                                self.next()?;
+                                dynamics += 1;
+                            }
+                            TokenType::Keyword(tokens::Keyword::EVENT) => {
+                                self.next()?;
+                                events += 1;
+                            }
+                            TokenType::Keyword(tokens::Keyword::POST) => {
+                                self.next()?;
+                                posts += 1;
+                            }
+                            _ => break,
+                        }
+                    }
 
-            match self.peek()?.token_type {
-                TokenType::Symbol(tokens::Symbol::LPAREN) => {
-                    self.next()?;
+                    let name = self.expect(TokenType::ID)?;
+
+                    if dynamics > 0 && statics > 0 {
+                        self.error(
+                            &"Mixing DYNAMIC and STATIC is not allowed".to_owned(),
+                            &name.range,
+                        );
+                    }
+                    if dynamics > 1 {
+                        self.error(
+                            &"Cannot have multiple DYNAMIC keywords".to_owned(),
+                            &name.range,
+                        );
+                    }
+                    if statics > 1 {
+                        self.error(
+                            &"Cannot have multiple STATIC keywords".to_owned(),
+                            &name.range,
+                        );
+                    }
+                    if let Some(LValueType::Super) =
+                        previous.as_ref().map(|lvalue| &lvalue.lvalue_type)
+                    {
+                        if dynamics > 0 {
+                            self.error(
+                                &"'SUPER::' calls do not support DYNAMIC".to_owned(),
+                                &name.range,
+                            );
+                        }
+                    }
+                    if posts > 1 {
+                        self.error(
+                            &"Cannot have multiple POST keywords".to_owned(),
+                            &name.range,
+                        );
+                    }
+                    if events > 1 {
+                        self.error(
+                            &"Cannot have multiple EVENT keywords".to_owned(),
+                            &name.range,
+                        );
+                    }
+
+                    self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
 
                     let mut arguments = Vec::new();
                     let end;
@@ -385,14 +474,14 @@ impl Parser<'_> {
                         end = self.next()?.range.end;
                     }
 
-                    let func = Rc::new(Function {
-                        returns: DataType::Unknown,
-                        scope_modif: None,
-                        access: None,
+                    let func = FunctionCall {
                         name: name.content,
-                        arguments: Vec::new(),
-                        range: Range::default(),
-                    });
+                        arguments,
+                        range: name.range,
+                        dynamic: dynamics > 0,
+                        event: events > 0,
+                        post: posts > 0,
+                    };
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
@@ -400,29 +489,24 @@ impl Parser<'_> {
                                 start: prev.range.start,
                                 end,
                             },
-                            lvalue_type: LValueType::Method(Box::new(prev), func, arguments),
+                            lvalue_type: LValueType::Method(Box::new(prev), func),
                         }),
                         None => Some(LValue {
                             range: Range {
                                 start: name.range.start,
                                 end,
                             },
-                            lvalue_type: LValueType::Function(func, arguments),
+                            lvalue_type: LValueType::Function(func),
                         }),
                     };
                 }
                 _ => {
-                    let var = Rc::new(Variable {
-                        access: Access {
-                            read: None,
-                            write: None,
-                        },
-                        data_type: DataType::Unknown,
-                        constant: false,
+                    let name = self.expect(TokenType::ID)?;
+
+                    let var = VariableAccess {
                         name: name.content,
-                        range: Range::default(),
-                        initial_value: None,
-                    });
+                        range: name.range,
+                    };
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
@@ -466,11 +550,11 @@ impl Parser<'_> {
         let returns = match self.peek()?.token_type {
             TokenType::Keyword(tokens::Keyword::FUNCTION) => {
                 self.next()?;
-                self.parse_type()?
+                Some(self.parse_type()?)
             }
             TokenType::Keyword(tokens::Keyword::SUBROUTINE) => {
                 self.next()?;
-                DataType::Void
+                None
             }
             _ => {
                 let range = self.peek()?.range;
@@ -498,13 +582,25 @@ impl Parser<'_> {
                 _ => {}
             };
 
-            // TODO           
-            self.optional(TokenType::Keyword(tokens::Keyword::REF))?;
-            self.optional(TokenType::Keyword(tokens::Keyword::READONLY))?;
+            let is_ref = self
+                .optional(TokenType::Keyword(tokens::Keyword::REF))?
+                .is_some();
+            let is_readonly = self
+                .optional(TokenType::Keyword(tokens::Keyword::READONLY))?
+                .is_some();
 
             let data_type = self.parse_type()?;
-            let name = self.expect(TokenType::ID)?.content;
-            arguments.push((data_type, name));
+            let name = self.expect(TokenType::ID)?;
+            arguments.push(Argument {
+                is_ref,
+                variable: Variable {
+                    constant: is_readonly,
+                    data_type,
+                    name: name.content,
+                    initial_value: None,
+                    range: name.range,
+                },
+            });
 
             match self.peek()?.token_type {
                 TokenType::Symbol(tokens::Symbol::COMMA) => {
@@ -521,7 +617,10 @@ impl Parser<'_> {
             }
         }
 
-        if self.optional(TokenType::Keyword(tokens::Keyword::THROWS))?.is_some() {
+        if self
+            .optional(TokenType::Keyword(tokens::Keyword::THROWS))?
+            .is_some()
+        {
             self.expect(TokenType::ID)?;
         }
 
@@ -533,10 +632,12 @@ impl Parser<'_> {
                 self.next()?;
                 self.expect(TokenType::Literal(tokens::Literal::STRING))?;
 
-                if self.optional(TokenType::Keyword(tokens::Keyword::ALIAS))?.is_some() {
+                if self
+                    .optional(TokenType::Keyword(tokens::Keyword::ALIAS))?
+                    .is_some()
+                {
                     self.expect(TokenType::Keyword(tokens::Keyword::FOR))?;
                     self.expect(TokenType::Literal(tokens::Literal::STRING))?;
-
                 }
             }
             _ => {}
@@ -691,14 +792,16 @@ impl Parser<'_> {
         self.expect(TokenType::NEWLINE)?;
 
         Ok(Statement {
-            statement_type: StatementType::Declaration(Rc::new(Variable {
+            statement_type: StatementType::Declaration(InstanceVariable {
                 access,
-                data_type,
-                name: name.content,
-                constant,
-                range: name.range,
-                initial_value: expression,
-            })),
+                variable: Variable {
+                    data_type,
+                    name: name.content,
+                    constant,
+                    initial_value: expression,
+                    range: name.range,
+                },
+            }),
             range: Range { start, end },
         })
     }
@@ -706,9 +809,7 @@ impl Parser<'_> {
     // Consumes trailing newlines
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         match self.peek()?.token_type {
-            TokenType::Keyword(tokens::Keyword::CONSTANT) | TokenType::Type(_) => {
-                self.parse_variable_declaration()
-            }
+            TokenType::Keyword(tokens::Keyword::CONSTANT) => self.parse_variable_declaration(),
             TokenType::ID => match self.peek_nth(1)?.token_type {
                 TokenType::ID => self.parse_variable_declaration(),
                 _ => {
@@ -788,7 +889,7 @@ impl Parser<'_> {
             TokenType::Keyword(tokens::Keyword::IF) => {
                 let if_token = self.next()?;
                 let condition = self.parse_expression()?;
-                self.expect(TokenType::Keyword(tokens::Keyword::THEN))?;
+                let then_token = self.expect(TokenType::Keyword(tokens::Keyword::THEN))?;
 
                 match self.peek()?.token_type {
                     TokenType::NEWLINE => {
@@ -825,7 +926,8 @@ impl Parser<'_> {
                                     },
 
                                     TokenType::Keyword(
-                                        token_type @ (tokens::Keyword::ELSEIF | tokens::Keyword::ELSE),
+                                        token_type @ (tokens::Keyword::ELSEIF
+                                        | tokens::Keyword::ELSE),
                                     ) => {
                                         match token_type {
                                             tokens::Keyword::ELSE => {
@@ -846,15 +948,17 @@ impl Parser<'_> {
                                         break;
                                     }
                                     _ => {
-                                        match part {
-                                            tokens::Keyword::IF => &mut ifs.statements,
-                                            tokens::Keyword::ELSEIF => {
-                                                &mut ifs.elseif_statements.last_mut().unwrap().1
+                                        if let Ok(statement) = self.parse_statement().split_eof()? {
+                                            match part {
+                                                tokens::Keyword::IF => &mut ifs.statements,
+                                                tokens::Keyword::ELSEIF => {
+                                                    &mut ifs.elseif_statements.last_mut().unwrap().1
+                                                }
+                                                tokens::Keyword::ELSE => &mut ifs.else_statements,
+                                                _ => unreachable!(),
                                             }
-                                            tokens::Keyword::ELSE => &mut ifs.else_statements,
-                                            _ => unreachable!(),
+                                            .push(statement);
                                         }
-                                        .push(self.parse_statement()?);
                                     }
                                 }
                             }
@@ -869,15 +973,19 @@ impl Parser<'_> {
                         })
                     }
                     _ => {
-                        let statement = self.parse_statement()?;
+                        let statement = self.parse_statement().split_eof()?.ok();
+
                         Ok(Statement {
                             range: Range {
                                 start: if_token.range.start,
-                                end: statement.range.end,
+                                end: match &statement {
+                                    Some(statement) => statement.range.end,
+                                    None => then_token.range.end,
+                                },
                             },
                             statement_type: StatementType::If(IfStatement {
                                 condition,
-                                statements: vec![statement],
+                                statements: statement.into_iter().collect(),
                                 elseif_statements: vec![],
                                 else_statements: vec![],
                             }),
@@ -887,15 +995,22 @@ impl Parser<'_> {
             }
             TokenType::Keyword(tokens::Keyword::RETURN) => {
                 let ret = self.next()?;
-                // TODO can you return nothing in pb?
-                let expression = self.parse_expression()?;
-                self.expect(TokenType::NEWLINE).split_eof()?;
+                let (end, returns) = match self.optional(TokenType::NEWLINE)? {
+                    Some(_) => (ret.range.end, None),
+                    None => {
+                        let expression = self.parse_expression()?;
+                        self.expect(TokenType::NEWLINE).split_eof()?;
+
+                        (expression.range.end, Some(expression))
+                    }
+                };
+
                 Ok(Statement {
                     range: Range {
                         start: ret.range.start,
-                        end: expression.range.end,
+                        end,
                     },
-                    statement_type: StatementType::Return(expression),
+                    statement_type: StatementType::Return(returns),
                 })
             }
             TokenType::Keyword(tokens::Keyword::FOR) => {
@@ -904,7 +1019,8 @@ impl Parser<'_> {
                 self.expect(TokenType::Operator(tokens::Operator::EQ))
                     .split_eof()?;
                 let start = self.parse_expression()?;
-                self.expect(TokenType::Keyword(tokens::Keyword::TO)).split_eof()?;
+                self.expect(TokenType::Keyword(tokens::Keyword::TO))
+                    .split_eof()?;
                 let stop = self.parse_expression()?;
 
                 let step = match self.peek()?.token_type {
@@ -943,17 +1059,10 @@ impl Parser<'_> {
                         start,
                         stop,
                         step,
-                        variable: Rc::new(Variable {
-                            constant: false,
-                            access: Access {
-                                read: None,
-                                write: None,
-                            },
-                            data_type: DataType::Unknown,
+                        variable: VariableAccess {
                             name: name.content,
-                            initial_value: None,
                             range: name.range,
-                        }),
+                        },
                     }),
                 })
             }
@@ -966,7 +1075,9 @@ impl Parser<'_> {
                 let is_inversed;
                 let mut is_until = false;
                 match self.peek()?.token_type {
-                    TokenType::Keyword(keyword @ (tokens::Keyword::WHILE | tokens::Keyword::UNTIL)) => {
+                    TokenType::Keyword(
+                        keyword @ (tokens::Keyword::WHILE | tokens::Keyword::UNTIL),
+                    ) => {
                         condition = self.parse_expression()?;
 
                         is_inversed = false;
@@ -996,7 +1107,9 @@ impl Parser<'_> {
 
                 if is_inversed {
                     match self.peek()?.token_type {
-                        TokenType::Keyword(keyword @ (tokens::Keyword::WHILE | tokens::Keyword::UNTIL)) => {
+                        TokenType::Keyword(
+                            keyword @ (tokens::Keyword::WHILE | tokens::Keyword::UNTIL),
+                        ) => {
                             condition = self.parse_expression()?;
                             is_until = keyword == tokens::Keyword::UNTIL;
                             self.expect(TokenType::NEWLINE).split_eof()?;
@@ -1028,10 +1141,118 @@ impl Parser<'_> {
                     }),
                 })
             }
+            TokenType::Keyword(tokens::Keyword::TRY) => {
+                let try_token = self.next()?;
+                self.expect(TokenType::NEWLINE).split_eof()?;
+
+                let mut statements = Vec::new();
+                loop {
+                    match self.peek()?.token_type {
+                        TokenType::Keyword(
+                            tokens::Keyword::CATCH
+                            | tokens::Keyword::FINALLY
+                            | tokens::Keyword::END,
+                        ) => break,
+                        _ => {
+                            if let Ok(statement) = self.parse_statement().split_eof()? {
+                                statements.push(statement)
+                            }
+                        }
+                    }
+                }
+
+                let mut catches = Vec::new();
+
+                if let TokenType::Keyword(tokens::Keyword::CATCH) = self.peek()?.token_type {
+                    loop {
+                        self.expect(TokenType::Keyword(tokens::Keyword::CATCH))?;
+
+                        self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
+                        let data_type = self.parse_type()?;
+                        let name = self.expect(TokenType::ID)?.content;
+                        _ = self
+                            .expect(TokenType::Symbol(tokens::Symbol::RPAREN))
+                            .split_eof()?;
+
+                        _ = self.expect(TokenType::NEWLINE).split_eof()?;
+
+                        let mut statements = Vec::new();
+
+                        let exit = loop {
+                            match self.peek()?.token_type.clone() {
+                                TokenType::Keyword(
+                                    tokens::Keyword::FINALLY | tokens::Keyword::END,
+                                ) => break true,
+                                TokenType::Keyword(tokens::Keyword::CATCH) => break false,
+                                _ => {
+                                    if let Ok(statement) = self.parse_statement().split_eof()? {
+                                        statements.push(statement)
+                                    }
+                                }
+                            }
+                        };
+
+                        catches.push((data_type, name, statements));
+
+                        if exit {
+                            break;
+                        }
+                    }
+                }
+
+                let finally = self
+                    .optional(TokenType::Keyword(tokens::Keyword::FINALLY))?
+                    .map(|_| -> ParseResult<_> {
+                        self.expect(TokenType::NEWLINE)?; // TODO make all expect newlines optional?
+
+                        let mut statements = Vec::new();
+
+                        loop {
+                            match self.peek()?.token_type.clone() {
+                                TokenType::Keyword(tokens::Keyword::END) => break,
+                                _ => {
+                                    if let Ok(statement) = self.parse_statement().split_eof()? {
+                                        statements.push(statement)
+                                    }
+                                }
+                            }
+                        }
+
+                        Ok(statements)
+                    })
+                    .transpose()?;
+
+                let mut end = self
+                    .expect(TokenType::Keyword(tokens::Keyword::END))?
+                    .range
+                    .end;
+                match self.peek()?.token_type {
+                    TokenType::Keyword(tokens::Keyword::TRY) => {
+                        end = self.next()?.range.end;
+                        self.expect(TokenType::NEWLINE).split_eof()?;
+                    }
+                    _ => {
+                        let range = self.peek()?.range;
+                        self.error(&"Dangling end keyword".to_string(), &range);
+                        self.consume_line()?;
+                    }
+                };
+
+                Ok(Statement {
+                    range: Range {
+                        start: try_token.range.start,
+                        end,
+                    },
+                    statement_type: StatementType::TryCatch(TryCatchStatement {
+                        statements,
+                        catches,
+                        finally,
+                    }),
+                })
+            }
             TokenType::Keyword(tokens::Keyword::CHOOSE) => {
                 let choose_token = self.next()?;
-                self.expect(TokenType::Keyword(tokens::Keyword::CASE))
-                    .split_eof()?;
+                self.expect(TokenType::Keyword(tokens::Keyword::CASE))?;
                 let choose = self.parse_expression()?;
                 let mut cases = Vec::new();
                 let end;
@@ -1066,7 +1287,10 @@ impl Parser<'_> {
                             }
                             TokenType::Literal(literal) => {
                                 let token = self.next()?;
-                                if self.optional(TokenType::Keyword(tokens::Keyword::TO))?.is_some() {
+                                if self
+                                    .optional(TokenType::Keyword(tokens::Keyword::TO))?
+                                    .is_some()
+                                {
                                     let up_to = match self.peek()?.token_type {
                                         TokenType::Literal(literal) => literal,
                                         _ => todo!("Unexpeceed"),
@@ -1114,7 +1338,9 @@ impl Parser<'_> {
                         match self.peek()?.token_type.clone() {
                             TokenType::Keyword(tokens::Keyword::CASE)
                             | TokenType::Keyword(tokens::Keyword::END) => {
-                                if let TokenType::Keyword(tokens::Keyword::CASE) = self.peek()?.token_type {
+                                if let TokenType::Keyword(tokens::Keyword::CASE) =
+                                    self.peek()?.token_type
+                                {
                                     cases.push((specifiers, statements));
 
                                     break;
@@ -1137,7 +1363,9 @@ impl Parser<'_> {
                                 }
                             }
                             _ => {
-                                statements.push(self.parse_statement()?);
+                                if let Ok(statement) = self.parse_statement().split_eof()? {
+                                    statements.push(statement)
+                                }
                             }
                         }
                     }
@@ -1151,6 +1379,66 @@ impl Parser<'_> {
                     statement_type: StatementType::Choose(ChooseCaseStatement { choose, cases }),
                 })
             }
+            TokenType::Keyword(tokens::Keyword::CALL) => {
+                let call_token = self.next()?;
+
+                let call_type = match self.peek()?.token_type {
+                    TokenType::Keyword(tokens::Keyword::SUPER) => {
+                        self.next()?;
+                        CallType::Super
+                    }
+                    TokenType::ID => {
+                        let name = self.next()?;
+                        if self
+                            .optional(TokenType::Symbol(tokens::Symbol::TICK))?
+                            .is_some()
+                        {
+                            let sub_name = self.expect(TokenType::ID)?;
+                            CallType::Ancestor(Some(name.content), sub_name.content)
+                        } else {
+                            CallType::Ancestor(None, name.content)
+                        }
+                    }
+                    _ => self.fatal(&"Expected Ancestor Class".into(), &call_token.range, true)?,
+                };
+
+                self.expect(TokenType::Symbol(tokens::Symbol::COLONCOLON))?;
+                let lvalue = self.parse_lvalue()?;
+
+                let function = match lvalue.lvalue_type {
+                    LValueType::Function(function) => function,
+                    LValueType::Variable(function) => FunctionCall {
+                        name: function.name,
+                        arguments: vec![],
+                        range: function.range,
+                        dynamic: false,
+                        event: false,
+                        post: false,
+                    },
+                    _ => self.fatal(&"Expected Funtion Call".into(), &lvalue.range, true)?,
+                };
+
+                self.expect(TokenType::NEWLINE).split_eof()?;
+
+                Ok(Statement {
+                    range: Range {
+                        start: call_token.range.start,
+                        end: function.range.end,
+                    },
+                    statement_type: StatementType::Call(CallStatement {
+                        call_type,
+                        function,
+                    }),
+                })
+            }
+            TokenType::Keyword(tokens::Keyword::EXIT) => Ok(Statement {
+                range: self.next()?.range,
+                statement_type: StatementType::Exit,
+            }),
+            TokenType::Keyword(tokens::Keyword::CONTINUE) => Ok(Statement {
+                range: self.next()?.range,
+                statement_type: StatementType::Continue,
+            }),
             _ => {
                 let Token {
                     token_type, range, ..
@@ -1175,7 +1463,7 @@ impl Parser<'_> {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        if (function.returns == DataType::Void)
+                        if (function.returns.is_none())
                             ^ (function_type == tokens::Keyword::SUBROUTINE)
                         {
                             self.error(&"Wrong function closing".to_string(), &close.range);
@@ -1192,7 +1480,7 @@ impl Parser<'_> {
                 },
                 _ => {
                     if let Ok(statement) = self.parse_statement().split_eof()? {
-                        statements.push(statement)
+                        statements.push(statement);
                     }
                 }
             };
@@ -1203,7 +1491,7 @@ impl Parser<'_> {
                 start: function.range.start,
                 end,
             },
-            top_level_type: TopLevelType::FunctionBody(Rc::new(function), statements),
+            top_level_type: TopLevelType::FunctionBody(function, statements),
         })
     }
 
@@ -1213,10 +1501,10 @@ impl Parser<'_> {
             .range
             .start;
 
-        self.expect(TokenType::ID)?;
+        let class = self.expect(TokenType::ID)?.content;
         self.expect(TokenType::Symbol(tokens::Symbol::DOT))?;
-        let token = self.next()?;
-        match token.token_type {
+        let name = self.next()?;
+        match name.token_type {
             TokenType::Keyword(
                 tokens::Keyword::OPEN
                 | tokens::Keyword::CLOSE
@@ -1228,9 +1516,9 @@ impl Parser<'_> {
             _ => {
                 self.error(
                     &"Expected one of [open, close, create, destroy]".to_string(),
-                    &token.range,
+                    &name.range,
                 );
-                if token.token_type != TokenType::NEWLINE {
+                if name.token_type != TokenType::NEWLINE {
                     self.consume_line()?;
                 }
             }
@@ -1265,31 +1553,37 @@ impl Parser<'_> {
         }
 
         Ok(TopLevel {
-            top_level_type: TopLevelType::OnBody(token.content, statements),
+            top_level_type: TopLevelType::OnBody(
+                On {
+                    class,
+                    name: name.content,
+                },
+                statements,
+            ),
             range: Range { start, end },
         })
     }
 
     fn parse_datatype_decl(&mut self) -> ParseResult<TopLevel> {
         let start = self.peek()?.range.start;
-        let modif = if let TokenType::ScopeModif(modif) = self.peek()?.token_type {
+        let scope = if let TokenType::ScopeModif(scope) = self.peek()?.token_type {
             self.next()?;
-            Some(modif)
+            Some(scope)
         } else {
             None
         };
         self.expect(TokenType::Keyword(tokens::Keyword::TYPE))?;
 
         // TODO! do something with name, from, within
-        let name = self.expect(TokenType::ID)?;
+        let name = self.expect(TokenType::ID)?.content;
         self.expect(TokenType::Keyword(tokens::Keyword::FROM))?;
-        let from = self.expect(TokenType::ID)?;
+        let base = self.expect(TokenType::ID)?.content;
 
         let within = if self
             .optional(TokenType::Keyword(tokens::Keyword::WITHIN))?
             .is_some()
         {
-            Some(self.expect(TokenType::ID)?)
+            Some(self.expect(TokenType::ID)?.content)
         } else {
             None
         };
@@ -1312,7 +1606,10 @@ impl Parser<'_> {
                     _ => {
                         let range = self.next()?.range;
                         self.error(&"Dangling end keyword".to_string(), &range);
+                        end = range.end;
+
                         self.consume_line()?;
+                        break;
                     }
                 },
                 _ => {
@@ -1335,27 +1632,92 @@ impl Parser<'_> {
         }
 
         Ok(TopLevel {
-            top_level_type: TopLevelType::DatatypeDecl(modif, declarations),
+            top_level_type: TopLevelType::DatatypeDecl(
+                Class {
+                    scope,
+                    name,
+                    base,
+                    within,
+                },
+                declarations,
+            ),
             range: Range { start, end },
         })
     }
 
-    fn parse_global_variables_decl(&mut self) -> ParseResult<TopLevel> {
+    fn parse_global_variable_decl(&mut self) -> ParseResult<TopLevel> {
         let start = self.peek()?.range.start;
-        self.expect(TokenType::ScopeModif(tokens::ScopeModif::GLOBAL))?;
+        self.expect(TokenType::ScopeModif(tokens::ScopeModif::GLOBAL));
         let variable = self.parse_variable_declaration()?;
 
         if let StatementType::Declaration(var) = variable.statement_type {
+            if var.access.read.is_some() || var.access.write.is_some() {
+                todo!("ERROR");
+            }
+
             Ok(TopLevel {
                 range: Range {
                     start,
                     end: variable.range.end,
                 },
-                top_level_type: TopLevelType::GlobalVariablesDecl(var),
+                top_level_type: TopLevelType::GlobalVariableDecl(var.variable),
             })
         } else {
             unreachable!();
         }
+    }
+
+    fn parse_scoped_variables_decl(&mut self) -> ParseResult<TopLevel> {
+        let start = self.peek()?.range.start;
+
+        let scope = match self.peek()?.token_type {
+            TokenType::ScopeModif(scope) => scope,
+            _ => todo!("Error"),
+        };
+        self.expect(TokenType::Keyword(tokens::Keyword::VARIABLES))?;
+        self.expect(TokenType::NEWLINE).split_eof()?;
+
+        let end;
+        let mut declarations = Vec::new();
+        loop {
+            match self.peek()?.token_type.clone() {
+                TokenType::Keyword(tokens::Keyword::END) => match self.peek_nth(1)?.token_type {
+                    TokenType::Keyword(tokens::Keyword::VARIABLES) => {
+                        self.next()?;
+                        let close = self.next()?;
+                        end = close.range.end;
+
+                        self.expect(TokenType::NEWLINE);
+                        break;
+                    }
+                    _ => {
+                        let range = self.next()?.range;
+                        self.error(&"Dangling end keyword".to_string(), &range);
+                        end = range.end;
+
+                        self.consume_line()?;
+                        break;
+                    }
+                },
+                _ => {
+                    if let Ok(statement) = self.parse_variable_declaration().split_eof()? {
+                        if let StatementType::Declaration(var) = statement.statement_type {
+                            declarations.push(ScopedVariable {
+                                scope,
+                                variable: var.variable,
+                            });
+                        } else {
+                            unreachable!();
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(TopLevel {
+            top_level_type: TopLevelType::ScopedVariablesDecl(declarations),
+            range: Range { start, end },
+        })
     }
 
     fn parse_type_variables_decl(&mut self) -> ParseResult<TopLevel> {
@@ -1404,14 +1766,13 @@ impl Parser<'_> {
                 _ => {
                     if let Ok(statement) = self.parse_variable_declaration().split_eof()? {
                         if let StatementType::Declaration(var) = statement.statement_type {
-                            let var = (*var).clone();
-                            declarations.push(Rc::new(Variable {
+                            declarations.push(InstanceVariable {
                                 access: Access {
                                     read: var.access.read.clone().or(access),
                                     write: var.access.write.clone().or(access),
                                 },
-                                ..var
-                            }));
+                                variable: var.variable,
+                            });
                         } else {
                             unreachable!();
                         }
@@ -1449,7 +1810,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     if let Ok(function) = self.parse_function_header().split_eof()? {
-                        functions.push(Rc::new(function));
+                        functions.push(function);
                     }
                 }
             };
@@ -1484,7 +1845,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     if let Ok(function) = self.parse_function_header().split_eof()? {
-                        functions.push(Rc::new(function));
+                        functions.push(function);
                     }
                 }
             };
@@ -1538,20 +1899,22 @@ impl Parser<'_> {
                 }
             },
             TokenType::AccessType(_)
-            | TokenType::Keyword(tokens::Keyword::FUNCTION | tokens::Keyword::SUBROUTINE) => self.parse_function(),
+            | TokenType::Keyword(tokens::Keyword::FUNCTION | tokens::Keyword::SUBROUTINE) => {
+                self.parse_function()
+            }
             TokenType::Keyword(tokens::Keyword::ON) => self.parse_on(),
             TokenType::Keyword(tokens::Keyword::TYPE) => match self.peek_nth(1)?.token_type {
                 TokenType::Keyword(tokens::Keyword::VARIABLES) => self.parse_type_variables_decl(),
                 TokenType::Keyword(tokens::Keyword::PROTOTYPES) => self.parse_external_functions(),
                 _ => self.parse_datatype_decl(),
             },
-            TokenType::ScopeModif(_) => {
-                if let TokenType::Keyword(tokens::Keyword::TYPE) = self.peek_nth(1)?.token_type {
-                    self.parse_datatype_decl()
-                } else {
-                    self.parse_global_variables_decl()
+            TokenType::ScopeModif(_) => match self.peek_nth(1)?.token_type {
+                TokenType::Keyword(tokens::Keyword::TYPE) => self.parse_datatype_decl(),
+                TokenType::Keyword(tokens::Keyword::VARIABLES) => {
+                    self.parse_scoped_variables_decl()
                 }
-            }
+                _ => self.parse_global_variable_decl(),
+            },
             stuff => {
                 println!("INVALID {stuff:?} {:?}", self.next()?.range);
                 todo!("invalid");

@@ -8,7 +8,6 @@ use super::tokenizer_types::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenType {
-    Type(Type),
     ScopeModif(ScopeModif),
     AccessType(AccessType),
     Keyword(Keyword),
@@ -120,9 +119,6 @@ impl FileTokenizer {
     }
 
     fn keyword_to_token(&self, token: &String) -> TokenType {
-        if let Ok(token_type) = Type::from_str(token) {
-            return TokenType::Type(token_type);
-        }
         if let Ok(token_type) = Keyword::from_str(token) {
             return TokenType::Keyword(token_type);
         }
@@ -136,12 +132,6 @@ impl FileTokenizer {
 
         match token.as_str() {
             "CONST" => TokenType::Keyword(Keyword::CONSTANT),
-
-            "CHARACTER" => TokenType::Type(Type::CHAR),
-            "DEC" => TokenType::Type(Type::DECIMAL),
-            "INTEGER" => TokenType::Type(Type::INT),
-            "UNSIGNEDINTEGER" => TokenType::Type(Type::UINT),
-            "UNSIGNEDLONG" => TokenType::Type(Type::ULONG),
 
             "AND" => TokenType::Operator(Operator::AND),
             "OR" => TokenType::Operator(Operator::OR),
@@ -465,7 +455,7 @@ impl Iterator for FileTokenizer {
 
         loop {
             self.skip_white_spaces()?;
-            let token = self.get_token()?;
+            let mut token = self.get_token()?;
             // println!("got: {token:?}");
 
             match (self.previous.token_type, token.token_type) {
@@ -473,6 +463,9 @@ impl Iterator for FileTokenizer {
                 (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
 
                 // Because there is SQL OPEN and PB open(aw_window)
+                (TokenType::Symbol(Symbol::COLONCOLON), TokenType::Keyword(Keyword::CREATE | Keyword::DESTROY)) => {
+                    token.token_type = TokenType::ID;
+                }
                 (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
                     self.previous = token;
                     continue;
@@ -483,7 +476,7 @@ impl Iterator for FileTokenizer {
                     if let TokenType::Symbol(Symbol::LBRACE) = cur {
                         self.previous.token_type = TokenType::ID;
                     }
-                    // println!("{:?}", self.previous.clone());
+                    // println!(".{:?}", self.previous.clone());
                     break Some(self.previous.clone());
                 }
                 _ => {}

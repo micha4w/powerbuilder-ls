@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use multipeek::{multipeek, MultiPeek};
 
 use super::tokenizer_types::{self as tokens, Range};
@@ -24,72 +22,12 @@ impl<T> KeepEOF<T> for ParseResult<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
-    Primitive(tokens::Type),
-    Complex(Option<String>, String),
-    Enum(String), // TODO
+    Decimal(Option<String>),
     Array(Box<DataType>),
-    Void,
-    Unknown,
-}
-
-impl DataType {
-    pub fn is_numeric(&self) -> bool {
-        match self {
-            DataType::Primitive(
-                tokens::Type::ANY
-                | tokens::Type::INT
-                | tokens::Type::UINT
-                | tokens::Type::LONG
-                | tokens::Type::ULONG
-                | tokens::Type::LONGLONG
-                | tokens::Type::LONGPTR
-                | tokens::Type::REAL
-                | tokens::Type::DOUBLE
-                | tokens::Type::DECIMAL,
-            ) => true,
-            DataType::Unknown => true,
-            _ => false,
-        }
-    }
-
-    pub fn numeric_precedence(&self) -> Option<u8> {
-        match self {
-            DataType::Primitive(primitive) => match primitive {
-                tokens::Type::INT => Some(0),
-                tokens::Type::UINT => Some(1),
-                tokens::Type::LONG => Some(2),
-                tokens::Type::ULONG => Some(3),
-                tokens::Type::LONGLONG => Some(4),
-                tokens::Type::LONGPTR => Some(5),
-                tokens::Type::REAL => Some(6),
-                tokens::Type::DOUBLE => Some(7),
-                tokens::Type::DECIMAL => Some(8),
-                tokens::Type::ANY => Some(9),
-                tokens::Type::BLOB
-                | tokens::Type::BOOLEAN
-                | tokens::Type::BYTE
-                | tokens::Type::CHAR
-                | tokens::Type::DATE
-                | tokens::Type::DATETIME
-                | tokens::Type::STRING
-                | tokens::Type::TIME => None,
-            },
-            DataType::Unknown => Some(10),
-            _ => None,
-        }
-    }
-
-    pub fn is_convertible(&self, other: &DataType) -> bool {
-        match (self, other) {
-            (DataType::Unknown, _) | (_, DataType::Unknown) => true,
-            (DataType::Array(self_type), DataType::Array(other_type)) => {
-                self_type.is_convertible(&other_type)
-            }
-            _ => self == other || (self.is_numeric() && other.is_numeric()),
-        }
-    }
+    Complex(String, String),
+    ID(String),
 }
 
 #[derive(Debug, Clone)]
@@ -101,25 +39,52 @@ pub struct Access {
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub constant: bool,
-    pub access: Access,
     pub data_type: DataType,
     pub name: String,
     pub initial_value: Option<Expression>,
 
     pub range: Range,
-    // declaration: Option<Range>,
-    // uses: Vec<Range>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstanceVariable {
+    pub access: Access,
+    pub variable: Variable,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedVariable {
+    pub scope: tokens::ScopeModif,
+    pub variable: Variable,
+}
+
+#[derive(Debug, Clone)]
+pub struct Argument {
+    pub is_ref: bool,
+    pub variable: Variable,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableAccess {
+    pub name: String,
+    pub range: Range,
 }
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    pub returns: DataType,
+    pub returns: Option<DataType>,
     pub scope_modif: Option<tokens::ScopeModif>,
     pub access: Option<tokens::AccessType>,
     pub name: String,
-    pub arguments: Vec<(DataType, String)>,
+    pub arguments: Vec<Argument>,
 
     pub range: Range,
+}
+
+#[derive(Debug)]
+pub struct On {
+    pub class: String,
+    pub name: String,
 }
 
 impl Function {
@@ -133,19 +98,28 @@ impl Function {
                 .arguments
                 .iter()
                 .zip(other.arguments.iter())
-                .all(|((self_type, _), (other_type, _))| other_type == self_type)
+                .all(|(self_arg, other_arg)| {
+                    self_arg.variable.data_type == other_arg.variable.data_type
+                })
     }
+}
 
-    pub fn is_callable(&self, other: &Function, min_access: &tokens::AccessType) -> bool {
-        self.name == other.name
-            && min_access.strictness() >= self.access.map(|access| access.strictness()).unwrap_or(0)
-            && self.returns.is_convertible(&other.returns)
-            && self
-                .arguments
-                .iter()
-                .zip(other.arguments.iter())
-                .all(|((self_type, _), (other_type, _))| other_type.is_convertible(&self_type))
-    }
+#[derive(Debug, Clone)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: Vec<Expression>,
+    pub range: Range,
+    pub dynamic: bool,
+    pub event: bool,
+    pub post: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Class {
+    pub scope: Option<tokens::ScopeModif>,
+    pub name: String,
+    pub base: String,
+    pub within: Option<String>,
 }
 
 #[derive(Debug)]
@@ -158,12 +132,14 @@ pub enum Severity {
 
 #[derive(Debug, Clone)]
 pub enum LValueType {
+    This,
     Super,
-    Variable(Rc<Variable>),
-    Function(Rc<Function>, Vec<Expression>),
+    Parent,
+    Variable(VariableAccess),
+    Function(FunctionCall),
 
-    Method(Box<LValue>, Rc<Function>, Vec<Expression>),
-    Member(Box<LValue>, Rc<Variable>),
+    Method(Box<LValue>, FunctionCall),
+    Member(Box<LValue>, VariableAccess),
     Index(Box<LValue>, Box<Expression>),
 }
 
@@ -269,7 +245,8 @@ pub struct IfStatement {
 #[derive(Debug)]
 pub struct TryCatchStatement {
     pub statements: Vec<Statement>,
-    pub catches: Vec<(Variable, Vec<Statement>)>,
+    pub catches: Vec<(DataType, String, Vec<Statement>)>,
+    pub finally: Option<Vec<Statement>>,
 }
 
 #[derive(Debug)]
@@ -277,7 +254,7 @@ pub struct ForLoopStatement {
     pub start: Expression,
     pub stop: Expression,
     pub step: Option<Expression>,
-    pub variable: Rc<Variable>,
+    pub variable: VariableAccess,
     pub statements: Vec<Statement>,
 }
 
@@ -308,6 +285,19 @@ pub struct ChooseCaseStatement {
     pub choose: Expression,
     pub cases: Vec<(Vec<CaseSpecifier>, Vec<Statement>)>,
 }
+
+#[derive(Debug)]
+pub enum CallType {
+    Super,
+    Ancestor(Option<String>, String),
+}
+
+#[derive(Debug)]
+pub struct CallStatement {
+    pub call_type: CallType,
+    pub function: FunctionCall,
+}
+
 #[derive(Debug)]
 pub enum StatementType {
     Expression(Expression),
@@ -315,11 +305,12 @@ pub enum StatementType {
     Throw(Expression),
     Assignment(LValue, Expression),
     TryCatch(TryCatchStatement),
-    Declaration(Rc<Variable>),
+    Declaration(InstanceVariable),
     ForLoop(ForLoopStatement),
     WhileLoop(WhileLoopStatement),
     Choose(ChooseCaseStatement),
-    Return(Expression),
+    Return(Option<Expression>),
+    Call(CallStatement),
     Exit,
     Continue,
     Empty,
@@ -334,18 +325,18 @@ pub struct Statement {
 
 #[derive(Debug)]
 pub enum TopLevelType {
-    DatatypeDecl(Option<tokens::ScopeModif>, Vec<Rc<Variable>>),
+    DatatypeDecl(Class, Vec<InstanceVariable>),
     ForwardDecl,
-    TypeVariablesDecl(Vec<Rc<Variable>>),
-    GlobalVariablesDecl(Rc<Variable>),
-    VariableDecl(Rc<Variable>),
+    TypeVariablesDecl(Vec<InstanceVariable>),
+    ScopedVariablesDecl(Vec<ScopedVariable>),
+    GlobalVariableDecl(Variable),
     ConstantDecl,
     FunctionForwardDecl,
-    ExternalFunctions(Vec<Rc<Function>>),
-    FunctionsForwardDecl(Vec<Rc<Function>>),
-    FunctionBody(Rc<Function>, Vec<Statement>),
-    OnBody(String, Vec<Statement>),
-    EventBody(Rc<Function>, Vec<Statement>),
+    ExternalFunctions(Vec<Function>),
+    FunctionsForwardDecl(Vec<Function>),
+    FunctionBody(Function, Vec<Statement>),
+    OnBody(On, Vec<Statement>),
+    EventBody(Function, Vec<Statement>),
 }
 
 #[derive(Debug)]

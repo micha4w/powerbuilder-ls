@@ -2,8 +2,6 @@ use std::fmt;
 
 use strum_macros::EnumString;
 
-use super::parser_types::DataType;
-
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Position {
     pub line: usize,
@@ -27,29 +25,6 @@ impl fmt::Display for Range {
     }
 }
 
-// TODO remove these, since the variables can be named the same and also functions
-// replace with ID
-#[derive(Clone, Copy, EnumString, Debug, PartialEq)]
-pub enum Type {
-    ANY,
-    BLOB,
-    BOOLEAN,
-    BYTE,
-    CHAR,
-    DATE,
-    DATETIME,
-    DECIMAL,
-    DOUBLE,
-    INT,
-    LONG,
-    LONGLONG,
-    LONGPTR,
-    REAL,
-    STRING,
-    TIME,
-    UINT,
-    ULONG,
-}
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum Literal {
@@ -61,28 +36,10 @@ pub enum Literal {
     BOOLEAN,
 }
 
-impl Literal {
-    pub fn get_type(&self) -> DataType {
-        match self {
-            Literal::NUMBER => DataType::Primitive(Type::INT),
-            Literal::DATE => DataType::Primitive(Type::DATE),
-            Literal::TIME => DataType::Primitive(Type::TIME),
-            Literal::STRING => DataType::Primitive(Type::STRING),
-            Literal::BOOLEAN => DataType::Primitive(Type::BOOLEAN),
-            Literal::ENUM => DataType::Unknown, // TODO scrape https://docs.appeon.com/pb2022/powerscript_reference
-        }
-    }
-
-    pub fn is_type(&self, data_type: &DataType) -> bool {
-        self.get_type().is_convertible(data_type)
-    }
-}
-
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum ScopeModif {
     GLOBAL,
     SHARED,
-    LOCAL,
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
@@ -168,7 +125,7 @@ pub enum Keyword {
     THIS,
     SUPER,
     PARENT,
-    SQLCA,
+    // SQLCA,
 
     // Control flow
     FUNCTION,
@@ -258,6 +215,7 @@ pub enum Keyword {
     DESTROY,
 
     DYNAMIC,
+    STATIC,
 
     // Reserved
     NAMESPACE,

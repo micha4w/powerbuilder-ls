@@ -1,8 +1,9 @@
 use std::{
-    borrow::Borrow,
     cell::RefCell,
-    env::current_dir,
+    env::{current_dir, current_exe},
+    f32::consts::E,
     path::PathBuf,
+    ptr::read_unaligned,
     rc::{Rc, Weak},
 };
 
@@ -10,44 +11,157 @@ use crate::parser::{
     parse_file,
     parser::*,
     parser_types as parser,
-    tokenizer_types::{self as tokens, Literal, Range},
+    tokenizer_types::{self as tokens, Range},
 };
 
-#[derive(Default)]
+#[derive(Clone, Debug)]
+pub enum DataType {
+    Blob,
+    Boolean,
+    Byte,
+    Char,
+    Date,
+    Datetime,
+    Double,
+    Int,
+    Long,
+    Longlong,
+    Longptr,
+    Real,
+    String,
+    Time,
+    Uint,
+    Ulong,
+    Decimal(Option<usize>),
+    Class(Rc<RefCell<Class>>),
+    Array(Box<DataType>),
+
+    Any,
+    Unknown,
+    Void,
+}
+
+impl PartialEq for DataType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Class(l0), Self::Class(r0)) => Rc::ptr_eq(l0, r0),
+            (Self::Decimal(l0), Self::Decimal(r0)) => l0 == r0,
+            (Self::Array(l0), Self::Array(r0)) => l0 == r0,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+impl From<&tokens::Literal> for DataType {
+    fn from(src: &tokens::Literal) -> DataType {
+        match src {
+            tokens::Literal::NUMBER => DataType::Int,
+            tokens::Literal::DATE => DataType::Date,
+            tokens::Literal::TIME => DataType::Time,
+            tokens::Literal::STRING => DataType::String,
+            tokens::Literal::BOOLEAN => DataType::Boolean,
+            tokens::Literal::ENUM => DataType::Any, // TODO scrape https://docs.appeon.com/pb2022/powerscript_reference
+        }
+    }
+}
+
+impl From<&Option<parser::DataType>> for DataType {
+    fn from(src: &Option<parser::DataType>) -> DataType {
+        match src {
+            Some(data_type) => data_type.into(),
+            None => DataType::Void,
+        }
+    }
+}
+
+impl From<&parser::DataType> for DataType {
+    fn from(src: &parser::DataType) -> DataType {
+        match src {
+            parser::DataType::Decimal(precission) => {
+                DataType::Decimal(precission.as_ref().map(|str| str.parse().unwrap()))
+            }
+            parser::DataType::Array(sub_type) => DataType::Array(Box::new((&**sub_type).into())),
+            parser::DataType::Complex(group, class) => {
+                DataType::Class(find_class(Some(group), &class))
+            }
+            parser::DataType::ID(id) => match id.to_lowercase().as_str() {
+                "blob" => DataType::Blob,
+                "boolean" => DataType::Boolean,
+                "byte" => DataType::Byte,
+                "char" => DataType::Char,
+                "date" => DataType::Date,
+                "datetime" => DataType::Datetime,
+                "double" => DataType::Double,
+                "integer" | "int" => DataType::Int,
+                "long" => DataType::Long,
+                "longlong" => DataType::Longlong,
+                "longptr" => DataType::Longptr,
+                "real" => DataType::Real,
+                "string" => DataType::String,
+                "time" => DataType::Time,
+                "unsignedinteger" | "uint" => DataType::Uint,
+                "unsignedlong" | "ulong" => DataType::Ulong,
+                _ => DataType::Class(find_class(None, &id)),
+            },
+        }
+    }
+}
+
+impl DataType {
+    fn is_numeric(&self) -> bool {
+        self.numeric_precedence().is_some()
+    }
+
+    fn numeric_precedence(&self) -> Option<u8> {
+        match self {
+            DataType::Int => Some(0),
+            DataType::Uint => Some(1),
+            DataType::Long => Some(2),
+            DataType::Ulong => Some(3),
+            DataType::Longlong => Some(4),
+            DataType::Longptr => Some(5),
+            DataType::Real => Some(6),
+            DataType::Double => Some(7),
+            DataType::Decimal(_) => Some(8),
+            DataType::Any => Some(9),
+            DataType::Unknown => Some(10),
+
+            DataType::Blob
+            | DataType::Boolean
+            | DataType::Byte
+            | DataType::Char
+            | DataType::Date
+            | DataType::Datetime
+            | DataType::String
+            | DataType::Time
+            | DataType::Class(_)
+            | DataType::Array(_)
+            | DataType::Void => None,
+        }
+    }
+
+    pub fn is_convertible(&self, other: &DataType) -> bool {
+        match (self, other) {
+            (DataType::Unknown, _) | (_, DataType::Unknown) => true,
+            (DataType::Any, _) | (_, DataType::Any) => true,
+            (DataType::Array(self_type), DataType::Array(other_type)) => {
+                self_type.is_convertible(&other_type)
+            }
+            _ => self == other || (self.is_numeric() && other.is_numeric()),
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug)]
 struct Usage {
     declaration: Option<Range>,
     definition: Option<Range>,
     uses: Vec<Range>,
 }
 
-fn find_class(group: &Option<String>, class: &String) -> (File, Class) {
+// TODO class not found
+fn find_class(group: Option<&String>, class: &String) -> Rc<RefCell<Class>> {
     unimplemented!();
-}
-
-struct Class {
-    name: String,
-    base: Weak<RefCell<Class>>,
-
-    within: Option<Weak<RefCell<Class>>>,
-    events: Vec<Function>,
-    instance_variables: Vec<(Usage, Rc<parser::Variable>)>,
-}
-
-impl Class {
-    fn new(
-        name: String,
-        base: Weak<RefCell<Class>>,
-        within: Option<Weak<RefCell<Class>>>,
-    ) -> Class {
-        Class {
-            name,
-            base,
-            within,
-
-            events: Vec::new(),
-            instance_variables: Vec::new(),
-        }
-    }
 }
 
 trait Lintable {
@@ -55,8 +169,9 @@ trait Lintable {
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-        return_type: &parser::DataType,
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+        return_type: &DataType,
     );
 }
 
@@ -65,27 +180,41 @@ trait LintableType {
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-    ) -> parser::DataType;
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+    ) -> DataType;
 }
 
-impl LintableType for parser::Variable {
+impl LintableType for parser::VariableAccess {
     fn lint(
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-    ) -> parser::DataType {
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+    ) -> DataType {
+        let mut class = current_class.borrow_mut();
+
         match variables
             .iter_mut()
             .find(|(_, var)| var.name == self.name)
+            .map(|(usage, var)| (usage, var))
             .or_else(|| {
-                file.find_variable(self, &tokens::AccessType::PRIVATE)
-                    .or_else(|| lsp.find_global_variable(self))
+                class
+                    .find_variable(self, &tokens::AccessType::PRIVATE)
+                    .map(|(usage, var)| (usage, &mut var.variable))
+                    .or_else(|| {
+                        file.find_variable(self, &tokens::AccessType::PRIVATE)
+                            .map(|(usage, var)| (usage, &mut var.variable))
+                            .or_else(|| {
+                                lsp.find_global_variable(self)
+                                    .map(|(usage, var)| (usage, var))
+                            })
+                    })
             }) {
             Some((usage, var)) => {
                 usage.uses.push(self.range);
-                var.data_type.clone()
+                (&var.data_type).into()
             }
             None => {
                 file.diagnostics.push(parser::Diagnostic {
@@ -93,7 +222,7 @@ impl LintableType for parser::Variable {
                     message: "Variable not found".into(),
                     range: self.range,
                 });
-                parser::DataType::Unknown
+                DataType::Unknown
             }
         }
     }
@@ -104,63 +233,65 @@ impl LintableType for parser::LValue {
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-    ) -> parser::DataType {
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+    ) -> DataType {
         match &self.lvalue_type {
+            parser::LValueType::This => todo!(),
             parser::LValueType::Super => todo!(),
-            parser::LValueType::Variable(variable) => variable.lint(lsp, file, variables),
-            parser::LValueType::Function(function, arguments) => {
-                let types = arguments
+            parser::LValueType::Parent => todo!(),
+
+            parser::LValueType::Variable(variable) => {
+                variable.lint(lsp, file, current_class, variables)
+            }
+            parser::LValueType::Function(call) => {
+                let types = call
+                    .arguments
                     .iter()
-                    .map(|expression| (expression.lint(lsp, file, variables), String::new()))
+                    .map(|expression| expression.lint(lsp, file, current_class, variables))
                     .collect::<Vec<_>>();
 
-                match file
-                    .find_function(
-                        &parser::Function {
-                            returns: parser::DataType::Unknown,
-                            arguments: types,
-                            ..(**function).clone()
-                        },
-                        &tokens::AccessType::PRIVATE,
-                    )
-                    .or_else(|| lsp.find_global_function(function))
+                match current_class
+                    .borrow_mut()
+                    .find_callable_function(&call.name, &types, &tokens::AccessType::PRIVATE)
+                    .or_else(|| lsp.find_global_function(&call.name, &types))
                 {
-                    Some(func) => func.parsed.returns.clone(),
+                    Some(func) => match &func.parsed.returns {
+                        Some(returns) => returns.into(),
+                        None => DataType::Void,
+                    },
                     None => {
                         file.diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Function not found".into(),
                             range: self.range,
                         });
-                        parser::DataType::Unknown
+                        DataType::Unknown
                     }
                 }
             }
-            parser::LValueType::Method(lvalue, function, arguments) => {
-                let class = lvalue.lint(lsp, file, variables);
+            parser::LValueType::Method(lvalue, call) => {
+                let class = lvalue.lint(lsp, file, current_class, variables);
 
-                let types = arguments
+                let types = call
+                    .arguments
                     .iter()
-                    .map(|expression| (expression.lint(lsp, file, variables), String::new()))
+                    .map(|expression| expression.lint(lsp, file, current_class, variables))
                     .collect::<Vec<_>>();
 
                 match class {
-                    parser::DataType::Complex(group, class) => {
-                        let (mut class_file, _) = find_class(&group, &class);
-
-                        let func = class_file.data.find_function(
-                            &parser::Function {
-                                arguments: types,
-                                ..(**function).clone()
-                            },
+                    DataType::Class(class_rc) => {
+                        let mut class = class_rc.borrow_mut();
+                        let func = class.find_callable_function(
+                            &call.name,
+                            &types,
                             &tokens::AccessType::PUBLIC,
                         );
 
                         match func {
                             Some(func) => {
-                                func.uses.push(function.range);
-                                func.parsed.returns.clone()
+                                func.uses.push(call.range);
+                                (&func.parsed.returns).into()
                             }
                             None => {
                                 file.diagnostics.push(parser::Diagnostic {
@@ -168,7 +299,7 @@ impl LintableType for parser::LValue {
                                     message: "Method not found".into(),
                                     range: self.range,
                                 });
-                                parser::DataType::Unknown
+                                DataType::Unknown
                             }
                         }
                     }
@@ -178,14 +309,14 @@ impl LintableType for parser::LValue {
                             message: "Cannot call a method of a non Complex type".into(),
                             range: self.range,
                         });
-                        parser::DataType::Unknown
+                        DataType::Unknown
                     }
                 }
             }
             parser::LValueType::Member(_, _) => todo!(),
             parser::LValueType::Index(array, index) => {
-                let array_type = array.lint(lsp, file, variables);
-                let index_type = index.lint(lsp, file, variables);
+                let array_type = array.lint(lsp, file, current_class, variables);
+                let index_type = index.lint(lsp, file, current_class, variables);
 
                 if !index_type.is_numeric() {
                     file.diagnostics.push(parser::Diagnostic {
@@ -196,15 +327,15 @@ impl LintableType for parser::LValue {
                 }
 
                 match array_type {
-                    parser::DataType::Array(sub_type) => *sub_type,
-                    parser::DataType::Unknown => parser::DataType::Unknown,
+                    DataType::Array(sub_type) => *sub_type,
+                    DataType::Unknown => DataType::Unknown,
                     _ => {
                         file.diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Subscript Operator can only be applied to Array".into(),
                             range: array.range,
                         });
-                        parser::DataType::Unknown
+                        DataType::Unknown
                     }
                 }
             }
@@ -217,17 +348,18 @@ impl LintableType for parser::Expression {
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-    ) -> parser::DataType {
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+    ) -> DataType {
         match &self.expression_type {
-            parser::ExpressionType::Literal(literal) => literal.get_type(),
+            parser::ExpressionType::Literal(literal) => literal.into(),
             parser::ExpressionType::ArrayLiteral(expressions) => {
                 let types = expressions
                     .iter()
-                    .map(|expr| expr.lint(lsp, file, variables))
+                    .map(|expr| expr.lint(lsp, file, current_class, variables))
                     .collect::<Vec<_>>();
 
-                parser::DataType::Array(Box::new(match types.first() {
+                DataType::Array(Box::new(match types.first() {
                     Some(data_type) => {
                         if types
                             .iter()
@@ -242,19 +374,17 @@ impl LintableType for parser::Expression {
                         }
                         data_type.clone()
                     }
-                    None => parser::DataType::Unknown,
+                    None => DataType::Unknown,
                 }))
             }
             parser::ExpressionType::Operation(left, op, right) => {
-                let left_type = left.lint(lsp, file, variables);
-                let right_type = right.lint(lsp, file, variables);
+                let left_type = left.lint(lsp, file, current_class, variables);
+                let right_type = right.lint(lsp, file, current_class, variables);
 
                 match op {
                     tokens::Operator::AND | tokens::Operator::OR => {
-                        if left_type
-                            .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
-                            || right_type
-                                .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
+                        if left_type.is_convertible(&DataType::Boolean)
+                            || right_type.is_convertible(&DataType::Boolean)
                         {
                             file.diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
@@ -263,14 +393,11 @@ impl LintableType for parser::Expression {
                             });
                         }
 
-                        parser::DataType::Primitive(tokens::Type::BOOLEAN)
+                        DataType::Boolean
                     }
                     tokens::Operator::PLUS => {
-                        if !((left_type
-                            .is_convertible(&parser::DataType::Primitive(tokens::Type::STRING))
-                            && right_type.is_convertible(&parser::DataType::Primitive(
-                                tokens::Type::STRING,
-                            )))
+                        if !((left_type.is_convertible(&DataType::String)
+                            && right_type.is_convertible(&DataType::String))
                             || (left_type.is_numeric() && right_type.is_numeric()))
                         {
                             file.diagnostics.push(parser::Diagnostic {
@@ -281,7 +408,7 @@ impl LintableType for parser::Expression {
                             });
                         }
 
-                        parser::DataType::Primitive(tokens::Type::BOOLEAN)
+                        DataType::Boolean
                     }
                     _ => {
                         match (
@@ -301,18 +428,16 @@ impl LintableType for parser::Expression {
                                     message: "Invalid types for operation, expected numbers".into(),
                                     range: self.range,
                                 });
-                                parser::DataType::Unknown
+                                DataType::Unknown
                             }
                         }
                     }
                 }
             }
             parser::ExpressionType::BooleanNot(expression) => {
-                let expression_type = expression.lint(lsp, file, variables);
+                let expression_type = expression.lint(lsp, file, current_class, variables);
 
-                if !expression_type
-                    .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
-                {
+                if !expression_type.is_convertible(&DataType::Boolean) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Invalid type, expected boolean".into(),
@@ -320,16 +445,16 @@ impl LintableType for parser::Expression {
                     });
                 }
 
-                parser::DataType::Primitive(tokens::Type::BOOLEAN)
+                DataType::Boolean
             }
             parser::ExpressionType::Parenthesized(expression) => {
-                expression.lint(lsp, file, variables)
+                expression.lint(lsp, file, current_class, variables)
             }
             parser::ExpressionType::Create(class) => todo!("Check if class exists"),
             parser::ExpressionType::CreateUsing(class) => {
-                let class_type = class.lint(lsp, file, variables);
+                let class_type = class.lint(lsp, file, current_class, variables);
 
-                if !class_type.is_convertible(&parser::DataType::Primitive(tokens::Type::STRING)) {
+                if !class_type.is_convertible(&DataType::String) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Invalid type, expected string".into(),
@@ -337,11 +462,13 @@ impl LintableType for parser::Expression {
                     });
                 }
 
-                parser::DataType::Complex(None, "powerobject".into())
+                DataType::Class(find_class(None, &"powerobject".into()))
             }
-            parser::ExpressionType::LValue(lvalue) => lvalue.lint(lsp, file, variables),
+            parser::ExpressionType::LValue(lvalue) => {
+                lvalue.lint(lsp, file, current_class, variables)
+            }
             parser::ExpressionType::IncrementDecrement(lvalue, _) => {
-                let lvalue_type = lvalue.lint(lsp, file, variables);
+                let lvalue_type = lvalue.lint(lsp, file, current_class, variables);
 
                 if !lvalue_type.is_numeric() {
                     file.diagnostics.push(parser::Diagnostic {
@@ -362,12 +489,13 @@ impl Lintable for parser::Statement {
         &self,
         lsp: &mut LSP,
         file: &mut FileData,
-        variables: &mut Vec<(Usage, Rc<parser::Variable>)>,
-        return_type: &parser::DataType,
+        current_class: &Rc<RefCell<Class>>,
+        variables: &mut Vec<(Usage, parser::Variable)>,
+        return_type: &DataType,
     ) {
         match &self.statement_type {
             parser::StatementType::Expression(expression) => {
-                expression.lint(lsp, file, variables);
+                expression.lint(lsp, file, current_class, variables);
             }
             parser::StatementType::If(parser::IfStatement {
                 condition,
@@ -375,19 +503,17 @@ impl Lintable for parser::Statement {
                 elseif_statements,
                 else_statements,
             }) => {
-                let condition_type = condition.lint(lsp, file, variables);
+                let condition_type = condition.lint(lsp, file, current_class, variables);
 
-                statements
-                    .iter()
-                    .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                statements.iter().for_each(|statement| {
+                    statement.lint(lsp, file, current_class, variables, return_type)
+                });
                 elseif_statements
                     .iter()
                     .for_each(|(condition, statements)| {
-                        let condition_type = condition.lint(lsp, file, variables);
+                        let condition_type = condition.lint(lsp, file, current_class, variables);
 
-                        if !condition_type
-                            .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
-                        {
+                        if !condition_type.is_convertible(&DataType::Boolean) {
                             file.diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Condition for if must be of type Boolean".into(),
@@ -395,18 +521,16 @@ impl Lintable for parser::Statement {
                             });
                         }
 
-                        statements
-                            .iter()
-                            .for_each(|statement| statement.lint(lsp, file, variables, return_type))
+                        statements.iter().for_each(|statement| {
+                            statement.lint(lsp, file, current_class, variables, return_type)
+                        })
                     });
 
-                else_statements
-                    .iter()
-                    .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                else_statements.iter().for_each(|statement| {
+                    statement.lint(lsp, file, current_class, variables, return_type)
+                });
 
-                if !condition_type
-                    .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
-                {
+                if !condition_type.is_convertible(&DataType::Boolean) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Condition for if must be of type Boolean".into(),
@@ -415,22 +539,24 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Throw(exception) => {
-                exception.lint(lsp, file, variables);
+                exception.lint(lsp, file, current_class, variables);
             }
-            parser::StatementType::Declaration(variable) => {
+            parser::StatementType::Declaration(var) => {
                 variables.push((
                     Usage {
-                        declaration: Some(variable.range),
+                        declaration: Some(var.variable.range),
                         definition: None,
                         uses: Vec::new(),
                     },
-                    variable.clone(),
+                    var.variable.clone(),
                 ));
 
-                if let Some(initial_value) = &variable.initial_value {
+                if let Some(initial_value) = &var.variable.initial_value {
                     match initial_value.expression_type {
                         parser::ExpressionType::Literal(literal) => {
-                            if !literal.is_type(&variable.data_type) {
+                            if !DataType::from(&literal)
+                                .is_convertible(&(&var.variable.data_type).into())
+                            {
                                 file.diagnostics.push(parser::Diagnostic {
                                     severity: parser::Severity::Error,
                                     message: "Type's are not convertible".into(),
@@ -444,8 +570,8 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Assignment(lvalue, expression) => {
-                let lvalue_type = lvalue.lint(lsp, file, variables);
-                let expression_type = expression.lint(lsp, file, variables);
+                let lvalue_type = lvalue.lint(lsp, file, current_class, variables);
+                let expression_type = expression.lint(lsp, file, current_class, variables);
 
                 if !expression_type.is_convertible(&lvalue_type) {
                     file.diagnostics.push(parser::Diagnostic {
@@ -458,14 +584,22 @@ impl Lintable for parser::Statement {
             parser::StatementType::TryCatch(parser::TryCatchStatement {
                 statements,
                 catches,
+                finally,
             }) => {
-                statements
-                    .iter()
-                    .for_each(|statement| statement.lint(lsp, file, variables, return_type));
-                catches.iter().for_each(|(_, statements)| {
-                    statements
-                        .iter()
-                        .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                statements.iter().for_each(|statement| {
+                    statement.lint(lsp, file, current_class, variables, return_type)
+                });
+                catches.iter().for_each(|(_, _, statements)| {
+                    // TODO lint the capture type and name
+                    // TODO check if the all thrown errors are caught
+                    statements.iter().for_each(|statement| {
+                        statement.lint(lsp, file, current_class, variables, return_type)
+                    });
+                });
+                finally.as_ref().map(|statements| {
+                    statements.iter().for_each(|statement| {
+                        statement.lint(lsp, file, current_class, variables, return_type)
+                    })
                 });
             }
             parser::StatementType::ForLoop(parser::ForLoopStatement {
@@ -475,9 +609,9 @@ impl Lintable for parser::Statement {
                 variable,
                 statements,
             }) => {
-                let variable_type = variable.lint(lsp, file, variables);
-                let start_type = start.lint(lsp, file, variables);
-                let stop_type = stop.lint(lsp, file, variables);
+                let variable_type = variable.lint(lsp, file, current_class, variables);
+                let start_type = start.lint(lsp, file, current_class, variables);
+                let stop_type = stop.lint(lsp, file, current_class, variables);
 
                 let mut to_check = vec![
                     (variable_type, &variable.range),
@@ -486,7 +620,7 @@ impl Lintable for parser::Statement {
                 ];
 
                 if let Some(step) = step {
-                    let step_type = step.lint(lsp, file, variables);
+                    let step_type = step.lint(lsp, file, current_class, variables);
                     to_check.push((step_type, &step.range));
                 }
 
@@ -500,24 +634,22 @@ impl Lintable for parser::Statement {
                     }
                 }
 
-                statements
-                    .iter()
-                    .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                statements.iter().for_each(|statement| {
+                    statement.lint(lsp, file, current_class, variables, return_type)
+                });
             }
             parser::StatementType::WhileLoop(parser::WhileLoopStatement {
                 condition,
                 statements,
                 ..
             }) => {
-                let condition_type = condition.lint(lsp, file, variables);
+                let condition_type = condition.lint(lsp, file, current_class, variables);
 
-                statements
-                    .iter()
-                    .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                statements.iter().for_each(|statement| {
+                    statement.lint(lsp, file, current_class, variables, return_type)
+                });
 
-                if !condition_type
-                    .is_convertible(&parser::DataType::Primitive(tokens::Type::BOOLEAN))
-                {
+                if !condition_type.is_convertible(&DataType::Boolean) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Condition for while loop must be of type Boolean".into(),
@@ -526,7 +658,7 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Choose(parser::ChooseCaseStatement { choose, cases }) => {
-                let choose_type = choose.lint(lsp, file, variables);
+                let choose_type = choose.lint(lsp, file, current_class, variables);
                 cases.iter().for_each(|(cases, statements)| {
                     let mut literals = Vec::new();
 
@@ -555,7 +687,7 @@ impl Lintable for parser::Statement {
                     }
 
                     for (literal, range) in literals {
-                        if !literal.is_type(&choose_type) {
+                        if choose_type.is_convertible(&literal.into()) {
                             file.diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Wrong Literal Type".into(),
@@ -564,47 +696,151 @@ impl Lintable for parser::Statement {
                         }
                     }
 
-                    statements
-                        .iter()
-                        .for_each(|statement| statement.lint(lsp, file, variables, return_type));
+                    statements.iter().for_each(|statement| {
+                        statement.lint(lsp, file, current_class, variables, return_type)
+                    });
                 })
             }
             parser::StatementType::Return(ret) => {
-                let ret_type = ret.lint(lsp, file, variables);
+                let ret_type = ret
+                    .as_ref()
+                    .map(|ret| ret.lint(lsp, file, current_class, variables))
+                    .unwrap_or(DataType::Void);
 
                 if !ret_type.is_convertible(return_type) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Wrong return Type".into(),
-                        range: ret.range,
+                        range: self.range,
                     });
                 }
             }
-            parser::StatementType::Exit => todo!(), // TODO stack?
-            parser::StatementType::Continue => todo!(),
-            parser::StatementType::Error => todo!(),
+            parser::StatementType::Call(call) => {
+                todo!("Function call");
+            },
+            parser::StatementType::Exit => {}, // TODO stack?
+            parser::StatementType::Continue => {},
+            parser::StatementType::Error => {},
             parser::StatementType::Empty => {}
         }
     }
 }
 
+#[derive(Clone, Debug)]
 struct Function {
-    parsed: Rc<parser::Function>,
+    parsed: parser::Function,
 
     declaration: Option<Range>,
     definition: Option<Range>,
     uses: Vec<Range>,
 }
 
-struct FileData {
-    classes: Vec<Class>,
-    // Per instance
-    group_variables: Vec<(Usage, Rc<parser::Variable>)>, // TODO why Rc, just copy to new type?
-    // Shared with all isntances
-    shared_variables: Vec<(Usage, Rc<parser::Variable>)>,
+impl Function {
+    pub fn is_callable(&self, arguments: &Vec<DataType>, min_access: &tokens::AccessType) -> bool {
+        min_access.strictness()
+            >= self
+                .parsed
+                .access
+                .map(|access| access.strictness())
+                .unwrap_or(0)
+            && self
+                .parsed
+                .arguments
+                .iter()
+                .zip(arguments)
+                .all(|(self_arg, call_arg)| {
+                    call_arg.is_convertible(&(&self_arg.variable.data_type).into())
+                })
+    }
+}
 
+#[derive(Clone, Debug)]
+struct Class {
+    name: String,
+    base: Rc<RefCell<Class>>,
+    within: Option<Rc<RefCell<Class>>>,
+
+    ons: Vec<Function>,
+    events: Vec<Function>,
     functions: Vec<Function>,
     external_functions: Vec<Function>,
+
+    instance_variables: Vec<(Usage, parser::InstanceVariable)>,
+}
+
+impl Class {
+    fn new(name: String, base: Rc<RefCell<Class>>, within: Option<Rc<RefCell<Class>>>) -> Class {
+        Class {
+            name,
+            base,
+            within,
+
+            events: Vec::new(),
+            instance_variables: Vec::new(),
+            functions: Vec::new(),
+            ons: Vec::new(),
+            external_functions: Vec::new(),
+        }
+    }
+
+    fn find_variable(
+        &mut self,
+        variable: &parser::VariableAccess,
+        min_access: &tokens::AccessType,
+    ) -> Option<&mut (Usage, parser::InstanceVariable)> {
+        self.instance_variables.iter_mut().find(|(_, var)| {
+            var.variable.name == variable.name
+                && min_access.strictness()
+                    >= var
+                        .access
+                        .read
+                        .map(|access| access.strictness())
+                        .unwrap_or(0)
+        })
+    }
+
+    fn find_exact_function(&mut self, function: &parser::Function) -> Option<&mut Function> {
+        self.functions
+            .iter_mut()
+            .find(|func| func.parsed.equals(function))
+            .or_else(|| {
+                self.external_functions
+                    .iter_mut()
+                    .find(|func| func.parsed.equals(function))
+            })
+    }
+
+    fn find_conflicting_function(&mut self, function: &parser::Function) -> Option<&mut Function> {
+        self.functions
+            .iter_mut()
+            .find(|func| func.parsed.conflicts(function))
+            .or_else(|| {
+                self.external_functions
+                    .iter_mut()
+                    .find(|func| func.parsed.conflicts(function))
+            })
+    }
+
+    fn find_callable_function(
+        &mut self,
+        name: &String,
+        arguments: &Vec<DataType>,
+        min_access: &tokens::AccessType,
+    ) -> Option<&mut Function> {
+        self.functions
+            .iter_mut()
+            .find(|func| &func.parsed.name == name && func.is_callable(arguments, min_access))
+            .or_else(|| {
+                self.external_functions.iter_mut().find(|func| {
+                    &func.parsed.name == name && func.is_callable(arguments, min_access)
+                })
+            })
+    }
+}
+struct FileData {
+    classes: Vec<Rc<RefCell<Class>>>,
+    // Shared with all isntances
+    shared_variables: Vec<(Usage, parser::InstanceVariable)>,
 
     diagnostics: Vec<parser::Diagnostic>,
 }
@@ -612,53 +848,18 @@ struct FileData {
 impl FileData {
     fn find_variable(
         &mut self,
-        variable: &parser::Variable,
+        variable: &parser::VariableAccess,
         min_access: &tokens::AccessType,
-    ) -> Option<&mut (Usage, Rc<parser::Variable>)> {
-        self.group_variables
-            .iter_mut()
-            .find(|(_, var)| {
-                var.name == variable.name
-                    && min_access.strictness()
-                        >= var
-                            .access
-                            .read
-                            .map(|access| access.strictness())
-                            .unwrap_or(0)
-            })
-            .or_else(|| {
-                self.shared_variables.iter_mut().find(|(_, var)| {
-                    var.name == variable.name
-                        && min_access.strictness()
-                            >= var
-                                .access
-                                .read
-                                .map(|access| access.strictness())
-                                .unwrap_or(0)
-                })
-            })
-    }
-
-    fn find_exact_function(&mut self, function: &parser::Function) -> Option<&mut Function> {
-        self.functions
-            .iter_mut()
-            .find(|func| func.parsed.equals(function))
-    }
-
-    fn find_conflicting_function(&mut self, function: &parser::Function) -> Option<&mut Function> {
-        self.functions
-            .iter_mut()
-            .find(|func| func.parsed.conflicts(function))
-    }
-
-    fn find_function(
-        &mut self,
-        function: &parser::Function,
-        min_access: &tokens::AccessType,
-    ) -> Option<&mut Function> {
-        self.functions
-            .iter_mut()
-            .find(|func| func.parsed.is_callable(function, min_access))
+    ) -> Option<&mut (Usage, parser::InstanceVariable)> {
+        self.shared_variables.iter_mut().find(|(_, var)| {
+            var.variable.name == variable.name
+                && min_access.strictness()
+                    >= var
+                        .access
+                        .read
+                        .map(|access| access.strictness())
+                        .unwrap_or(0)
+        })
     }
 }
 
@@ -675,14 +876,8 @@ impl File {
         Ok(File {
             data: FileData {
                 classes: Vec::new(),
-
-                group_variables: Vec::new(),
-                shared_variables: Vec::new(),
-
-                functions: Vec::new(),
-                external_functions: Vec::new(),
-
                 diagnostics: Vec::new(),
+                shared_variables: Vec::new(),
             },
 
             top_levels: parse_file(&path)?,
@@ -691,176 +886,290 @@ impl File {
         })
     }
 
+    fn require_class(
+        data: &mut FileData,
+        current_class: &Weak<RefCell<Class>>,
+        top_level_type: String,
+        range: Range,
+    ) -> Option<Rc<RefCell<Class>>> {
+        let class = current_class.upgrade();
+        match class {
+            Some(_) => {}
+            None => data.diagnostics.push(parser::Diagnostic {
+                severity: parser::Severity::Error,
+                message: top_level_type
+                    + " have to come after the Type Definition that they refer to",
+                range,
+            }),
+        }
+        class
+    }
+
     fn lint_rest(&mut self, lsp: &mut LSP) {
+        let current_class = Weak::<RefCell<Class>>::new();
+        let finish_linting_class = || match current_class.upgrade() {
+            Some(class) => {
+                for func in &class.borrow_mut().functions {
+                    if func.declaration.is_none() {
+                        if let Some(definition) = func.definition {
+                            self.data.diagnostics.push(parser::Diagnostic {
+                                severity: parser::Severity::Error,
+                                message: "Function is missing a Forward Declaration".into(),
+                                range: definition,
+                            })
+                        } else {
+                            todo!();
+                        }
+                    }
+
+                    if func.definition.is_none() {
+                        if let Some(declaration) = func.declaration {
+                            self.data.diagnostics.push(parser::Diagnostic {
+                                severity: parser::Severity::Error,
+                                message: "Function is missing a Definition".into(),
+                                range: declaration,
+                            })
+                        } else {
+                            todo!();
+                        }
+                    }
+                }
+            }
+            None => unreachable!(),
+        };
+
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
                 parser::TopLevelType::DatatypeDecl(..) => {}
                 parser::TopLevelType::ForwardDecl => {}
                 parser::TopLevelType::TypeVariablesDecl(..) => {}
-                parser::TopLevelType::GlobalVariablesDecl(..) => {}
-                parser::TopLevelType::VariableDecl(..) => {}
+                parser::TopLevelType::ScopedVariablesDecl(..) => {}
+                parser::TopLevelType::GlobalVariableDecl(..) => {}
                 parser::TopLevelType::ConstantDecl => {}
                 parser::TopLevelType::FunctionForwardDecl => {}
                 parser::TopLevelType::FunctionsForwardDecl(..) => {}
                 parser::TopLevelType::ExternalFunctions(..) => {}
                 parser::TopLevelType::FunctionBody(function, statements) => {
-                    let mut variables = Vec::new();
+                    if let Some(class) = Self::require_class(
+                        &mut self.data,
+                        &current_class,
+                        "Function Bodies".into(),
+                        top_level.range,
+                    ) {
+                        let mut variables = Vec::new();
 
-                    statements.iter().for_each(|statement| {
-                        statement.lint(lsp, &mut self.data, &mut variables, &function.returns)
-                    });
+                        statements.iter().for_each(|statement| {
+                            statement.lint(
+                                lsp,
+                                &mut self.data,
+                                &class,
+                                &mut variables,
+                                &(&function.returns).into(),
+                            )
+                        });
 
-                    match self.data.find_conflicting_function(&function) {
-                        Some(func) => {
-                            if let Some(definition) = func.definition {
-                                let declaration = func.declaration;
+                        match class.borrow_mut().find_conflicting_function(&function) {
+                            Some(func) => {
+                                if let Some(definition) = func.definition {
+                                    let declaration = func.declaration;
+                                    self.data.diagnostics.push(parser::Diagnostic {
+                                        severity: parser::Severity::Error,
+                                        message: "Function already defined".into(),
+                                        range: function.range,
+                                    });
+                                    self.data.diagnostics.push(parser::Diagnostic {
+                                        severity: parser::Severity::Hint,
+                                        message: "Already defined here".into(),
+                                        range: definition,
+                                    });
+
+                                    class.borrow_mut().functions.push(Function {
+                                        parsed: function.clone(),
+
+                                        declaration,
+                                        definition: Some(function.range),
+                                        uses: Vec::new(),
+                                    });
+                                } else {
+                                    func.definition = Some(function.range);
+                                }
+                            }
+                            None => {
                                 self.data.diagnostics.push(parser::Diagnostic {
                                     severity: parser::Severity::Error,
-                                    message: "Function already defined".into(),
+                                    message: "Function is missing a Forward Declaration".into(),
                                     range: function.range,
                                 });
-                                self.data.diagnostics.push(parser::Diagnostic {
-                                    severity: parser::Severity::Hint,
-                                    message: "Already defined here".into(),
-                                    range: definition,
-                                });
 
-                                self.data.functions.push(Function {
+                                class.borrow_mut().functions.push(Function {
                                     parsed: function.clone(),
 
-                                    declaration,
+                                    declaration: None,
                                     definition: Some(function.range),
                                     uses: Vec::new(),
-                                });
-                            } else {
-                                func.definition = Some(function.range);
+                                })
                             }
-                        }
-                        None => {
-                            self.data.diagnostics.push(parser::Diagnostic {
-                                severity: parser::Severity::Error,
-                                message: "Function is missing a Forward Declaration".into(),
-                                range: function.range,
-                            });
-
-                            self.data.functions.push(Function {
-                                parsed: function.clone(),
-
-                                declaration: None,
-                                definition: Some(function.range),
-                                uses: Vec::new(),
-                            })
                         }
                     }
                 }
-                parser::TopLevelType::OnBody(_, statements) => {
-                    let mut variables = Vec::new();
-                    statements.iter().for_each(|statement| {
-                        statement.lint(lsp, &mut self.data, &mut variables, &parser::DataType::Void)
-                    });
-                }
-                parser::TopLevelType::EventBody(function, statements) => {
-                    let mut variables = Vec::new();
-                    statements.iter().for_each(|statement| {
-                        statement.lint(lsp, &mut self.data, &mut variables, &function.returns)
-                    });
-                }
-            }
-        }
+                parser::TopLevelType::OnBody(on, statements) => {
+                    // TODO doesnt actualyl need to be next to the class
+                    if let Some(class) = Self::require_class(
+                        &mut self.data,
+                        &current_class,
+                        "On Bodies".into(),
+                        top_level.range,
+                    ) {
+                        let mut variables = Vec::new();
 
-        for func in &self.data.functions {
-            if func.declaration.is_none() {
-                if let Some(definition) = func.definition {
-                    self.data.diagnostics.push(parser::Diagnostic {
-                        severity: parser::Severity::Error,
-                        message: "Function is missing a Forward Declaration".into(),
-                        range: definition,
-                    })
-                } else {
-                    todo!();
+                        statements.iter().for_each(|statement| {
+                            statement.lint(
+                                lsp,
+                                &mut self.data,
+                                &class,
+                                &mut variables,
+                                &DataType::Void,
+                            )
+                        });
+                    }
                 }
-            }
+                parser::TopLevelType::EventBody(function, statements) => match current_class
+                    .upgrade()
+                {
+                    Some(class) => {
+                        let mut variables = Vec::new();
 
-            if func.definition.is_none() {
-                if let Some(declaration) = func.declaration {
-                    self.data.diagnostics.push(parser::Diagnostic {
+                        statements.iter().for_each(|statement| {
+                            statement.lint(
+                                lsp,
+                                &mut self.data,
+                                &class,
+                                &mut variables,
+                                &(&function.returns).into(),
+                            )
+                        });
+                    }
+                    None => self.data.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
-                        message: "Function is missing a Definition".into(),
-                        range: declaration,
-                    })
-                } else {
-                    todo!();
-                }
+                        message: "Event Declarations have to come after a Type Definition".into(),
+                        range: top_level.range,
+                    }),
+                },
             }
         }
     }
 
     fn lint_shallow(&mut self, lsp: &mut LSP) {
+        let current_class = Weak::<RefCell<Class>>::new();
+
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
-                parser::TopLevelType::DatatypeDecl(scope, vars) => {
+                parser::TopLevelType::DatatypeDecl(class, vars) => {
+                    let within = class
+                        .within
+                        .as_ref()
+                        .map(|within_name| {
+                            let within = self
+                                .data
+                                .classes
+                                .iter()
+                                .find(|within| &within.borrow().name == within_name)
+                                .cloned();
+
+                            if within.is_none() {
+                                self.data.diagnostics.push(parser::Diagnostic {
+                                    severity: parser::Severity::Error,
+                                    message: "Within Class not found".into(),
+                                    range: top_level.range,
+                                });
+                            }
+
+                            within
+                        })
+                        .flatten();
+
+                    let mut new_class =
+                        Class::new(class.name.clone(), find_class(None, &class.base), within);
+
                     for var in vars {
-                        self.data.group_variables.push((
+                        new_class.instance_variables.push((
                             Usage {
-                                declaration: Some(var.range),
+                                declaration: Some(var.variable.range),
                                 definition: None,
                                 uses: Vec::new(),
                             },
                             var.clone(),
                         ));
                     }
+
+                    self.data.classes.push(Rc::new(RefCell::new(new_class)));
                 }
                 parser::TopLevelType::ForwardDecl => { /* TODO */ }
                 parser::TopLevelType::TypeVariablesDecl(vars) => {
-                    for var in vars {
-                        self.data.group_variables.push((
-                            Usage {
-                                declaration: Some(var.range),
-                                definition: None,
-                                uses: Vec::new(),
-                            },
-                            var.clone(),
-                        ));
+                    if let Some(class) = Self::require_class(
+                        &mut self.data,
+                        &current_class,
+                        "Type Variables".into(),
+                        top_level.range,
+                    ) {
+                        for var in vars {
+                            class.borrow_mut().instance_variables.push((
+                                Usage {
+                                    declaration: Some(var.variable.range),
+                                    definition: None,
+                                    uses: Vec::new(),
+                                },
+                                var.clone(),
+                            ));
+                        }
                     }
                 }
-                parser::TopLevelType::GlobalVariablesDecl(_) => { /* TODO */ }
-                parser::TopLevelType::VariableDecl(_) => { /* TODO */ }
+                parser::TopLevelType::ScopedVariablesDecl(_) => { /* TODO shared + global */ }
+                parser::TopLevelType::GlobalVariableDecl(_) => { /* TODO implicitly shared + global + shared scope keyword invalid */
+                }
                 parser::TopLevelType::ConstantDecl => { /* TODO */ }
                 parser::TopLevelType::FunctionForwardDecl => { /* TODO */ }
                 parser::TopLevelType::FunctionsForwardDecl(functions) => {
-                    for function in functions {
-                        match self.data.find_conflicting_function(function) {
-                            Some(func) => {
-                                if let Some(declaration) = func.declaration {
-                                    let definition = func.definition;
-                                    self.data.functions.push(Function {
-                                        parsed: function.clone(),
-                                        declaration: Some(function.range),
-                                        definition,
-                                        uses: Vec::new(),
-                                    });
+                    if let Some(class) = Self::require_class(
+                        &mut self.data,
+                        &current_class,
+                        "On Bodies".into(),
+                        top_level.range,
+                    ) {
+                        for function in functions {
+                            match class.borrow_mut().find_conflicting_function(function) {
+                                Some(func) => {
+                                    if let Some(declaration) = func.declaration {
+                                        let definition = func.definition;
+                                        class.borrow_mut().functions.push(Function {
+                                            parsed: function.clone(),
+                                            declaration: Some(function.range),
+                                            definition,
+                                            uses: Vec::new(),
+                                        });
 
-                                    self.data.diagnostics.push(parser::Diagnostic {
-                                        severity: parser::Severity::Error,
-                                        message: "Function already forward declared".into(),
-                                        range: function.range,
-                                    });
-                                    self.data.diagnostics.push(parser::Diagnostic {
-                                        severity: parser::Severity::Hint,
-                                        message: "Already forward declared here".into(),
-                                        range: declaration,
-                                    });
-                                } else {
-                                    func.declaration = Some(function.range);
+                                        self.data.diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Function already forward declared".into(),
+                                            range: function.range,
+                                        });
+                                        self.data.diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Hint,
+                                            message: "Already forward declared here".into(),
+                                            range: declaration,
+                                        });
+                                    } else {
+                                        func.declaration = Some(function.range);
+                                    }
                                 }
-                            }
-                            None => self.data.functions.push(Function {
-                                parsed: function.clone(),
+                                None => class.borrow_mut().functions.push(Function {
+                                    parsed: function.clone(),
 
-                                declaration: Some(function.range),
-                                definition: None,
-                                uses: Vec::new(),
-                            }),
+                                    declaration: Some(function.range),
+                                    definition: None,
+                                    uses: Vec::new(),
+                                }),
+                            }
                         }
                     }
                 }
@@ -868,39 +1177,46 @@ impl File {
                 parser::TopLevelType::OnBody(..) => {}
                 parser::TopLevelType::EventBody(..) => {}
                 parser::TopLevelType::ExternalFunctions(functions) => {
-                    for function in functions {
-                        match self.data.find_conflicting_function(function) {
-                            Some(func) => {
-                                if let Some(declaration) = func.declaration {
-                                    let definition = func.definition;
-                                    self.data.external_functions.push(Function {
-                                        parsed: function.clone(),
-                                        declaration: Some(function.range),
-                                        definition,
-                                        uses: Vec::new(),
-                                    });
+                    if let Some(class) = Self::require_class(
+                        &mut self.data,
+                        &current_class,
+                        "External Functions".into(),
+                        top_level.range,
+                    ) {
+                        for function in functions {
+                            match class.borrow_mut().find_conflicting_function(function) {
+                                Some(func) => {
+                                    if let Some(declaration) = func.declaration {
+                                        let definition = func.definition;
+                                        class.borrow_mut().external_functions.push(Function {
+                                            parsed: function.clone(),
+                                            declaration: Some(function.range),
+                                            definition,
+                                            uses: Vec::new(),
+                                        });
 
-                                    self.data.diagnostics.push(parser::Diagnostic {
-                                        severity: parser::Severity::Error,
-                                        message: "Function already forward declared".into(),
-                                        range: function.range,
-                                    });
-                                    self.data.diagnostics.push(parser::Diagnostic {
-                                        severity: parser::Severity::Hint,
-                                        message: "Already forward declared here".into(),
-                                        range: declaration,
-                                    });
-                                } else {
-                                    func.declaration = Some(function.range);
+                                        self.data.diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Function already forward declared".into(),
+                                            range: function.range,
+                                        });
+                                        self.data.diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Hint,
+                                            message: "Already forward declared here".into(),
+                                            range: declaration,
+                                        });
+                                    } else {
+                                        func.declaration = Some(function.range);
+                                    }
                                 }
-                            }
-                            None => self.data.external_functions.push(Function {
-                                parsed: function.clone(),
+                                None => class.borrow_mut().external_functions.push(Function {
+                                    parsed: function.clone(),
 
-                                declaration: Some(function.range),
-                                definition: None,
-                                uses: Vec::new(),
-                            }),
+                                    declaration: Some(function.range),
+                                    definition: None,
+                                    uses: Vec::new(),
+                                }),
+                            }
                         }
                     }
                 }
@@ -915,7 +1231,7 @@ pub struct LSPOptions {
 
 pub struct LSP {
     files: Vec<File>,
-    global_variables: Vec<(Usage, Rc<parser::Variable>)>,
+    global_variables: Vec<(Usage, parser::Variable)>,
     global_functions: Vec<Function>,
 
     options: LSPOptions,
@@ -924,18 +1240,22 @@ pub struct LSP {
 impl LSP {
     fn find_global_variable(
         &mut self,
-        variable: &parser::Variable,
-    ) -> Option<&mut (Usage, Rc<parser::Variable>)> {
+        variable: &parser::VariableAccess,
+    ) -> Option<&mut (Usage, parser::Variable)> {
         self.global_variables
             .iter_mut()
             .find(|(_, var)| var.name == variable.name)
     }
-    fn find_global_function(&mut self, function: &Rc<parser::Function>) -> Option<&mut Function> {
+
+    fn find_global_function(
+        &mut self,
+        name: &String,
+        arguments: &Vec<DataType>,
+    ) -> Option<&mut Function> {
         // No need to look for instance functions
         self.global_functions.iter_mut().find(|global| {
-            global
-                .parsed
-                .is_callable(function, &tokens::AccessType::PUBLIC)
+            &global.parsed.name == name
+                && global.is_callable(arguments, &tokens::AccessType::PUBLIC)
         })
     }
 
