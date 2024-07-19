@@ -325,7 +325,7 @@ pub struct Statement {
 
 #[derive(Debug)]
 pub enum TopLevelType {
-    DatatypeDecl(Class, Vec<InstanceVariable>),
+    DatatypeDecl(Class, Vec<InstanceVariable>, Vec<Function>),
     ForwardDecl,
     TypeVariablesDecl(Vec<InstanceVariable>),
     ScopedVariablesDecl(Vec<ScopedVariable>),

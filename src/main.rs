@@ -15,7 +15,8 @@ fn main() -> anyhow::Result<()> {
     
     let mut lsp = LSP::new()?;
     // lsp.add_file("res/test.sru".into(), false)?;
-    lsp.add_file("res/u_filehandler.sru".into(), false)?;
+    // lsp.add_file("res/u_filehandler.sru".into(), false)?;
+    lsp.add_file("res/pfc_w_find.srw".into(), false)?;
 
     // for token in tokens {
     //     println!("{:?} {:?} {}:{}-{}:{}", token.token_type, token.content, token.range.start.line, token.range.start.column, token.range.end.line, token.range.end.column);

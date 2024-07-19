@@ -528,6 +528,132 @@ impl Parser<'_> {
         previous.ok_or(ParseError::UnexpectedToken)
     }
 
+    fn parse_event_header(&mut self) -> ParseResult<Function> {
+        let mut arguments = Vec::new();
+        let name;
+        let start = self.peek()?.range.start;
+
+        let scope_modif = if let TokenType::ScopeModif(scope_modif) = self.peek()?.token_type {
+            self.next()?;
+            Some(scope_modif)
+        } else {
+            None
+        };
+
+        let access = if let TokenType::AccessType(access) = self.peek()?.token_type {
+            self.next()?;
+            Some(access)
+        } else {
+            None
+        };
+
+        let returns = match self.peek()?.token_type {
+            TokenType::Keyword(tokens::Keyword::FUNCTION) => {
+                self.next()?;
+                Some(self.parse_type()?)
+            }
+            TokenType::Keyword(tokens::Keyword::SUBROUTINE) => {
+                self.next()?;
+                None
+            }
+            _ => {
+                let range = self.peek()?.range;
+                return self.fatal(&"Expected FUNCTION or SUBROUTINE".to_owned(), &range, true);
+            }
+        };
+
+        name = self.expect(TokenType::ID)?.content;
+        self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
+        let end;
+        loop {
+            match self.peek()?.token_type {
+                TokenType::Symbol(tokens::Symbol::RPAREN) => {
+                    end = self.next()?.range.end;
+                    break;
+                }
+                TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
+                    self.next()?;
+                    end = self
+                        .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
+                        .range
+                        .end;
+                    break;
+                }
+                _ => {}
+            };
+
+            let is_ref = self
+                .optional(TokenType::Keyword(tokens::Keyword::REF))?
+                .is_some();
+            let is_readonly = self
+                .optional(TokenType::Keyword(tokens::Keyword::READONLY))?
+                .is_some();
+
+            let data_type = self.parse_type()?;
+            let name = self.expect(TokenType::ID)?;
+            arguments.push(Argument {
+                is_ref,
+                variable: Variable {
+                    constant: is_readonly,
+                    data_type,
+                    name: name.content,
+                    initial_value: None,
+                    range: name.range,
+                },
+            });
+
+            match self.peek()?.token_type {
+                TokenType::Symbol(tokens::Symbol::COMMA) => {
+                    self.next()?;
+                }
+                TokenType::Symbol(tokens::Symbol::RPAREN) => {
+                    end = self.next()?.range.end;
+                    break;
+                }
+                _ => {
+                    let range = self.peek()?.range;
+                    return self.fatal(&"Expected ',' or ')'".to_owned(), &range, true);
+                }
+            }
+        }
+
+        if self
+            .optional(TokenType::Keyword(tokens::Keyword::THROWS))?
+            .is_some()
+        {
+            self.expect(TokenType::ID)?;
+        }
+
+        match self.peek()?.token_type {
+            TokenType::Keyword(tokens::Keyword::RPCFUNC) => {
+                self.next()?;
+            }
+            TokenType::Keyword(tokens::Keyword::LIBRARY) => {
+                self.next()?;
+                self.expect(TokenType::Literal(tokens::Literal::STRING))?;
+
+                if self
+                    .optional(TokenType::Keyword(tokens::Keyword::ALIAS))?
+                    .is_some()
+                {
+                    self.expect(TokenType::Keyword(tokens::Keyword::FOR))?;
+                    self.expect(TokenType::Literal(tokens::Literal::STRING))?;
+                }
+            }
+            _ => {}
+        }
+        self.expect(TokenType::NEWLINE).split_eof()?;
+
+        Ok(Function {
+            returns,
+            scope_modif,
+            access,
+            name,
+            arguments,
+            range: Range { start, end },
+        })
+    }
+
     fn parse_function_header(&mut self) -> ParseResult<Function> {
         let mut arguments = Vec::new();
         let name;
@@ -1612,6 +1738,9 @@ impl Parser<'_> {
                         break;
                     }
                 },
+                TokenType::Keyword(tokens::Keyword::EVENT) => {
+                    self.parse_function_header();
+                }
                 _ => {
                     if let Ok(statement) = self.parse_statement().split_eof()? {
                         match statement.statement_type {
