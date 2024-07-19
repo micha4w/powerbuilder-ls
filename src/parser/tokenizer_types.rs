@@ -175,8 +175,9 @@ pub enum Keyword {
     // SQL
     // Mixed SQL
     XOR,
-    CLOSE,
-    OPEN,
+    // TODO specific SQL Tokenizing?
+    // CLOSE,
+    // OPEN,
 
     COMMIT,
     CONNECT,

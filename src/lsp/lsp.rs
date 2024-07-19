@@ -164,38 +164,23 @@ fn find_class(group: Option<&String>, class: &String) -> Rc<RefCell<Class>> {
     unimplemented!();
 }
 
+struct LintState {
+    current_class: Rc<RefCell<Class>>,
+    variables: Vec<(Usage, parser::Variable)>,
+    // TODO stack<loop, throw, ...>
+    return_type: DataType,
+}
+
 trait Lintable {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-        return_type: &DataType,
-    );
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType;
 }
 
-trait LintableType {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-    ) -> DataType;
-}
+impl Lintable for parser::VariableAccess {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
+        let mut class = state.current_class.borrow_mut();
 
-impl LintableType for parser::VariableAccess {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-    ) -> DataType {
-        let mut class = current_class.borrow_mut();
-
-        match variables
+        match state
+            .variables
             .iter_mut()
             .find(|(_, var)| var.name == self.name)
             .map(|(usage, var)| (usage, var))
@@ -228,30 +213,23 @@ impl LintableType for parser::VariableAccess {
     }
 }
 
-impl LintableType for parser::LValue {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-    ) -> DataType {
+impl Lintable for parser::LValue {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
         match &self.lvalue_type {
             parser::LValueType::This => todo!(),
             parser::LValueType::Super => todo!(),
             parser::LValueType::Parent => todo!(),
 
-            parser::LValueType::Variable(variable) => {
-                variable.lint(lsp, file, current_class, variables)
-            }
+            parser::LValueType::Variable(variable) => variable.lint(lsp, file, state),
             parser::LValueType::Function(call) => {
                 let types = call
                     .arguments
                     .iter()
-                    .map(|expression| expression.lint(lsp, file, current_class, variables))
+                    .map(|expression| expression.lint(lsp, file, state))
                     .collect::<Vec<_>>();
 
-                match current_class
+                match state
+                    .current_class
                     .borrow_mut()
                     .find_callable_function(&call.name, &types, &tokens::AccessType::PRIVATE)
                     .or_else(|| lsp.find_global_function(&call.name, &types))
@@ -271,12 +249,12 @@ impl LintableType for parser::LValue {
                 }
             }
             parser::LValueType::Method(lvalue, call) => {
-                let class = lvalue.lint(lsp, file, current_class, variables);
+                let class = lvalue.lint(lsp, file, state);
 
                 let types = call
                     .arguments
                     .iter()
-                    .map(|expression| expression.lint(lsp, file, current_class, variables))
+                    .map(|expression| expression.lint(lsp, file, state))
                     .collect::<Vec<_>>();
 
                 match class {
@@ -315,8 +293,8 @@ impl LintableType for parser::LValue {
             }
             parser::LValueType::Member(_, _) => todo!(),
             parser::LValueType::Index(array, index) => {
-                let array_type = array.lint(lsp, file, current_class, variables);
-                let index_type = index.lint(lsp, file, current_class, variables);
+                let array_type = array.lint(lsp, file, state);
+                let index_type = index.lint(lsp, file, state);
 
                 if !index_type.is_numeric() {
                     file.diagnostics.push(parser::Diagnostic {
@@ -343,20 +321,14 @@ impl LintableType for parser::LValue {
     }
 }
 
-impl LintableType for parser::Expression {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-    ) -> DataType {
+impl Lintable for parser::Expression {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
         match &self.expression_type {
             parser::ExpressionType::Literal(literal) => literal.into(),
             parser::ExpressionType::ArrayLiteral(expressions) => {
                 let types = expressions
                     .iter()
-                    .map(|expr| expr.lint(lsp, file, current_class, variables))
+                    .map(|expr| expr.lint(lsp, file, state))
                     .collect::<Vec<_>>();
 
                 DataType::Array(Box::new(match types.first() {
@@ -378,8 +350,8 @@ impl LintableType for parser::Expression {
                 }))
             }
             parser::ExpressionType::Operation(left, op, right) => {
-                let left_type = left.lint(lsp, file, current_class, variables);
-                let right_type = right.lint(lsp, file, current_class, variables);
+                let left_type = left.lint(lsp, file, state);
+                let right_type = right.lint(lsp, file, state);
 
                 match op {
                     tokens::Operator::AND | tokens::Operator::OR => {
@@ -435,7 +407,7 @@ impl LintableType for parser::Expression {
                 }
             }
             parser::ExpressionType::BooleanNot(expression) => {
-                let expression_type = expression.lint(lsp, file, current_class, variables);
+                let expression_type = expression.lint(lsp, file, state);
 
                 if !expression_type.is_convertible(&DataType::Boolean) {
                     file.diagnostics.push(parser::Diagnostic {
@@ -447,12 +419,10 @@ impl LintableType for parser::Expression {
 
                 DataType::Boolean
             }
-            parser::ExpressionType::Parenthesized(expression) => {
-                expression.lint(lsp, file, current_class, variables)
-            }
+            parser::ExpressionType::Parenthesized(expression) => expression.lint(lsp, file, state),
             parser::ExpressionType::Create(class) => todo!("Check if class exists"),
             parser::ExpressionType::CreateUsing(class) => {
-                let class_type = class.lint(lsp, file, current_class, variables);
+                let class_type = class.lint(lsp, file, state);
 
                 if !class_type.is_convertible(&DataType::String) {
                     file.diagnostics.push(parser::Diagnostic {
@@ -464,11 +434,9 @@ impl LintableType for parser::Expression {
 
                 DataType::Class(find_class(None, &"powerobject".into()))
             }
-            parser::ExpressionType::LValue(lvalue) => {
-                lvalue.lint(lsp, file, current_class, variables)
-            }
+            parser::ExpressionType::LValue(lvalue) => lvalue.lint(lsp, file, state),
             parser::ExpressionType::IncrementDecrement(lvalue, _) => {
-                let lvalue_type = lvalue.lint(lsp, file, current_class, variables);
+                let lvalue_type = lvalue.lint(lsp, file, state);
 
                 if !lvalue_type.is_numeric() {
                     file.diagnostics.push(parser::Diagnostic {
@@ -485,17 +453,10 @@ impl LintableType for parser::Expression {
 }
 
 impl Lintable for parser::Statement {
-    fn lint(
-        &self,
-        lsp: &mut LSP,
-        file: &mut FileData,
-        current_class: &Rc<RefCell<Class>>,
-        variables: &mut Vec<(Usage, parser::Variable)>,
-        return_type: &DataType,
-    ) {
+    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
         match &self.statement_type {
             parser::StatementType::Expression(expression) => {
-                expression.lint(lsp, file, current_class, variables);
+                expression.lint(lsp, file, state);
             }
             parser::StatementType::If(parser::IfStatement {
                 condition,
@@ -503,15 +464,15 @@ impl Lintable for parser::Statement {
                 elseif_statements,
                 else_statements,
             }) => {
-                let condition_type = condition.lint(lsp, file, current_class, variables);
+                let condition_type = condition.lint(lsp, file, state);
 
                 statements.iter().for_each(|statement| {
-                    statement.lint(lsp, file, current_class, variables, return_type)
+                    statement.lint(lsp, file, state);
                 });
                 elseif_statements
                     .iter()
                     .for_each(|(condition, statements)| {
-                        let condition_type = condition.lint(lsp, file, current_class, variables);
+                        let condition_type = condition.lint(lsp, file, state);
 
                         if !condition_type.is_convertible(&DataType::Boolean) {
                             file.diagnostics.push(parser::Diagnostic {
@@ -522,12 +483,12 @@ impl Lintable for parser::Statement {
                         }
 
                         statements.iter().for_each(|statement| {
-                            statement.lint(lsp, file, current_class, variables, return_type)
+                            statement.lint(lsp, file, state);
                         })
                     });
 
                 else_statements.iter().for_each(|statement| {
-                    statement.lint(lsp, file, current_class, variables, return_type)
+                    statement.lint(lsp, file, state);
                 });
 
                 if !condition_type.is_convertible(&DataType::Boolean) {
@@ -539,10 +500,26 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Throw(exception) => {
-                exception.lint(lsp, file, current_class, variables);
+                exception.lint(lsp, file, state);
+            }
+            parser::StatementType::Destroy(object) => {
+                let data_type = object.lint(lsp, file, state);
+                match data_type {
+                    DataType::Class(_) => {}
+                    // DataType::Array(_) => {} // TODO
+                    DataType::Any => {}
+                    DataType::Unknown => {}
+                    _ => {
+                        file.diagnostics.push(parser::Diagnostic {
+                            severity: parser::Severity::Error,
+                            message: "Can only destroy Objects".into(),
+                            range: object.range,
+                        });
+                    }
+                }
             }
             parser::StatementType::Declaration(var) => {
-                variables.push((
+                state.variables.push((
                     Usage {
                         declaration: Some(var.variable.range),
                         definition: None,
@@ -570,8 +547,8 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Assignment(lvalue, expression) => {
-                let lvalue_type = lvalue.lint(lsp, file, current_class, variables);
-                let expression_type = expression.lint(lsp, file, current_class, variables);
+                let lvalue_type = lvalue.lint(lsp, file, state);
+                let expression_type = expression.lint(lsp, file, state);
 
                 if !expression_type.is_convertible(&lvalue_type) {
                     file.diagnostics.push(parser::Diagnostic {
@@ -587,18 +564,18 @@ impl Lintable for parser::Statement {
                 finally,
             }) => {
                 statements.iter().for_each(|statement| {
-                    statement.lint(lsp, file, current_class, variables, return_type)
+                    statement.lint(lsp, file, state);
                 });
                 catches.iter().for_each(|(_, _, statements)| {
                     // TODO lint the capture type and name
                     // TODO check if the all thrown errors are caught
                     statements.iter().for_each(|statement| {
-                        statement.lint(lsp, file, current_class, variables, return_type)
+                        statement.lint(lsp, file, state);
                     });
                 });
                 finally.as_ref().map(|statements| {
                     statements.iter().for_each(|statement| {
-                        statement.lint(lsp, file, current_class, variables, return_type)
+                        statement.lint(lsp, file, state);
                     })
                 });
             }
@@ -609,9 +586,9 @@ impl Lintable for parser::Statement {
                 variable,
                 statements,
             }) => {
-                let variable_type = variable.lint(lsp, file, current_class, variables);
-                let start_type = start.lint(lsp, file, current_class, variables);
-                let stop_type = stop.lint(lsp, file, current_class, variables);
+                let variable_type = variable.lint(lsp, file, state);
+                let start_type = start.lint(lsp, file, state);
+                let stop_type = stop.lint(lsp, file, state);
 
                 let mut to_check = vec![
                     (variable_type, &variable.range),
@@ -620,7 +597,7 @@ impl Lintable for parser::Statement {
                 ];
 
                 if let Some(step) = step {
-                    let step_type = step.lint(lsp, file, current_class, variables);
+                    let step_type = step.lint(lsp, file, state);
                     to_check.push((step_type, &step.range));
                 }
 
@@ -635,7 +612,7 @@ impl Lintable for parser::Statement {
                 }
 
                 statements.iter().for_each(|statement| {
-                    statement.lint(lsp, file, current_class, variables, return_type)
+                    statement.lint(lsp, file, state);
                 });
             }
             parser::StatementType::WhileLoop(parser::WhileLoopStatement {
@@ -643,10 +620,10 @@ impl Lintable for parser::Statement {
                 statements,
                 ..
             }) => {
-                let condition_type = condition.lint(lsp, file, current_class, variables);
+                let condition_type = condition.lint(lsp, file, state);
 
                 statements.iter().for_each(|statement| {
-                    statement.lint(lsp, file, current_class, variables, return_type)
+                    statement.lint(lsp, file, state);
                 });
 
                 if !condition_type.is_convertible(&DataType::Boolean) {
@@ -658,7 +635,7 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Choose(parser::ChooseCaseStatement { choose, cases }) => {
-                let choose_type = choose.lint(lsp, file, current_class, variables);
+                let choose_type = choose.lint(lsp, file, state);
                 cases.iter().for_each(|(cases, statements)| {
                     let mut literals = Vec::new();
 
@@ -697,17 +674,17 @@ impl Lintable for parser::Statement {
                     }
 
                     statements.iter().for_each(|statement| {
-                        statement.lint(lsp, file, current_class, variables, return_type)
+                        statement.lint(lsp, file, state);
                     });
                 })
             }
             parser::StatementType::Return(ret) => {
                 let ret_type = ret
                     .as_ref()
-                    .map(|ret| ret.lint(lsp, file, current_class, variables))
+                    .map(|ret| ret.lint(lsp, file, state))
                     .unwrap_or(DataType::Void);
 
-                if !ret_type.is_convertible(return_type) {
+                if !ret_type.is_convertible(&state.return_type) {
                     file.diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Wrong return Type".into(),
@@ -717,13 +694,24 @@ impl Lintable for parser::Statement {
             }
             parser::StatementType::Call(call) => {
                 todo!("Function call");
-            },
-            parser::StatementType::Exit => {}, // TODO stack?
-            parser::StatementType::Continue => {},
-            parser::StatementType::Error => {},
+            }
+            parser::StatementType::Exit => {} // TODO stack?
+            parser::StatementType::Continue => {}
+            parser::StatementType::Error => {}
             parser::StatementType::Empty => {}
         }
+
+        DataType::Void
     }
+}
+
+#[derive(Clone, Debug)]
+struct Event {
+    parsed: parser::Event,
+
+    declaration: Option<Range>,
+    definition: Option<Range>,
+    uses: Vec<Range>,
 }
 
 #[derive(Clone, Debug)]
@@ -761,7 +749,7 @@ struct Class {
     within: Option<Rc<RefCell<Class>>>,
 
     ons: Vec<Function>,
-    events: Vec<Function>,
+    events: Vec<Event>,
     functions: Vec<Function>,
     external_functions: Vec<Function>,
 
@@ -956,16 +944,14 @@ impl File {
                         "Function Bodies".into(),
                         top_level.range,
                     ) {
-                        let mut variables = Vec::new();
+                        let mut state = LintState {
+                            current_class: class.clone(),
+                            variables: Vec::new(),
+                            return_type: DataType::Void,
+                        };
 
                         statements.iter().for_each(|statement| {
-                            statement.lint(
-                                lsp,
-                                &mut self.data,
-                                &class,
-                                &mut variables,
-                                &(&function.returns).into(),
-                            )
+                            statement.lint(lsp, &mut self.data, &mut state);
                         });
 
                         match class.borrow_mut().find_conflicting_function(&function) {
@@ -1020,33 +1006,31 @@ impl File {
                         "On Bodies".into(),
                         top_level.range,
                     ) {
-                        let mut variables = Vec::new();
+                        let mut state = LintState {
+                            current_class: class,
+                            variables: Vec::new(),
+                            return_type: DataType::Void,
+                        };
 
                         statements.iter().for_each(|statement| {
-                            statement.lint(
-                                lsp,
-                                &mut self.data,
-                                &class,
-                                &mut variables,
-                                &DataType::Void,
-                            )
+                            statement.lint(lsp, &mut self.data, &mut state);
                         });
                     }
                 }
-                parser::TopLevelType::EventBody(function, statements) => match current_class
-                    .upgrade()
+                parser::TopLevelType::EventBody(event, statements) => match current_class.upgrade()
                 {
                     Some(class) => {
-                        let mut variables = Vec::new();
+                        let mut state = LintState {
+                            current_class: class,
+                            variables: Vec::new(),
+                            return_type: match &event.event_type {
+                                parser::EventType::User(ret, _) => ret.into(),
+                                parser::EventType::System(_) => DataType::Void,
+                            },
+                        };
 
                         statements.iter().for_each(|statement| {
-                            statement.lint(
-                                lsp,
-                                &mut self.data,
-                                &class,
-                                &mut variables,
-                                &(&function.returns).into(),
-                            )
+                            statement.lint(lsp, &mut self.data, &mut state);
                         });
                     }
                     None => self.data.diagnostics.push(parser::Diagnostic {
@@ -1064,7 +1048,7 @@ impl File {
 
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
-                parser::TopLevelType::DatatypeDecl(class, vars) => {
+                parser::TopLevelType::DatatypeDecl(class, vars, events) => {
                     let within = class
                         .within
                         .as_ref()
@@ -1100,6 +1084,16 @@ impl File {
                             },
                             var.clone(),
                         ));
+                    }
+
+                    for event in events {
+                        new_class.events.push(Event {
+                            parsed: event.clone(),
+
+                            declaration: Some(event.range),
+                            definition: None,
+                            uses: Vec::new(),
+                        });
                     }
 
                     self.data.classes.push(Rc::new(RefCell::new(new_class)));

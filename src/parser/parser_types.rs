@@ -81,6 +81,20 @@ pub struct Function {
     pub range: Range,
 }
 
+#[derive(Debug, Clone)]
+pub enum EventType {
+    User(Option<DataType>, Vec<Argument>),
+    System(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub name: String,
+    pub event_type: EventType,
+
+    pub range: Range,
+}
+
 #[derive(Debug)]
 pub struct On {
     pub class: String,
@@ -303,6 +317,7 @@ pub enum StatementType {
     Expression(Expression),
     If(IfStatement),
     Throw(Expression),
+    Destroy(Expression),
     Assignment(LValue, Expression),
     TryCatch(TryCatchStatement),
     Declaration(InstanceVariable),
@@ -325,7 +340,7 @@ pub struct Statement {
 
 #[derive(Debug)]
 pub enum TopLevelType {
-    DatatypeDecl(Class, Vec<InstanceVariable>, Vec<Function>),
+    DatatypeDecl(Class, Vec<InstanceVariable>, Vec<Event>),
     ForwardDecl,
     TypeVariablesDecl(Vec<InstanceVariable>),
     ScopedVariablesDecl(Vec<ScopedVariable>),
@@ -336,7 +351,7 @@ pub enum TopLevelType {
     FunctionsForwardDecl(Vec<Function>),
     FunctionBody(Function, Vec<Statement>),
     OnBody(On, Vec<Statement>),
-    EventBody(Function, Vec<Statement>),
+    EventBody(Event, Vec<Statement>),
 }
 
 #[derive(Debug)]

@@ -1,3 +1,4 @@
+use std::backtrace::Backtrace;
 use std::{iter::Filter, rc::Rc};
 
 use multipeek::{multipeek, MultiPeek};
@@ -48,9 +49,10 @@ impl Parser<'_> {
     fn error(&mut self, error: &String, range: &Range) {
         self.syntax_errors.push(Diagnostic {
             severity: Severity::Error,
-            message: format!("[Parser] {}", error),
+            message: format!("[Parser] {}\n{}", error, Backtrace::capture()),
             range: range.clone(),
         });
+        panic!("[Parser] {} {:?}\n", error, range);
     }
 
     fn fatal<R>(&mut self, error: &String, range: &Range, consume_line: bool) -> ParseResult<R> {
@@ -171,21 +173,20 @@ impl Parser<'_> {
                 ExpressionType::Parenthesized(Box::new(expression))
             }
             TokenType::Symbol(tokens::Symbol::LCURLY) => {
+                self.next()?;
                 let mut expressions = Vec::new();
 
-                if self.peek()?.token_type == TokenType::Symbol(tokens::Symbol::RCURLY) {
-                    loop {
-                        expressions.push(self.parse_expression()?);
+                loop {
+                    expressions.push(self.parse_expression()?);
 
-                        match self.peek()?.token_type {
-                            TokenType::Symbol(tokens::Symbol::COMMA) => {
-                                self.next()?;
-                            }
-                            TokenType::Symbol(tokens::Symbol::RCURLY) => {
-                                break;
-                            }
-                            _ => todo!("Expected ',' or ')'"),
+                    match self.peek()?.token_type {
+                        TokenType::Symbol(tokens::Symbol::COMMA) => {
+                            self.next()?;
                         }
+                        TokenType::Symbol(tokens::Symbol::RCURLY) => {
+                            break;
+                        }
+                        _ => todo!("Expected ',' or ')'"),
                     }
                 }
                 end = self
@@ -528,128 +529,107 @@ impl Parser<'_> {
         previous.ok_or(ParseError::UnexpectedToken)
     }
 
-    fn parse_event_header(&mut self) -> ParseResult<Function> {
-        let mut arguments = Vec::new();
+    fn parse_event_header(&mut self) -> ParseResult<Event> {
         let name;
-        let start = self.peek()?.range.start;
-
-        let scope_modif = if let TokenType::ScopeModif(scope_modif) = self.peek()?.token_type {
-            self.next()?;
-            Some(scope_modif)
-        } else {
-            None
-        };
-
-        let access = if let TokenType::AccessType(access) = self.peek()?.token_type {
-            self.next()?;
-            Some(access)
-        } else {
-            None
-        };
-
-        let returns = match self.peek()?.token_type {
-            TokenType::Keyword(tokens::Keyword::FUNCTION) => {
-                self.next()?;
-                Some(self.parse_type()?)
-            }
-            TokenType::Keyword(tokens::Keyword::SUBROUTINE) => {
-                self.next()?;
-                None
-            }
-            _ => {
-                let range = self.peek()?.range;
-                return self.fatal(&"Expected FUNCTION or SUBROUTINE".to_owned(), &range, true);
-            }
-        };
-
-        name = self.expect(TokenType::ID)?.content;
-        self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
-        let end;
-        loop {
-            match self.peek()?.token_type {
-                TokenType::Symbol(tokens::Symbol::RPAREN) => {
-                    end = self.next()?.range.end;
-                    break;
-                }
-                TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
-                    self.next()?;
-                    end = self
-                        .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
-                        .range
-                        .end;
-                    break;
-                }
-                _ => {}
-            };
-
-            let is_ref = self
-                .optional(TokenType::Keyword(tokens::Keyword::REF))?
-                .is_some();
-            let is_readonly = self
-                .optional(TokenType::Keyword(tokens::Keyword::READONLY))?
-                .is_some();
-
-            let data_type = self.parse_type()?;
-            let name = self.expect(TokenType::ID)?;
-            arguments.push(Argument {
-                is_ref,
-                variable: Variable {
-                    constant: is_readonly,
-                    data_type,
-                    name: name.content,
-                    initial_value: None,
-                    range: name.range,
-                },
-            });
-
-            match self.peek()?.token_type {
-                TokenType::Symbol(tokens::Symbol::COMMA) => {
-                    self.next()?;
-                }
-                TokenType::Symbol(tokens::Symbol::RPAREN) => {
-                    end = self.next()?.range.end;
-                    break;
-                }
-                _ => {
-                    let range = self.peek()?.range;
-                    return self.fatal(&"Expected ',' or ')'".to_owned(), &range, true);
-                }
-            }
-        }
-
-        if self
-            .optional(TokenType::Keyword(tokens::Keyword::THROWS))?
+        let start = self
+            .expect(TokenType::Keyword(tokens::Keyword::EVENT))?
+            .range
+            .start;
+        let returns = if self
+            .optional(TokenType::Keyword(tokens::Keyword::TYPE))?
             .is_some()
         {
-            self.expect(TokenType::ID)?;
-        }
+            self.parse_type().split_eof()?.ok()
+        } else {
+            None
+        };
 
-        match self.peek()?.token_type {
-            TokenType::Keyword(tokens::Keyword::RPCFUNC) => {
-                self.next()?;
-            }
-            TokenType::Keyword(tokens::Keyword::LIBRARY) => {
-                self.next()?;
-                self.expect(TokenType::Literal(tokens::Literal::STRING))?;
+        name = self.expect(TokenType::ID)?;
 
-                if self
-                    .optional(TokenType::Keyword(tokens::Keyword::ALIAS))?
-                    .is_some()
-                {
-                    self.expect(TokenType::Keyword(tokens::Keyword::FOR))?;
-                    self.expect(TokenType::Literal(tokens::Literal::STRING))?;
+        let end;
+        let event_type = match self.peek()?.token_type {
+            TokenType::ID => {
+                let system = self.next()?;
+                end = system.range.end;
+
+                if returns.is_some() {
+                    self.error(
+                        &"Can't specify a return Type when declaring a System Event".to_owned(),
+                        &system.range,
+                    );
                 }
-            }
-            _ => {}
-        }
-        self.expect(TokenType::NEWLINE).split_eof()?;
 
-        Ok(Function {
-            returns,
-            scope_modif,
-            access,
-            name,
-            arguments,
+                EventType::System(system.content)
+            }
+            TokenType::Symbol(tokens::Symbol::LPAREN) => {
+                let mut arguments = Vec::new();
+
+                self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
+                loop {
+                    match self.peek()?.token_type {
+                        TokenType::Symbol(tokens::Symbol::RPAREN) => {
+                            end = self.next()?.range.end;
+                            break;
+                        }
+                        TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
+                            self.next()?;
+                            end = self
+                                .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
+                                .range
+                                .end;
+                            break;
+                        }
+                        _ => {}
+                    };
+
+                    let is_ref = self
+                        .optional(TokenType::Keyword(tokens::Keyword::REF))?
+                        .is_some();
+                    let is_readonly = self
+                        .optional(TokenType::Keyword(tokens::Keyword::READONLY))?
+                        .is_some();
+
+                    let data_type = self.parse_type()?;
+                    let name = self.expect(TokenType::ID)?;
+                    arguments.push(Argument {
+                        is_ref,
+                        variable: Variable {
+                            constant: is_readonly,
+                            data_type,
+                            name: name.content,
+                            initial_value: None,
+                            range: name.range,
+                        },
+                    });
+
+                    match self.peek()?.token_type {
+                        TokenType::Symbol(tokens::Symbol::COMMA) => {
+                            self.next()?;
+                        }
+                        TokenType::Symbol(tokens::Symbol::RPAREN) => {
+                            end = self.next()?.range.end;
+                            break;
+                        }
+                        _ => {
+                            let range = self.peek()?.range;
+                            return self.fatal(&"Expected ',' or ')'".to_owned(), &range, true);
+                        }
+                    }
+                }
+
+                EventType::User(returns, arguments)
+            }
+            _ => {
+                // TODO what event type is this?
+                end = name.range.end;
+                EventType::User(returns, Vec::new())
+            }
+        };
+        let _ = self.expect(TokenType::NEWLINE).split_eof()?;
+
+        Ok(Event {
+            name: name.content,
+            event_type,
             range: Range { start, end },
         })
     }
@@ -936,7 +916,10 @@ impl Parser<'_> {
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         match self.peek()?.token_type {
             TokenType::Keyword(tokens::Keyword::CONSTANT) => self.parse_variable_declaration(),
-            TokenType::ID => match self.peek_nth(1)?.token_type {
+            TokenType::ID
+            | TokenType::Keyword(
+                tokens::Keyword::THIS | tokens::Keyword::SUPER | tokens::Keyword::PARENT,
+            ) => match self.peek_nth(1)?.token_type {
                 TokenType::ID => self.parse_variable_declaration(),
                 _ => {
                     let expression = self.parse_expression()?;
@@ -1003,13 +986,27 @@ impl Parser<'_> {
             TokenType::Keyword(tokens::Keyword::THROW) => {
                 let throw = self.next()?;
                 let expression = self.parse_expression()?;
-                self.expect(TokenType::NEWLINE)?;
+                let _ = self.expect(TokenType::NEWLINE).split_eof()?;
+
                 Ok(Statement {
                     range: Range {
                         start: throw.range.start,
                         end: expression.range.end,
                     },
                     statement_type: StatementType::Throw(expression),
+                })
+            }
+            TokenType::Keyword(tokens::Keyword::DESTROY) => {
+                let destroy = self.next()?;
+                let object = self.parse_expression()?;
+                let _ = self.expect(TokenType::NEWLINE).split_eof()?;
+
+                Ok(Statement {
+                    range: Range {
+                        start: destroy.range.start,
+                        end: object.range.end,
+                    },
+                    statement_type: StatementType::Destroy(object),
                 })
             }
             TokenType::Keyword(tokens::Keyword::IF) => {
@@ -1163,7 +1160,6 @@ impl Parser<'_> {
                 loop {
                     match self.peek()?.token_type {
                         TokenType::Keyword(tokens::Keyword::NEXT) => {
-                            self.next()?;
                             break;
                         }
                         _ => {
@@ -1574,6 +1570,45 @@ impl Parser<'_> {
         }
     }
 
+    fn parse_event(&mut self) -> ParseResult<TopLevel> {
+        let event = self.parse_event_header()?;
+        let mut statements = Vec::new();
+        let end;
+
+        loop {
+            match self.peek()?.token_type {
+                TokenType::Keyword(tokens::Keyword::END) => match self.peek_nth(1)?.token_type {
+                    TokenType::Keyword(tokens::Keyword::EVENT) => {
+                        self.next()?;
+                        let close = self.next()?;
+                        end = close.range.end;
+
+                        self.expect(TokenType::NEWLINE).split_eof()?;
+                        break;
+                    }
+                    _ => {
+                        let range = self.next()?.range;
+                        self.error(&"Dangling end keyword".to_string(), &range);
+                        self.consume_line()?;
+                    }
+                },
+                _ => {
+                    if let Ok(statement) = self.parse_statement().split_eof()? {
+                        statements.push(statement);
+                    }
+                }
+            };
+        }
+
+        Ok(TopLevel {
+            range: Range {
+                start: event.range.start,
+                end,
+            },
+            top_level_type: TopLevelType::EventBody(event, statements),
+        })
+    }
+
     fn parse_function(&mut self) -> ParseResult<TopLevel> {
         let function = self.parse_function_header()?;
         let mut statements = Vec::new();
@@ -1631,17 +1666,12 @@ impl Parser<'_> {
         self.expect(TokenType::Symbol(tokens::Symbol::DOT))?;
         let name = self.next()?;
         match name.token_type {
-            TokenType::Keyword(
-                tokens::Keyword::OPEN
-                | tokens::Keyword::CLOSE
-                | tokens::Keyword::CREATE
-                | tokens::Keyword::DESTROY,
-            ) => {
+            TokenType::Keyword(tokens::Keyword::CREATE | tokens::Keyword::DESTROY) => {
                 self.expect(TokenType::NEWLINE).split_eof()?;
             }
             _ => {
                 self.error(
-                    &"Expected one of [open, close, create, destroy]".to_string(),
+                    &"Expected either CREATE or DESTROY]".to_string(),
                     &name.range,
                 );
                 if name.token_type != TokenType::NEWLINE {
@@ -1717,7 +1747,8 @@ impl Parser<'_> {
         self.expect(TokenType::NEWLINE).split_eof()?;
 
         let end;
-        let mut declarations = Vec::new();
+        let mut variables = Vec::new();
+        let mut events = Vec::new();
         loop {
             match self.peek()?.token_type {
                 TokenType::Keyword(tokens::Keyword::END) => match self.peek_nth(1)?.token_type {
@@ -1739,13 +1770,13 @@ impl Parser<'_> {
                     }
                 },
                 TokenType::Keyword(tokens::Keyword::EVENT) => {
-                    self.parse_function_header();
+                    events.push(self.parse_event_header()?);
                 }
                 _ => {
                     if let Ok(statement) = self.parse_statement().split_eof()? {
                         match statement.statement_type {
                             StatementType::Declaration(var) => {
-                                declarations.push(var);
+                                variables.push(var);
                             }
                             _ => {
                                 self.error(
@@ -1768,7 +1799,8 @@ impl Parser<'_> {
                     base,
                     within,
                 },
-                declarations,
+                variables,
+                events,
             ),
             range: Range { start, end },
         })
@@ -2031,6 +2063,7 @@ impl Parser<'_> {
             | TokenType::Keyword(tokens::Keyword::FUNCTION | tokens::Keyword::SUBROUTINE) => {
                 self.parse_function()
             }
+            TokenType::Keyword(tokens::Keyword::EVENT) => self.parse_event(),
             TokenType::Keyword(tokens::Keyword::ON) => self.parse_on(),
             TokenType::Keyword(tokens::Keyword::TYPE) => match self.peek_nth(1)?.token_type {
                 TokenType::Keyword(tokens::Keyword::VARIABLES) => self.parse_type_variables_decl(),
@@ -2065,7 +2098,13 @@ impl Parser<'_> {
                     self.syntax_errors = Vec::new();
                 }
                 Err(ParseError::EOF) => break,
-                _ => {}
+                Err(ParseError::UnexpectedToken) => {
+                    println!("Unexpected Token");
+
+                    for error in &self.syntax_errors {
+                        println!("{} - {}", error.range, error.message)
+                    }
+                }
             }
         }
 
