@@ -203,6 +203,13 @@ impl Parser<'_> {
 
                 ExpressionType::BooleanNot(Box::new(expression))
             }
+            TokenType::Operator(operator @ (tokens::Operator::PLUS | tokens::Operator::MINUS)) => {
+                self.next()?;
+                let expression = self.parse_expression()?;
+                end = expression.range.end;
+
+                ExpressionType::PreMinusPlus(operator, Box::new(expression))
+            }
             TokenType::Keyword(tokens::Keyword::THIS)
             | TokenType::Keyword(tokens::Keyword::SUPER)
             | TokenType::Keyword(tokens::Keyword::PARENT)
@@ -214,9 +221,26 @@ impl Parser<'_> {
             }
             TokenType::Keyword(tokens::Keyword::CREATE) => {
                 self.next()?;
-                let class = self.next()?;
-                end = class.range.end;
-                ExpressionType::Create(class.content)
+
+                match self.peek()?.token_type {
+                    TokenType::Keyword(tokens::Keyword::USING) => {
+                        self.next()?;
+
+                        let class = self.parse_expression()?;
+                        end = class.range.end;
+                        ExpressionType::CreateUsing(Box::new(class))
+                    }
+                    TokenType::ID => {
+                        let class = self.next()?;
+
+                        end = class.range.end;
+                        ExpressionType::Create(class.content)
+                    }
+                    _ => {
+                        let range = self.peek()?.range;
+                        return self.fatal(&"Expected USING or a Class Name".into(), &range, true);
+                    }
+                }
             }
             TokenType::Literal(literal) => {
                 end = self.next()?.range.end;
@@ -622,7 +646,15 @@ impl Parser<'_> {
             _ => {
                 // TODO what event type is this?
                 end = name.range.end;
-                EventType::User(returns, Vec::new())
+
+                if returns.is_some() {
+                    self.error(
+                        &"Can't specify a return Type when declaring a Predefined Event".to_owned(),
+                        &Range { start, end },
+                    );
+                }
+
+                EventType::Predefined
             }
         };
         let _ = self.expect(TokenType::NEWLINE).split_eof()?;
@@ -1521,7 +1553,13 @@ impl Parser<'_> {
                             CallType::Ancestor(None, name.content)
                         }
                     }
-                    _ => self.fatal(&"Expected Ancestor Class".into(), &call_token.range, true)?,
+                    _ => {
+                        return self.fatal(
+                            &"Expected Ancestor Class".into(),
+                            &call_token.range,
+                            true,
+                        )
+                    }
                 };
 
                 self.expect(TokenType::Symbol(tokens::Symbol::COLONCOLON))?;
@@ -1537,7 +1575,7 @@ impl Parser<'_> {
                         event: false,
                         post: false,
                     },
-                    _ => self.fatal(&"Expected Funtion Call".into(), &lvalue.range, true)?,
+                    _ => return self.fatal(&"Expected Funtion Call".into(), &lvalue.range, true),
                 };
 
                 self.expect(TokenType::NEWLINE).split_eof()?;
@@ -1561,6 +1599,40 @@ impl Parser<'_> {
                 range: self.next()?.range,
                 statement_type: StatementType::Continue,
             }),
+            TokenType::Keyword(
+                tokens::Keyword::OPEN
+                | tokens::Keyword::CLOSE
+                | tokens::Keyword::COMMIT
+                | tokens::Keyword::CONNECT
+                | tokens::Keyword::DECLARE
+                | tokens::Keyword::DELETE
+                | tokens::Keyword::DISCONNECT
+                | tokens::Keyword::EXECUTE
+                | tokens::Keyword::FETCH
+                | tokens::Keyword::INSERT
+                | tokens::Keyword::ROLLBACK
+                | tokens::Keyword::SELECT
+                | tokens::Keyword::SELECTBLOB
+                | tokens::Keyword::UPDATE
+                | tokens::Keyword::UPDATEBLOB,
+            ) => {
+                let start = self.next()?.range.start;
+
+                let end = loop {
+                    let token = self.next()?;
+                    match token.token_type {
+                        TokenType::NEWLINE if token.content == ";" => {
+                            break token.range.end;
+                        }
+                        _ => {}
+                    }
+                };
+
+                Ok(Statement {
+                    statement_type: StatementType::SQL,
+                    range: Range { start, end },
+                })
+            }
             _ => {
                 let Token {
                     token_type, range, ..
@@ -1671,7 +1743,7 @@ impl Parser<'_> {
             }
             _ => {
                 self.error(
-                    &"Expected either CREATE or DESTROY]".to_string(),
+                    &"Expected either CREATE or DESTROY".to_string(),
                     &name.range,
                 );
                 if name.token_type != TokenType::NEWLINE {

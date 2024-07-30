@@ -34,9 +34,6 @@ end subroutine
 public function boolean of_preactivate ();// Called before step becomes visible
 // if return false then don't make visible
 	string x = 10
-
-	x = 'wow'
-	x = true
 	
 	return x
 end function
@@ -48,6 +45,8 @@ end subroutine
 public function boolean of_next ();// Next pressed
 // return true to procced
 	
+
+
 	return true
 
 

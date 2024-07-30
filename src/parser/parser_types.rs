@@ -84,6 +84,7 @@ pub struct Function {
 #[derive(Debug, Clone)]
 pub enum EventType {
     User(Option<DataType>, Vec<Argument>),
+    Predefined,
     System(String),
 }
 
@@ -101,22 +102,22 @@ pub struct On {
     pub name: String,
 }
 
-impl Function {
-    pub fn equals(&self, other: &Function) -> bool {
-        self.returns == other.returns && self.conflicts(other)
-    }
+// impl Function {
+//     pub fn equals(&self, other: &Function) -> bool {
+//         self.returns == other.returns && self.conflicts(other)
+//     }
 
-    pub fn conflicts(&self, other: &Function) -> bool {
-        self.name == other.name
-            && self
-                .arguments
-                .iter()
-                .zip(other.arguments.iter())
-                .all(|(self_arg, other_arg)| {
-                    self_arg.variable.data_type == other_arg.variable.data_type
-                })
-    }
-}
+//     pub fn conflicts(&self, other: &Function) -> bool {
+//         self.name == other.name
+//             && self
+//                 .arguments
+//                 .iter()
+//                 .zip(other.arguments.iter())
+//                 .all(|(self_arg, other_arg)| {
+//                     self_arg.variable.data_type == other_arg.variable.data_type
+//                 })
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub struct FunctionCall {
@@ -184,6 +185,7 @@ pub enum ExpressionType {
     Literal(tokens::Literal),
     ArrayLiteral(Vec<Expression>),
     Operation(Box<Expression>, tokens::Operator, Box<Expression>),
+    PreMinusPlus(tokens::Operator, Box<Expression>),
     IncrementDecrement(Box<Expression>, tokens::Symbol),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
@@ -328,6 +330,7 @@ pub enum StatementType {
     Call(CallStatement),
     Exit,
     Continue,
+    SQL,
     Empty,
     Error,
 }

@@ -442,38 +442,50 @@ impl Iterator for FileTokenizer {
             return Some(token);
         }
 
-        loop {
+        let ret = loop {
             self.skip_white_spaces()?;
             let mut token = self.get_token()?;
             // println!("got: {token:?}");
+            // println!("had: {:?}", self.previous.token_type);
 
             match (self.previous.token_type, token.token_type) {
                 (_, TokenType::COMMENT) => continue,
                 (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
 
-                // Because there is SQL OPEN and PB open(aw_window)
+                // Because nicer
                 (TokenType::Symbol(Symbol::COLONCOLON), TokenType::Keyword(Keyword::CREATE | Keyword::DESTROY)) => {
                     token.token_type = TokenType::ID;
                 }
-                // (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
-                //     self.previous = token;
-                //     continue;
-                // }
-                // (TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE), cur) => {
-                //     self.next = Some(token);
 
-                //     if let TokenType::Symbol(Symbol::LBRACE) = cur {
-                //         self.previous.token_type = TokenType::ID;
-                //     }
-                //     // println!(".{:?}", self.previous.clone());
-                //     break Some(self.previous.clone());
-                // }
+                // Because there is SQL OPEN and PB open(aw_window)
+                // This way only \n OPEN (?!\() will be identified as OPEN
+                // Same for CLOSE obviously
+                (TokenType::NEWLINE, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
+                    self.previous = token;
+                    // println!("condition newline");
+                    continue;
+                }
+                (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
+                    token.token_type = TokenType::ID;
+                }
+                (TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE), cur) => {
+                    self.next = Some(token);
+                    // println!("double open/close");
+
+                    if let TokenType::Symbol(Symbol::LPAREN) = cur {
+                        println!("condition lbrace");
+                        self.previous.token_type = TokenType::ID;
+                    }
+                    break Some(self.previous.clone());
+                }
                 _ => {}
             };
 
             self.previous = token.clone();
-            // println!("{token:?}");
             break Some(token);
-        }
+        };
+
+        // println!("ret: {ret:?}");
+        return ret;
     }
 }

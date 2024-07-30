@@ -176,8 +176,8 @@ pub enum Keyword {
     // Mixed SQL
     XOR,
     // TODO specific SQL Tokenizing?
-    // CLOSE,
-    // OPEN,
+    CLOSE,
+    OPEN,
 
     COMMIT,
     CONNECT,
@@ -295,7 +295,7 @@ pub enum Symbol {
 
     TICK,
     COMMA,
-    SEMI,
+    // SEMI,
 
     DOTDOTDOT,
     DOT,
