@@ -9,11 +9,17 @@ pub mod parser_types;
 pub mod tokenizer;
 pub mod tokenizer_types;
 
-pub fn parse_file(file: &Path) -> anyhow::Result<Vec<TopLevel>> {
-    let mut tokens = FileTokenizer::open(file)?;
+pub fn tokenize_file(file: &Path) -> anyhow::Result<Parser> {
+    let mut tokens = FileTokenizer::open_file(file)?;
     tokens.skip_headers();
     // TODO stream the tokens????
 
-    let mut parser = Parser::new(&mut tokens);
-    Ok(parser.parse_tokens())
+    Ok(Parser::new(tokens))
+}
+
+
+pub fn tokenize(buf: &String) -> anyhow::Result<Parser> {
+    let tokens = FileTokenizer::new(buf.clone());
+
+    Ok(Parser::new(tokens))
 }

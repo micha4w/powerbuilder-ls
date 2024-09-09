@@ -1,0 +1,46 @@
+package powerbuilder;
+
+message Variable {
+  enum Flag {
+    NO_READ = 1;
+    NO_WRITE = 2;
+    IS_REF = 4;
+    IS_VARLIST = 8;
+    IS_ARRAY = 16;
+  }
+
+  optional string name = 1;
+  optional string help = 2;
+  optional string type = 3;
+  optional string arrayBounds = 4;
+  optional uint32 flags = 5;
+}
+
+message Function {
+  required string name = 1;
+  optional string help = 2;
+  optional string ret = 3;
+  repeated Variable argument = 4;
+  repeated string throws = 5;
+}
+
+message Functions { repeated Function function = 1; }
+
+message Class {
+  required string name = 1;
+  required string base = 2;
+  optional string help = 3;
+  repeated Variable variable = 4;
+  repeated Function function = 5;
+  repeated Function event = 6;
+}
+
+message Classes { repeated Class class = 1; }
+
+message Enum {
+  required string name = 1;
+  optional string help = 2;
+  repeated string value = 3;
+}
+
+message Enums { repeated Enum enum = 1; }

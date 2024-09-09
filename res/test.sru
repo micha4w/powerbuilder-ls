@@ -44,7 +44,11 @@ end subroutine
 
 public function boolean of_next ();// Next pressed
 // return true to procced
-	
+	string ll_x[] = {'nice', 'cool'}
+
+	for ll_i = 1 to upperbound(ll_x)
+		messagebox("", "")
+	next 
 
 
 	return true

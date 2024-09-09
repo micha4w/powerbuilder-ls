@@ -1,16 +1,19 @@
 use std::{
-    cell::RefCell,
+    cell::{Ref, RefCell},
     env::current_dir,
-    f32::consts::E,
+    mem::swap,
     path::PathBuf,
     rc::{Rc, Weak},
 };
 
+use super::powerbuilder_proto::{self, variable};
+use prost::{bytes::Bytes, Message};
+
 use crate::parser::{
-    parse_file,
     parser::*,
-    parser_types as parser,
-    tokenizer_types::{self as tokens, Range},
+    parser_types::{self as parser},
+    tokenize, tokenize_file,
+    tokenizer_types::{self as tokens, Position, Range},
 };
 
 #[derive(Clone, Debug)]
@@ -33,6 +36,7 @@ pub enum DataType {
     Ulong,
     Decimal(Option<usize>),
     Class(Rc<RefCell<Class>>),
+    Enum(Rc<RefCell<Enum>>),
     Array(Box<DataType>),
 
     Any,
@@ -43,9 +47,9 @@ pub enum DataType {
 impl PartialEq for DataType {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Class(l0), Self::Class(r0)) => Rc::ptr_eq(l0, r0),
-            (Self::Decimal(l0), Self::Decimal(r0)) => l0 == r0,
-            (Self::Array(l0), Self::Array(r0)) => l0 == r0,
+            (Self::Class(l), Self::Class(r)) => Rc::ptr_eq(l, r),
+            (Self::Decimal(l), Self::Decimal(r)) => l == r,
+            (Self::Array(l), Self::Array(r)) => l == r,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -92,6 +96,7 @@ impl DataType {
             | DataType::String
             | DataType::Time
             | DataType::Class(_)
+            | DataType::Enum(_)
             | DataType::Array(_)
             | DataType::Void => None,
         }
@@ -111,20 +116,24 @@ impl DataType {
 }
 
 trait LintableDataType {
-    fn lint(&self, file: &mut FileData) -> DataType;
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>) -> DataType;
 }
 
 impl LintableDataType for parser::DataType {
-    fn lint(&self, file: &mut FileData) -> DataType {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>) -> DataType {
         match self {
             parser::DataType::Decimal(precission) => {
                 DataType::Decimal(precission.as_ref().map(|str| str.parse().unwrap()))
             }
-            parser::DataType::Array(sub_type) => DataType::Array(Box::new(sub_type.lint(file))),
-            parser::DataType::Complex(group, name) => match file.find_class(Some(group), &name) {
-                Some(class) => DataType::Class(class),
-                None => DataType::Unknown,
-            },
+            parser::DataType::Array(sub_type) => {
+                DataType::Array(Box::new(sub_type.lint(lsp, file)))
+            }
+            parser::DataType::Complex(group, name) => {
+                match lsp.find_class_from_file(file, Some(group), &name) {
+                    Some(class) => DataType::Class(class),
+                    None => DataType::Unknown,
+                }
+            }
             parser::DataType::ID(id) => match id.to_lowercase().as_str() {
                 "blob" => DataType::Blob,
                 "boolean" => DataType::Boolean,
@@ -142,7 +151,7 @@ impl LintableDataType for parser::DataType {
                 "time" => DataType::Time,
                 "unsignedinteger" | "uint" => DataType::Uint,
                 "unsignedlong" | "ulong" => DataType::Ulong,
-                _ => match file.find_class(None, &id) {
+                _ => match lsp.find_class_from_file(file, None, &id) {
                     Some(class) => DataType::Class(class),
                     None => DataType::Unknown,
                 },
@@ -158,39 +167,55 @@ struct Usage {
     uses: Vec<Range>,
 }
 
-struct LintState {
+struct LintData {
     current_class: Rc<RefCell<Class>>,
-    variables: Vec<Variable>,
+    variables: Vec<Rc<RefCell<Variable>>>,
     // TODO stack<loop, throw, ...>
     return_type: DataType,
 }
 
+impl LintData {
+    // fn find_class(&self, group: Option<&String>, name: &String) -> Option<Rc<RefCell<Class>>> {
+    //     match group {
+    //         Some(group) => {
+    //             // let within = self.find_class(None, group);
+    //             // within.
+    //             todo!()
+    //         }
+    //         None => todo!(),
+    //     }
+    // }
+}
+
 trait Lintable {
-    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType;
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>, state: &mut LintData) -> DataType;
 }
 
 impl Lintable for parser::VariableAccess {
-    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
-        let mut class = state.current_class.borrow_mut();
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>, state: &mut LintData) -> DataType {
+        let class = state.current_class.borrow();
 
         match state
             .variables
-            .iter_mut()
-            .find(|var| var.parsed().name.eq_ignore_ascii_case(&self.name))
+            .iter()
+            .find(|var| var.borrow().parsed().name.eq_ignore_ascii_case(&self.name))
+            .cloned()
             .or_else(|| {
                 class
                     .find_variable(self, &tokens::AccessType::PRIVATE)
                     .or_else(|| {
-                        file.find_variable(self, &tokens::AccessType::PRIVATE)
-                            .or_else(|| lsp.find_global_variable(&self.name))
+                        let var = file
+                            .borrow_mut()
+                            .find_variable(self, &tokens::AccessType::PRIVATE);
+                        var.or_else(|| lsp.find_global_variable(&self.name))
                     })
             }) {
             Some(var) => {
-                var.uses.push(self.range);
-                var.data_type.clone()
+                var.borrow_mut().uses.push(self.range);
+                var.borrow_mut().data_type.clone()
             }
             None => {
-                file.diagnostics.push(parser::Diagnostic {
+                file.borrow_mut().diagnostics.push(parser::Diagnostic {
                     severity: parser::Severity::Error,
                     message: "Variable not found".into(),
                     range: self.range,
@@ -202,19 +227,14 @@ impl Lintable for parser::VariableAccess {
 }
 
 impl Lintable for parser::LValue {
-    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>, state: &mut LintData) -> DataType {
         match &self.lvalue_type {
             parser::LValueType::This => DataType::Class(state.current_class.clone()),
-            parser::LValueType::Super => state
-                .current_class
-                .borrow()
-                .base
-                .clone()
-                .map_or(DataType::Unknown, DataType::Class),
+            parser::LValueType::Super => state.current_class.borrow().base.clone(),
             parser::LValueType::Parent => match state.current_class.borrow().within.clone() {
                 Some(within) => DataType::Class(within),
                 None => {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Class does not have a Parent".into(),
                         range: self.range,
@@ -232,21 +252,56 @@ impl Lintable for parser::LValue {
                     .map(|expression| expression.lint(lsp, file, state))
                     .collect::<Vec<_>>();
 
-                match state
-                    .current_class
-                    .borrow_mut()
-                    .find_callable_function(&call.name, &types, &tokens::AccessType::PRIVATE)
-                    .or_else(|| lsp.find_global_function(&call.name, &types))
-                {
-                    Some(func) => func.returns.clone(),
-                    None => {
-                        file.diagnostics.push(parser::Diagnostic {
-                            severity: parser::Severity::Error,
-                            message: "Function not found".into(),
-                            range: self.range,
-                        });
-                        DataType::Unknown
+                let ret = if call.event {
+                    match state
+                        .current_class
+                        .borrow_mut()
+                        .find_callable_event(&call.name, &types)
+                    {
+                        Some(event) => {
+                            event.borrow_mut().uses.push(call.range.clone());
+                            event.borrow().returns.clone()
+                        }
+                        None => {
+                            if !call.dynamic {
+                                file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                    severity: parser::Severity::Error,
+                                    message: "Event not found".into(),
+                                    range: self.range,
+                                });
+                            }
+                            DataType::Unknown
+                        }
                     }
+                } else {
+                    let func = state.current_class.borrow_mut().find_callable_function(
+                        &call.name,
+                        &types,
+                        &tokens::AccessType::PRIVATE,
+                    );
+
+                    match func.or_else(|| lsp.find_global_function(&call.name, &types)) {
+                        Some(func) => {
+                            func.borrow_mut().uses.push(call.range.clone());
+                            func.borrow().returns.clone()
+                        }
+                        None => {
+                            if !call.dynamic {
+                                file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                    severity: parser::Severity::Error,
+                                    message: "Function not found".into(),
+                                    range: self.range,
+                                });
+                            }
+                            DataType::Unknown
+                        }
+                    }
+                };
+
+                if call.post {
+                    DataType::Void
+                } else {
+                    ret
                 }
             }
             parser::LValueType::Method(lvalue, call) => {
@@ -261,30 +316,56 @@ impl Lintable for parser::LValue {
                 match class {
                     DataType::Class(class_rc) => {
                         let mut class = class_rc.borrow_mut();
-                        let func = class.find_callable_function(
-                            &call.name,
-                            &types,
-                            &tokens::AccessType::PUBLIC,
-                        );
 
-                        match func {
-                            Some(func) => {
-                                func.uses.push(call.range);
-                                func.returns.clone()
+                        let ret = if call.event {
+                            match class.find_callable_event(&call.name, &types) {
+                                Some(event) => {
+                                    event.borrow_mut().uses.push(call.range);
+                                    event.borrow().returns.clone()
+                                }
+                                None => {
+                                    if !call.dynamic {
+                                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Event not found".into(),
+                                            range: self.range,
+                                        });
+                                    }
+                                    DataType::Unknown
+                                }
                             }
-                            None => {
-                                file.diagnostics.push(parser::Diagnostic {
-                                    severity: parser::Severity::Error,
-                                    message: "Method not found".into(),
-                                    range: self.range,
-                                });
-                                DataType::Unknown
+                        } else {
+                            match class.find_callable_function(
+                                &call.name,
+                                &types,
+                                &tokens::AccessType::PUBLIC,
+                            ) {
+                                Some(func) => {
+                                    func.borrow_mut().uses.push(call.range);
+                                    func.borrow().returns.clone()
+                                }
+                                None => {
+                                    if !call.dynamic {
+                                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Method not found".into(),
+                                            range: self.range,
+                                        });
+                                    }
+                                    DataType::Unknown
+                                }
                             }
+                        };
+
+                        if call.post {
+                            DataType::Void
+                        } else {
+                            ret
                         }
                     }
                     DataType::Any | DataType::Unknown => DataType::Unknown,
                     _ => {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Cannot call a method of a non Complex type".into(),
                             range: self.range,
@@ -303,11 +384,11 @@ impl Lintable for parser::LValue {
 
                         match var {
                             Some(var) => {
-                                var.uses.push(member.range);
-                                var.data_type.clone()
+                                var.borrow_mut().uses.push(member.range);
+                                var.borrow_mut().data_type.clone()
                             }
                             None => {
-                                file.diagnostics.push(parser::Diagnostic {
+                                file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                     severity: parser::Severity::Error,
                                     message: "Member not found".into(),
                                     range: self.range,
@@ -318,7 +399,7 @@ impl Lintable for parser::LValue {
                     }
                     DataType::Any | DataType::Unknown => DataType::Unknown,
                     _ => {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Cannot call a method of a non Complex type".into(),
                             range: self.range,
@@ -332,7 +413,7 @@ impl Lintable for parser::LValue {
                 let index_type = index.lint(lsp, file, state);
 
                 if !index_type.is_numeric() {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Index for subscript operator must be numerical".into(),
                         range: index.range,
@@ -343,7 +424,7 @@ impl Lintable for parser::LValue {
                     DataType::Array(sub_type) => *sub_type,
                     DataType::Unknown => DataType::Unknown,
                     _ => {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Subscript Operator can only be applied to Array".into(),
                             range: array.range,
@@ -357,7 +438,7 @@ impl Lintable for parser::LValue {
 }
 
 impl Lintable for parser::Expression {
-    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>, state: &mut LintData) -> DataType {
         match &self.expression_type {
             parser::ExpressionType::Literal(literal) => literal.into(),
             parser::ExpressionType::ArrayLiteral(expressions) => {
@@ -373,7 +454,7 @@ impl Lintable for parser::Expression {
                             .skip(1)
                             .any(|expression_type| !data_type.is_convertible(expression_type))
                         {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Array Literal contains different types".into(),
                                 range: self.range,
@@ -393,7 +474,7 @@ impl Lintable for parser::Expression {
                         if left_type.is_convertible(&DataType::Boolean)
                             || right_type.is_convertible(&DataType::Boolean)
                         {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Invalid types for Operation, expected booleans".into(),
                                 range: self.range,
@@ -406,7 +487,7 @@ impl Lintable for parser::Expression {
                         if !(left_type.is_convertible(&right_type)
                             || right_type.is_convertible(&left_type))
                         {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Types do not match".into(),
                                 range: self.range,
@@ -420,7 +501,7 @@ impl Lintable for parser::Expression {
                     | tokens::Operator::LT
                     | tokens::Operator::LTE => {
                         if !(left_type.is_numeric() || right_type.is_numeric()) {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Invalid types for Operation, expected numeric".into(),
                                 range: self.range,
@@ -448,7 +529,7 @@ impl Lintable for parser::Expression {
                                 }
                             }
                             (..) => {
-                                file.diagnostics.push(parser::Diagnostic {
+                                file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                     severity: parser::Severity::Error,
                                     message: "Invalid types for Operation".into(),
                                     range: self.range,
@@ -463,7 +544,7 @@ impl Lintable for parser::Expression {
                 let data_type = expression.lint(lsp, file, state);
 
                 if !data_type.is_numeric() {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Invalid type, expected number".into(),
                         range: expression.range,
@@ -482,7 +563,7 @@ impl Lintable for parser::Expression {
                 let expression_type = expression.lint(lsp, file, state);
 
                 if !expression_type.is_convertible(&DataType::Boolean) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Invalid type, expected boolean".into(),
                         range: expression.range,
@@ -493,13 +574,10 @@ impl Lintable for parser::Expression {
             }
             parser::ExpressionType::Parenthesized(expression) => expression.lint(lsp, file, state),
             parser::ExpressionType::Create(class) => {
-                match file
-                    .find_class(None, class)
-                    .or_else(|| lsp.find_class(None, class, false))
-                {
+                match lsp.find_class_from_file(file, None, class) {
                     Some(class) => DataType::Class(class),
                     None => {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Class not found".into(),
                             range: self.range,
@@ -512,7 +590,7 @@ impl Lintable for parser::Expression {
                 let class_type = class.lint(lsp, file, state);
 
                 if !class_type.is_convertible(&DataType::String) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Invalid type, expected string".into(),
                         range: self.range,
@@ -526,7 +604,7 @@ impl Lintable for parser::Expression {
                 let lvalue_type = lvalue.lint(lsp, file, state);
 
                 if !lvalue_type.is_numeric() {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Cannot increment on non Numeric DataType".into(),
                         range: lvalue.range,
@@ -540,7 +618,7 @@ impl Lintable for parser::Expression {
 }
 
 impl Lintable for parser::Statement {
-    fn lint(&self, lsp: &mut LSP, file: &mut FileData, state: &mut LintState) -> DataType {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>, state: &mut LintData) -> DataType {
         match &self.statement_type {
             parser::StatementType::Expression(expression) => {
                 expression.lint(lsp, file, state);
@@ -562,7 +640,7 @@ impl Lintable for parser::Statement {
                         let condition_type = condition.lint(lsp, file, state);
 
                         if !condition_type.is_convertible(&DataType::Boolean) {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Condition for if must be of type Boolean".into(),
                                 range: condition.range,
@@ -579,7 +657,7 @@ impl Lintable for parser::Statement {
                 });
 
                 if !condition_type.is_convertible(&DataType::Boolean) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Condition for if must be of type Boolean".into(),
                         range: condition.range,
@@ -597,7 +675,7 @@ impl Lintable for parser::Statement {
                     DataType::Any => {}
                     DataType::Unknown => {}
                     _ => {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Can only destroy Objects".into(),
                             range: object.range,
@@ -606,10 +684,10 @@ impl Lintable for parser::Statement {
                 }
             }
             parser::StatementType::Declaration(var) => {
-                let data_type = var.variable.data_type.lint(file);
+                let data_type = var.variable.data_type.lint(lsp, file);
 
                 if let DataType::Unknown = data_type {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Type not found".into(),
                         range: var.variable.range,
@@ -617,33 +695,28 @@ impl Lintable for parser::Statement {
                 }
 
                 if let Some(initial_value) = &var.variable.initial_value {
-                    match initial_value.expression_type {
-                        parser::ExpressionType::Literal(literal) => {
-                            if !DataType::from(&literal).is_convertible(&data_type) {
-                                file.diagnostics.push(parser::Diagnostic {
-                                    severity: parser::Severity::Error,
-                                    message: "Type's are not convertible".into(),
-                                    range: initial_value.range,
-                                });
-                            }
-                        }
-                        parser::ExpressionType::ArrayLiteral(_) => todo!(),
-                        _ => {}
+                    let initial_type = initial_value.lint(lsp, file, state);
+                    if !initial_type.is_convertible(&data_type) {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                            severity: parser::Severity::Error,
+                            message: "Type's are not convertible".into(),
+                            range: initial_value.range,
+                        });
                     }
                 }
 
-                state.variables.push(Variable {
+                state.variables.push(Rc::new(RefCell::new(Variable {
                     variable_type: VariableType::Local(var.variable.clone()),
                     data_type,
                     uses: Vec::new(),
-                });
+                })));
             }
             parser::StatementType::Assignment(lvalue, expression) => {
                 let lvalue_type = lvalue.lint(lsp, file, state);
                 let expression_type = expression.lint(lsp, file, state);
 
                 if !expression_type.is_convertible(&lvalue_type) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Type's are not convertible".into(),
                         range: expression.range,
@@ -695,7 +768,7 @@ impl Lintable for parser::Statement {
 
                 for (data_type, range) in to_check {
                     if !data_type.is_numeric() {
-                        file.diagnostics.push(parser::Diagnostic {
+                        file.borrow_mut().diagnostics.push(parser::Diagnostic {
                             severity: parser::Severity::Error,
                             message: "Needs to be a Numeric Type".into(),
                             range: *range,
@@ -719,7 +792,7 @@ impl Lintable for parser::Statement {
                 });
 
                 if !condition_type.is_convertible(&DataType::Boolean) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Condition for while loop must be of type Boolean".into(),
                         range: condition.range,
@@ -745,7 +818,7 @@ impl Lintable for parser::Statement {
                             }
                             parser::CaseSpecifierType::Else => {
                                 if cases.len() != 1 {
-                                    file.diagnostics.push(parser::Diagnostic {
+                                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                         severity: parser::Severity::Error,
                                         message: "CASE ELSE must be alone".into(),
                                         range: case.range,
@@ -757,7 +830,7 @@ impl Lintable for parser::Statement {
 
                     for (literal, range) in literals {
                         if choose_type.is_convertible(&literal.into()) {
-                            file.diagnostics.push(parser::Diagnostic {
+                            file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                 severity: parser::Severity::Error,
                                 message: "Wrong Literal Type".into(),
                                 range: range.clone(),
@@ -777,7 +850,7 @@ impl Lintable for parser::Statement {
                     .unwrap_or(DataType::Void);
 
                 if !ret_type.is_convertible(&state.return_type) {
-                    file.diagnostics.push(parser::Diagnostic {
+                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                         severity: parser::Severity::Error,
                         message: "Wrong return Type".into(),
                         range: self.range,
@@ -795,12 +868,15 @@ impl Lintable for parser::Statement {
                     .collect::<Vec<_>>();
 
                 let base = match call_type {
-                    parser::CallType::Super => state.current_class.borrow().base.clone(),
+                    parser::CallType::Super => match state.current_class.borrow().base.clone() {
+                        DataType::Class(base) => Some(base),
+                        _ => unreachable!(),
+                    },
                     parser::CallType::Ancestor(group, name) => {
                         let mut curr = state.current_class.clone();
                         loop {
                             let new_curr = match &curr.borrow().base {
-                                Some(base) => {
+                                DataType::Class(base) => {
                                     if base.borrow().name.eq_ignore_ascii_case(name) {
                                         match (group, &base.borrow().within) {
                                             (Some(group), Some(within))
@@ -817,8 +893,8 @@ impl Lintable for parser::Statement {
                                     }
                                     base.clone()
                                 }
-                                None => {
-                                    file.diagnostics.push(parser::Diagnostic {
+                                _ => {
+                                    file.borrow_mut().diagnostics.push(parser::Diagnostic {
                                         severity: parser::Severity::Error,
                                         message: "Ancestor not found".into(),
                                         range: self.range.clone(),
@@ -850,6 +926,72 @@ impl Lintable for parser::Statement {
         }
 
         DataType::Void
+    }
+}
+
+trait LintableNoState {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>) -> DataType;
+}
+
+impl LintableNoState for parser::DatatypeDecl {
+    fn lint(&self, lsp: &mut LSP, file: &Rc<RefCell<File>>) -> DataType {
+        let within = self.class.within.as_ref().and_then(|within_name| {
+            let within = file.borrow().find_class(None, within_name);
+
+            if within.is_none() {
+                file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                    severity: parser::Severity::Error,
+                    message: "Within Class not found".into(),
+                    range: self.range,
+                });
+            }
+
+            within
+        });
+
+        // lsp.find_class(group, name, include_local)
+        let mut base = lsp
+            .find_class_from_file(file, None, &self.class.base)
+            .map(DataType::Class);
+        if base.is_none() {
+            base = lsp.find_enum(&self.class.base).map(DataType::Enum);
+
+            if base.is_none() {
+                file.borrow_mut().diagnostics.push(parser::Diagnostic {
+                    severity: parser::Severity::Error,
+                    message: "Base Class not found".into(),
+                    range: self.range,
+                });
+            }
+        }
+        let mut new_class = Class::new(
+            self.class.name.clone(),
+            base.unwrap_or(DataType::Unknown),
+            within,
+            matches!(self.class.scope, Some(tokens::ScopeModif::GLOBAL)),
+        );
+
+        for var in &self.variables {
+            new_class
+                .instance_variables
+                .push(Rc::new(RefCell::new(Variable {
+                    variable_type: VariableType::Instance(var.clone()),
+                    data_type: var.variable.data_type.lint(lsp, file),
+                    uses: Vec::new(),
+                })));
+        }
+
+        for event in &self.events {
+            new_class.events.push(Rc::new(RefCell::new(Event::new(
+                lsp,
+                file,
+                event.clone(),
+                Some(event.range),
+                None,
+            ))));
+        }
+
+        DataType::Class(Rc::new(RefCell::new(new_class)))
     }
 }
 
@@ -891,7 +1033,8 @@ struct Event {
 
 impl Event {
     fn new(
-        file: &mut FileData,
+        lsp: &mut LSP,
+        file: &Rc<RefCell<File>>,
         parsed: parser::Event,
         declaration: Option<Range>,
         definition: Option<Range>,
@@ -904,11 +1047,13 @@ impl Event {
                     .iter()
                     .map(|arg| Variable {
                         variable_type: VariableType::Argument(arg.clone()),
-                        data_type: arg.variable.data_type.lint(file),
+                        data_type: arg.variable.data_type.lint(lsp, file),
                         uses: Vec::new(),
                     })
                     .collect();
-                returns = ret.as_ref().map_or(DataType::Void, |ret| ret.lint(file));
+                returns = ret
+                    .as_ref()
+                    .map_or(DataType::Void, |ret| ret.lint(lsp, file));
             }
             parser::EventType::System(name) => {
                 arguments = Vec::new();
@@ -919,7 +1064,7 @@ impl Event {
                 arguments = Vec::new();
                 returns = DataType::Void;
                 // TODO get arguments and return value from base class using parsed.name
-            },
+            }
         }
 
         Event {
@@ -949,8 +1094,9 @@ impl Event {
     pub fn is_callable(&self, arguments: &Vec<DataType>) -> bool {
         self.arguments
             .iter()
-            .zip(arguments)
+            .zip(arguments.iter())
             .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
+            && self.arguments.len() == arguments.len()
     }
 }
 
@@ -960,6 +1106,7 @@ struct Function {
 
     returns: DataType,
     arguments: Vec<Variable>,
+    help: Option<String>,
 
     declaration: Option<Range>,
     definition: Option<Range>,
@@ -968,7 +1115,8 @@ struct Function {
 
 impl Function {
     fn new(
-        file: &mut FileData,
+        lsp: &mut LSP,
+        file: &Rc<RefCell<File>>,
         parsed: parser::Function,
         declaration: Option<Range>,
         definition: Option<Range>,
@@ -978,19 +1126,21 @@ impl Function {
             definition,
             uses: Vec::new(),
 
+            help: None,
+
             arguments: parsed
                 .arguments
                 .iter()
                 .map(|arg| Variable {
                     variable_type: VariableType::Argument(arg.clone()),
-                    data_type: arg.variable.data_type.lint(file),
+                    data_type: arg.variable.data_type.lint(lsp, file),
                     uses: Vec::new(),
                 })
                 .collect(),
             returns: parsed
                 .returns
                 .as_ref()
-                .map_or(DataType::Void, |ret| ret.lint(file)),
+                .map_or(DataType::Void, |ret| ret.lint(lsp, file)),
 
             parsed,
         }
@@ -1021,37 +1171,58 @@ impl Function {
                 .iter()
                 .zip(arguments)
                 .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
+            && (self.arguments.len() == arguments.len()
+                || (self.arguments.len() < arguments.len() && self.parsed.has_vararg))
     }
 }
 
-#[derive(Clone, Debug)]
-struct Class {
+#[derive(Debug)]
+struct Enum {
     name: String,
-    base: Option<Rc<RefCell<Class>>>,
+    help: Option<String>,
+    values: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Class {
+    // file: Option<Rc<RefCell<File>>>,
+    name: String,
+    base: DataType,
     within: Option<Rc<RefCell<Class>>>,
+    help: Option<String>,
 
     is_global: bool,
+    usage: Usage,
 
-    ons: Vec<Function>,
-    events: Vec<Event>,
-    functions: Vec<Function>,
-    external_functions: Vec<Function>,
+    ons: Vec<Rc<RefCell<Function>>>,
+    events: Vec<Rc<RefCell<Event>>>,
+    functions: Vec<Rc<RefCell<Function>>>,
+    external_functions: Vec<Rc<RefCell<Function>>>,
 
-    instance_variables: Vec<Variable>,
+    instance_variables: Vec<Rc<RefCell<Variable>>>,
 }
 
 impl Class {
     fn new(
+        // file: Option<Rc<RefCell<File>>>,
         name: String,
-        base: Option<Rc<RefCell<Class>>>,
+        base: DataType,
         within: Option<Rc<RefCell<Class>>>,
         is_global: bool,
     ) -> Class {
         Class {
+            // file,
             name,
             base,
             within,
+            help: None,
+
             is_global,
+            usage: Usage {
+                declaration: None,
+                definition: None,
+                uses: Vec::new(),
+            },
 
             events: Vec::new(),
             instance_variables: Vec::new(),
@@ -1061,64 +1232,97 @@ impl Class {
         }
     }
 
+    fn inherits_from(&self, datatype: &DataType) -> bool {
+        match datatype {
+            DataType::Class(class) => match &self.base {
+                DataType::Class(base) => {
+                    Rc::ptr_eq(base, &class) || base.borrow().inherits_from(datatype)
+                }
+                _ => false,
+            },
+            DataType::Enum(enumerated) => match &self.base {
+                DataType::Class(base) => base.borrow().inherits_from(datatype),
+                DataType::Enum(base) => Rc::ptr_eq(base, enumerated),
+                _ => unreachable!(),
+            },
+            _ => false,
+        }
+    }
+
     fn find_variable(
-        &mut self,
+        &self,
         variable: &parser::VariableAccess,
         min_access: &tokens::AccessType,
-    ) -> Option<&mut Variable> {
-        self.instance_variables.iter_mut().find(|var| {
-            if let VariableType::Instance(var) = &var.variable_type {
-                var.variable.name.eq_ignore_ascii_case(&variable.name)
-                    && min_access.strictness()
-                        >= var
-                            .access
-                            .read
-                            .map(|access| access.strictness())
-                            .unwrap_or(0)
-            } else {
-                unreachable!();
-            }
-        })
+    ) -> Option<Rc<RefCell<Variable>>> {
+        self.instance_variables
+            .iter()
+            .find(|var| {
+                let var = var.borrow();
+                if let VariableType::Instance(var) = &var.variable_type {
+                    var.variable.name.eq_ignore_ascii_case(&variable.name)
+                        && min_access.strictness()
+                            >= var
+                                .access
+                                .read
+                                .map(|access| access.strictness())
+                                .unwrap_or(0)
+                } else {
+                    unreachable!();
+                }
+            })
+            .cloned()
     }
 
-    fn find_exact_event(&mut self, event: &Event) -> Option<&mut Event> {
-        self.events.iter_mut().find(|func| func.equals(event))
+    fn find_exact_event(&mut self, event: &Event) -> Option<Rc<RefCell<Event>>> {
+        self.events
+            .iter()
+            .find(|func| func.borrow().equals(event))
+            .cloned()
     }
 
-    fn find_conflicting_event(&mut self, event: &Event) -> Option<&mut Event> {
-        self.events.iter_mut().find(|func| func.conflicts(event))
+    fn find_conflicting_event(&mut self, event: &Event) -> Option<Rc<RefCell<Event>>> {
+        self.events
+            .iter()
+            .find(|func| func.borrow().conflicts(event))
+            .cloned()
     }
 
     fn find_callable_event(
         &mut self,
         name: &String,
         arguments: &Vec<DataType>,
-    ) -> Option<&mut Event> {
-        self.events.iter_mut().find(|event| {
-            event.parsed.name.eq_ignore_ascii_case(name) && event.is_callable(arguments)
-        })
+    ) -> Option<Rc<RefCell<Event>>> {
+        self.events
+            .iter()
+            .find(|event| {
+                event.borrow().parsed.name.eq_ignore_ascii_case(name)
+                    && event.borrow().is_callable(arguments)
+            })
+            .cloned()
     }
 
-    fn find_exact_function(&mut self, function: &Function) -> Option<&mut Function> {
+    fn find_exact_function(&mut self, function: &Function) -> Option<Rc<RefCell<Function>>> {
         self.functions
-            .iter_mut()
-            .find(|func| func.equals(function))
+            .iter()
+            .find(|func| func.borrow().equals(function))
             .or_else(|| {
                 self.external_functions
-                    .iter_mut()
-                    .find(|func| func.equals(function))
+                    .iter()
+                    .find(|func| func.borrow().equals(function))
             })
+            .cloned()
     }
 
-    fn find_conflicting_function(&mut self, function: &Function) -> Option<&mut Function> {
+    fn find_conflicting_function(&mut self, function: &Function) -> Option<Rc<RefCell<Function>>> {
         self.functions
-            .iter_mut()
-            .find(|func| func.conflicts(function))
+            .iter()
+            .find(|func| func.borrow().conflicts(function))
             .or_else(|| {
                 self.external_functions
-                    .iter_mut()
-                    .find(|func| func.conflicts(function))
+                    .iter()
+                    .find(|func| func.borrow().conflicts(function))
             })
+            .cloned()
     }
 
     fn find_callable_function(
@@ -1126,52 +1330,95 @@ impl Class {
         name: &String,
         arguments: &Vec<DataType>,
         min_access: &tokens::AccessType,
-    ) -> Option<&mut Function> {
+    ) -> Option<Rc<RefCell<Function>>> {
         self.functions
-            .iter_mut()
+            .iter()
             .find(|func| {
-                func.parsed.name.eq_ignore_ascii_case(name)
-                    && func.is_callable(arguments, min_access)
+                func.borrow().parsed.name.eq_ignore_ascii_case(name)
+                    && func.borrow().is_callable(arguments, min_access)
             })
             .or_else(|| {
-                self.external_functions.iter_mut().find(|func| {
-                    func.parsed.name.eq_ignore_ascii_case(name)
-                        && func.is_callable(arguments, min_access)
+                self.external_functions.iter().find(|func| {
+                    func.borrow().parsed.name.eq_ignore_ascii_case(name)
+                        && func.borrow().is_callable(arguments, min_access)
                 })
             })
+            .cloned()
     }
 }
 
-struct FileData {
-    classes: Vec<Rc<RefCell<Class>>>,
-    // Shared with all isntances
-    shared_variables: Vec<Variable>,
-
-    diagnostics: Vec<parser::Diagnostic>,
+#[derive(PartialEq, PartialOrd, Clone, Debug)]
+pub enum LintState {
+    None,
+    OnlyTypes,
+    Shallow,
+    Complete,
 }
 
-impl FileData {
+impl LintState {
+    fn next(&self) -> Option<LintState> {
+        match self {
+            LintState::None => Some(Self::OnlyTypes),
+            LintState::OnlyTypes => Some(Self::Shallow),
+            LintState::Shallow => Some(Self::Complete),
+            LintState::Complete => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct File {
+    classes: Vec<Rc<RefCell<Class>>>,
+    // Shared with all instances
+    shared_variables: Vec<Rc<RefCell<Variable>>>,
+    global_variables: Vec<Rc<RefCell<Variable>>>,
+
+    diagnostics: Vec<parser::Diagnostic>,
+
+    top_levels: Vec<parser::TopLevel>,
+    path: PathBuf,
+    lint_state: LintState,
+}
+
+impl File {
+    fn new(path: PathBuf) -> anyhow::Result<File> {
+        Ok(File {
+            classes: Vec::new(),
+            diagnostics: Vec::new(),
+            shared_variables: Vec::new(),
+            global_variables: Vec::new(),
+
+            top_levels: tokenize_file(&path)?.parse_tokens(),
+            path,
+            lint_state: LintState::None,
+        })
+    }
+
     fn find_variable(
         &mut self,
         variable: &parser::VariableAccess,
         min_access: &tokens::AccessType,
-    ) -> Option<&mut Variable> {
-        self.shared_variables.iter_mut().find(|var| {
-            if let VariableType::Instance(var) = &var.variable_type {
-                var.variable.name.eq_ignore_ascii_case(&variable.name)
-                    && min_access.strictness()
-                        >= var
-                            .access
-                            .read
-                            .map(|access| access.strictness())
-                            .unwrap_or(0)
-            } else {
-                unreachable!();
-            }
-        })
+    ) -> Option<Rc<RefCell<Variable>>> {
+        self.shared_variables
+            .iter()
+            .find(|var| {
+                let var = var.borrow();
+                if let VariableType::Instance(var) = &var.variable_type {
+                    var.variable.name.eq_ignore_ascii_case(&variable.name)
+                        && min_access.strictness()
+                            >= var
+                                .access
+                                .read
+                                .map(|access| access.strictness())
+                                .unwrap_or(0)
+                } else {
+                    unreachable!();
+                }
+            })
+            .cloned()
     }
 
-    fn find_class(&mut self, group: Option<&String>, name: &String) -> Option<Rc<RefCell<Class>>> {
+    fn find_class(&self, group: Option<&String>, name: &String) -> Option<Rc<RefCell<Class>>> {
         self.classes.iter().find_map(|class| {
             if class.borrow().name.eq_ignore_ascii_case(name) {
                 match (group, &class.borrow().within) {
@@ -1188,33 +1435,9 @@ impl FileData {
             }
         })
     }
-}
-
-struct File {
-    data: FileData,
-
-    top_levels: Vec<parser::TopLevel>,
-    path: PathBuf,
-    shallow: bool,
-}
-
-impl File {
-    fn new(path: PathBuf, shallow: bool) -> anyhow::Result<File> {
-        Ok(File {
-            data: FileData {
-                classes: Vec::new(),
-                diagnostics: Vec::new(),
-                shared_variables: Vec::new(),
-            },
-
-            top_levels: parse_file(&path)?,
-            path,
-            shallow: false,
-        })
-    }
 
     fn require_class(
-        data: &mut FileData,
+        file: &Rc<RefCell<File>>,
         current_class: &Weak<RefCell<Class>>,
         top_level_type: String,
         range: Range,
@@ -1222,7 +1445,7 @@ impl File {
         let class = current_class.upgrade();
         match class {
             Some(_) => {}
-            None => data.diagnostics.push(parser::Diagnostic {
+            None => file.borrow_mut().diagnostics.push(parser::Diagnostic {
                 severity: parser::Severity::Error,
                 message: top_level_type
                     + " have to come after the Type Definition that they refer to",
@@ -1231,332 +1454,399 @@ impl File {
         }
         class
     }
+}
 
-    fn lint_rest(&mut self, lsp: &mut LSP) {
+trait LintableFile {
+    fn lint(&self, lsp: &mut LSP, lin_state: &LintState);
+}
+
+impl LintableFile for Rc<RefCell<File>> {
+    fn lint(&self, lsp: &mut LSP, lint_state: &LintState) {
         let mut current_class = Weak::<RefCell<Class>>::new();
 
-        for top_level in &self.top_levels {
+        let mut top_levels = Vec::new();
+        swap(&mut self.borrow_mut().top_levels, &mut top_levels);
+        for top_level in &top_levels {
             match &top_level.top_level_type {
-                parser::TopLevelType::DatatypeDecl(class, ..) => {
-                    current_class = match self.data.find_class(class.within.as_ref(), &class.name) {
-                        Some(class) => Rc::downgrade(&class),
-                        None => Rc::downgrade(&lsp.find_builtin_class("powerobject")),
+                parser::TopLevelType::ForwardDecl(types) => {
+                    if matches!(lint_state, LintState::OnlyTypes) {
+                        for datatype in types {
+                            let mut new_class = Class::new(
+                                // self,
+                                datatype.class.name.clone(),
+                                DataType::Unknown,
+                                None,
+                                matches!(datatype.class.scope, Some(tokens::ScopeModif::GLOBAL)),
+                            );
+                            new_class.usage.declaration = Some(datatype.range);
+                            self.borrow_mut()
+                                .classes
+                                .push(Rc::new(RefCell::new(new_class)));
+                        }
                     }
                 }
-                parser::TopLevelType::ForwardDecl => {}
-                parser::TopLevelType::TypeVariablesDecl(..) => {}
-                parser::TopLevelType::ScopedVariablesDecl(..) => {}
-                parser::TopLevelType::GlobalVariableDecl(..) => {}
-                parser::TopLevelType::ConstantDecl => {}
-                parser::TopLevelType::FunctionForwardDecl => {}
-                parser::TopLevelType::FunctionsForwardDecl(..) => {}
-                parser::TopLevelType::ExternalFunctions(..) => {}
-                parser::TopLevelType::FunctionBody(function, statements) => {
-                    if let Some(class) = Self::require_class(
-                        &mut self.data,
-                        &current_class,
-                        "Function Bodies".into(),
-                        top_level.range,
-                    ) {
-                        let new_func = Function::new(
-                            &mut self.data,
-                            function.clone(),
-                            Some(function.range),
-                            None,
-                        );
 
-                        let mut state = LintState {
-                            current_class: class.clone(),
-                            variables: new_func.arguments.clone(),
-                            return_type: new_func.returns.clone(),
-                        };
+                // #region LintState::Shallow
+                parser::TopLevelType::DatatypeDecl(datatype)
+                    if matches!(lint_state, LintState::Shallow) =>
+                {
+                    let new_class = match datatype.lint(lsp, self) {
+                        DataType::Class(class) => class,
+                        _ => unreachable!(),
+                    };
 
-                        statements.iter().for_each(|statement| {
-                            statement.lint(lsp, &mut self.data, &mut state);
-                        });
-
-                        let mut borrow = class.borrow_mut();
-                        match borrow.find_exact_function(&new_func) {
-                            Some(existing) => {
-                                if let Some(definition) = existing.definition {
-                                    self.data.diagnostics.push(parser::Diagnostic {
+                    match self.borrow().find_class(None, &datatype.class.name) {
+                        Some(class_ref) => {
+                            current_class = Rc::downgrade(&class_ref);
+                            let mut class = class_ref.borrow_mut();
+                            match class.usage.definition {
+                                Some(def) => {
+                                    self.borrow_mut().diagnostics.push(parser::Diagnostic {
                                         severity: parser::Severity::Error,
-                                        message: "Function already defined".into(),
-                                        range: function.range,
+                                        message: "Type already defined".into(),
+                                        range: datatype.range,
                                     });
-                                    self.data.diagnostics.push(parser::Diagnostic {
+                                    self.borrow_mut().diagnostics.push(parser::Diagnostic {
                                         severity: parser::Severity::Hint,
-                                        message: "Already defined here".into(),
-                                        range: definition,
+                                        message: "Type already defined here".into(),
+                                        range: def,
                                     });
-                                } else {
-                                    existing.definition = Some(function.range);
+                                }
+                                None => {
+                                    let mut new_class = new_class.borrow_mut();
+                                    class.usage.definition = new_class.usage.definition;
+                                    swap(&mut class.events, &mut new_class.events);
+                                    swap(
+                                        &mut class.instance_variables,
+                                        &mut new_class.instance_variables,
+                                    );
+                                    swap(&mut class.base, &mut new_class.base);
+                                    swap(&mut class.within, &mut new_class.within);
                                 }
                             }
-                            None => {
-                                self.data.diagnostics.push(parser::Diagnostic {
-                                    severity: parser::Severity::Error,
-                                    message: "Function is missing a Forward Declaration".into(),
-                                    range: function.range,
-                                });
+                        }
+                        None => {
+                            current_class = Rc::downgrade(&new_class);
+                            if new_class.borrow().is_global {
+                                self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                        severity: parser::Severity::Warning,
+                                        message: "Global Classes should be Forward Declared, otherwise they might not be seen by other Files".into(),
+                                        range: datatype.range,
+                                    });
+                            }
+                            self.borrow_mut().classes.push(new_class);
+                        }
+                    }
+                }
+                parser::TopLevelType::TypeVariablesDecl(vars) => {
+                    if matches!(lint_state, LintState::Shallow) {
+                        if let Some(class) = File::require_class(
+                            self,
+                            &current_class,
+                            "Type Variables".into(),
+                            top_level.range,
+                        ) {
+                            for var in vars {
+                                let data_type = var.variable.data_type.lint(lsp, self);
 
-                                borrow.functions.push(new_func);
+                                class
+                                    .borrow_mut()
+                                    .instance_variables
+                                    .push(Rc::new(RefCell::new(Variable {
+                                        variable_type: VariableType::Instance(var.clone()),
+                                        data_type,
+                                        uses: Vec::new(),
+                                    })));
+                            }
+                        }
+                    }
+                }
+                parser::TopLevelType::ScopedVariablesDecl(_) => {
+                    if matches!(lint_state, LintState::Shallow) { /* TODO shared + global */ }
+                }
+                parser::TopLevelType::GlobalVariableDecl(_) => {
+                    if matches!(lint_state, LintState::Shallow) { /* TODO implicitly shared + global + shared scope keyword invalid */
+                    }
+                }
+                parser::TopLevelType::ConstantDecl => {
+                    if matches!(lint_state, LintState::Shallow) { /* TODO */ }
+                }
+                parser::TopLevelType::FunctionForwardDecl => {
+                    if matches!(lint_state, LintState::Shallow) { /* TODO */ }
+                }
+                parser::TopLevelType::FunctionsForwardDecl(functions) => {
+                    if matches!(lint_state, LintState::Shallow) {
+                        if let Some(class) = File::require_class(
+                            self,
+                            &current_class,
+                            "Function Forward Declarations".into(),
+                            top_level.range,
+                        ) {
+                            for function in functions {
+                                let mut new_func =
+                                    Function::new(lsp, self, function.clone(), None, None);
+
+                                let mut borrow = class.borrow_mut();
+                                match borrow.find_conflicting_function(&new_func) {
+                                    Some(func) => {
+                                        let mut func = func.borrow_mut();
+                                        if func.returns
+                                            != function
+                                                .returns
+                                                .as_ref()
+                                                .map_or(DataType::Void, |ret| ret.lint(lsp, self))
+                                        {
+                                            self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                                severity: parser::Severity::Error,
+                                                message: "Same function with different return type already exists".into(),
+                                                range: function.range,
+                                            });
+                                            if let Some(declaration) = func.declaration {
+                                                self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                                severity: parser::Severity::Hint,
+                                                message: "Function with different return type declared here".into(),
+                                                range: declaration,
+                                            });
+                                            }
+                                        }
+
+                                        if let Some(declaration) = func.declaration {
+                                            self.borrow_mut().diagnostics.push(
+                                                parser::Diagnostic {
+                                                    severity: parser::Severity::Error,
+                                                    message: "Function already forward declared"
+                                                        .into(),
+                                                    range: function.range,
+                                                },
+                                            );
+                                            self.borrow_mut().diagnostics.push(
+                                                parser::Diagnostic {
+                                                    severity: parser::Severity::Hint,
+                                                    message: "Already forward declared here".into(),
+                                                    range: declaration,
+                                                },
+                                            );
+                                        } else {
+                                            func.declaration = Some(function.range);
+                                        }
+                                    }
+                                    None => {
+                                        new_func.declaration = Some(function.range);
+                                        borrow.functions.push(Rc::new(RefCell::new(new_func)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                parser::TopLevelType::ExternalFunctions(functions) => {
+                    if matches!(lint_state, LintState::Shallow) {
+                        if let Some(class) = File::require_class(
+                            self,
+                            &current_class,
+                            "External Functions".into(),
+                            top_level.range,
+                        ) {
+                            for function in functions {
+                                let mut new_func =
+                                    Function::new(lsp, self, function.clone(), None, None);
+
+                                let mut borrow = class.borrow_mut();
+                                match borrow.find_exact_function(&new_func) {
+                                    Some(func) => {
+                                        let mut func = func.borrow_mut();
+                                        if let Some(declaration) = func.declaration {
+                                            self.borrow_mut().diagnostics.push(
+                                                parser::Diagnostic {
+                                                    severity: parser::Severity::Error,
+                                                    message: "Function already forward declared"
+                                                        .into(),
+                                                    range: function.range,
+                                                },
+                                            );
+                                            self.borrow_mut().diagnostics.push(
+                                                parser::Diagnostic {
+                                                    severity: parser::Severity::Hint,
+                                                    message: "Already forward declared here".into(),
+                                                    range: declaration,
+                                                },
+                                            );
+                                        } else {
+                                            func.declaration = Some(function.range);
+                                        }
+                                    }
+                                    None => {
+                                        new_func.declaration = Some(function.range);
+                                        borrow
+                                            .external_functions
+                                            .push(Rc::new(RefCell::new(new_func)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // #endregion
+
+                // #region LintState::Complete
+                parser::TopLevelType::DatatypeDecl(parser::DatatypeDecl { class, .. })
+                    if matches!(lint_state, LintState::Complete) =>
+                {
+                    current_class =
+                        match self.borrow().find_class(class.within.as_ref(), &class.name) {
+                            Some(class) => Rc::downgrade(&class),
+                            None => Rc::downgrade(&lsp.find_builtin_class("powerobject")),
+                        }
+                }
+                parser::TopLevelType::FunctionBody(function, statements) => {
+                    if matches!(lint_state, LintState::Complete) {
+                        if let Some(class) = File::require_class(
+                            self,
+                            &current_class,
+                            "Function Bodies".into(),
+                            top_level.range,
+                        ) {
+                            let new_func = Function::new(
+                                lsp,
+                                self,
+                                function.clone(),
+                                Some(function.range),
+                                None,
+                            );
+
+                            let mut state = LintData {
+                                current_class: class.clone(),
+                                variables: new_func
+                                    .arguments
+                                    .iter()
+                                    .map(|var| Rc::new(RefCell::new(var.clone())))
+                                    .collect(),
+                                return_type: new_func.returns.clone(),
+                            };
+
+                            statements.iter().for_each(|statement| {
+                                statement.lint(lsp, self, &mut state);
+                            });
+
+                            let mut borrow = class.borrow_mut();
+                            match borrow.find_exact_function(&new_func) {
+                                Some(existing) => {
+                                    let mut existing = existing.borrow_mut();
+                                    if let Some(definition) = existing.definition {
+                                        self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Function already defined".into(),
+                                            range: function.range,
+                                        });
+                                        self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Hint,
+                                            message: "Already defined here".into(),
+                                            range: definition,
+                                        });
+                                    } else {
+                                        existing.definition = Some(function.range);
+                                    }
+                                }
+                                None => {
+                                    self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                        severity: parser::Severity::Error,
+                                        message: "Function is missing a Forward Declaration".into(),
+                                        range: function.range,
+                                    });
+
+                                    borrow.functions.push(Rc::new(RefCell::new(new_func)));
+                                }
                             }
                         }
                     }
                 }
                 parser::TopLevelType::OnBody(on, statements) => {
-                    if let Some(class) = self.data.find_class(None, &on.class) {
-                        let mut state = LintState {
-                            current_class: class,
-                            variables: Vec::new(),
-                            return_type: DataType::Void,
-                        };
+                    if matches!(lint_state, LintState::Complete) {
+                        if let Some(class) = self.borrow().find_class(None, &on.class) {
+                            let mut state = LintData {
+                                current_class: class,
+                                variables: Vec::new(),
+                                return_type: DataType::Void,
+                            };
 
-                        statements.iter().for_each(|statement| {
-                            statement.lint(lsp, &mut self.data, &mut state);
-                        });
-                    } else {
-                        self.data.diagnostics.push(parser::Diagnostic {
-                            severity: parser::Severity::Error,
-                            message: "On Body for non Existing Class".into(),
-                            range: top_level.range.clone(),
-                        });
+                            statements.iter().for_each(|statement| {
+                                statement.lint(lsp, self, &mut state);
+                            });
+                        } else {
+                            self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                severity: parser::Severity::Error,
+                                message: "On Body for non Existing Class".into(),
+                                range: top_level.range.clone(),
+                            });
+                        }
                     }
                 }
                 parser::TopLevelType::EventBody(event, statements) => {
-                    if let Some(class) = Self::require_class(
-                        &mut self.data,
-                        &current_class,
-                        "Event Bodies".into(),
-                        top_level.range,
-                    ) {
-                        let new_event =
-                            Event::new(&mut self.data, event.clone(), Some(event.range), None);
+                    if matches!(lint_state, LintState::Complete) {
+                        if let Some(class) = File::require_class(
+                            self,
+                            &current_class,
+                            "Event Bodies".into(),
+                            top_level.range,
+                        ) {
+                            let new_event =
+                                Event::new(lsp, self, event.clone(), Some(event.range), None);
 
-                        let mut state = LintState {
-                            current_class: class.clone(),
-                            variables: new_event.arguments.clone(),
-                            return_type: new_event.returns.clone(),
-                        };
+                            let mut state = LintData {
+                                current_class: class.clone(),
+                                variables: new_event
+                                    .arguments
+                                    .iter()
+                                    .map(|var| Rc::new(RefCell::new(var.clone())))
+                                    .collect(),
+                                return_type: new_event.returns.clone(),
+                            };
 
-                        statements.iter().for_each(|statement| {
-                            statement.lint(lsp, &mut self.data, &mut state);
-                        });
+                            statements.iter().for_each(|statement| {
+                                statement.lint(lsp, self, &mut state);
+                            });
 
-                        let mut borrow = class.borrow_mut();
-                        match borrow.find_exact_event(&new_event) {
-                            Some(existing) => {
-                                if let Some(definition) = existing.definition {
-                                    self.data.diagnostics.push(parser::Diagnostic {
+                            let mut borrow = class.borrow_mut();
+                            match borrow.find_exact_event(&new_event) {
+                                Some(existing) => {
+                                    let mut existing = existing.borrow_mut();
+                                    if let Some(definition) = existing.definition {
+                                        self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Error,
+                                            message: "Event already defined".into(),
+                                            range: event.range,
+                                        });
+                                        self.borrow_mut().diagnostics.push(parser::Diagnostic {
+                                            severity: parser::Severity::Hint,
+                                            message: "Already defined here".into(),
+                                            range: definition,
+                                        });
+                                    } else {
+                                        existing.definition = Some(event.range);
+                                    }
+                                }
+                                None => {
+                                    self.borrow_mut().diagnostics.push(parser::Diagnostic {
                                         severity: parser::Severity::Error,
-                                        message: "Event already defined".into(),
+                                        message: "Event is missing a Forward Declaration".into(),
                                         range: event.range,
                                     });
-                                    self.data.diagnostics.push(parser::Diagnostic {
-                                        severity: parser::Severity::Hint,
-                                        message: "Already defined here".into(),
-                                        range: definition,
-                                    });
-                                } else {
-                                    existing.definition = Some(event.range);
-                                }
-                            }
-                            None => {
-                                self.data.diagnostics.push(parser::Diagnostic {
-                                    severity: parser::Severity::Error,
-                                    message: "Event is missing a Forward Declaration".into(),
-                                    range: event.range,
-                                });
 
-                                borrow.events.push(new_event);
+                                    borrow.events.push(Rc::new(RefCell::new(new_event)));
+                                }
                             }
                         }
                     }
+                } // #endregion
+
+                parser::TopLevelType::DatatypeDecl(..) => {
+                    if !matches!(lint_state, LintState::Shallow | LintState::Complete) {}
                 }
             }
         }
-    }
 
-    fn lint_shallow(&mut self, lsp: &mut LSP) {
-        let mut current_class = Weak::<RefCell<Class>>::new();
-
-        for top_level in &self.top_levels {
-            match &top_level.top_level_type {
-                parser::TopLevelType::DatatypeDecl(class, vars, events) => {
-                    let within = class.within.as_ref().and_then(|within_name| {
-                        let within = self.data.find_class(None, within_name);
-
-                        if within.is_none() {
-                            self.data.diagnostics.push(parser::Diagnostic {
-                                severity: parser::Severity::Error,
-                                message: "Within Class not found".into(),
-                                range: top_level.range,
-                            });
-                        }
-
-                        within
-                    });
-
-                    let base = self.data.find_class(None, &class.base);
-                    if base.is_none() {
-                        self.data.diagnostics.push(parser::Diagnostic {
-                            severity: parser::Severity::Error,
-                            message: "Base Class not found".into(),
-                            range: top_level.range,
-                        });
-                    }
-                    let mut new_class = Class::new(
-                        class.name.clone(),
-                        base,
-                        within,
-                        matches!(class.scope, Some(tokens::ScopeModif::GLOBAL)),
-                    );
-
-                    for var in vars {
-                        new_class.instance_variables.push(Variable {
-                            variable_type: VariableType::Instance(var.clone()),
-                            data_type: var.variable.data_type.lint(&mut self.data),
-                            uses: Vec::new(),
-                        });
-                    }
-
-                    for event in events {
-                        new_class.events.push(Event::new(
-                            &mut self.data,
-                            event.clone(),
-                            Some(event.range),
-                            None,
-                        ));
-                    }
-
-                    let class_rc = Rc::new(RefCell::new(new_class));
-                    current_class = Rc::downgrade(&class_rc);
-                    self.data.classes.push(class_rc);
-                }
-                parser::TopLevelType::ForwardDecl => { /* TODO */ }
-                parser::TopLevelType::TypeVariablesDecl(vars) => {
-                    if let Some(class) = Self::require_class(
-                        &mut self.data,
-                        &current_class,
-                        "Type Variables".into(),
-                        top_level.range,
-                    ) {
-                        for var in vars {
-                            let data_type = var.variable.data_type.lint(&mut self.data);
-
-                            class.borrow_mut().instance_variables.push(Variable {
-                                variable_type: VariableType::Instance(var.clone()),
-                                data_type,
-                                uses: Vec::new(),
-                            });
-                        }
-                    }
-                }
-                parser::TopLevelType::ScopedVariablesDecl(_) => { /* TODO shared + global */ }
-                parser::TopLevelType::GlobalVariableDecl(_) => { /* TODO implicitly shared + global + shared scope keyword invalid */
-                }
-                parser::TopLevelType::ConstantDecl => { /* TODO */ }
-                parser::TopLevelType::FunctionForwardDecl => { /* TODO */ }
-                parser::TopLevelType::FunctionsForwardDecl(functions) => {
-                    if let Some(class) = Self::require_class(
-                        &mut self.data,
-                        &current_class,
-                        "Function Forward Declarations".into(),
-                        top_level.range,
-                    ) {
-                        for function in functions {
-                            let mut new_func =
-                                Function::new(&mut self.data, function.clone(), None, None);
-
-                            let mut borrow = class.borrow_mut();
-                            match borrow.find_conflicting_function(&new_func) {
-                                Some(func) => {
-                                    if func.returns
-                                        != function
-                                            .returns
-                                            .as_ref()
-                                            .map_or(DataType::Void, |ret| ret.lint(&mut self.data))
-                                    {
-                                        self.data.diagnostics.push(parser::Diagnostic {
-                                                severity: parser::Severity::Error,
-                                                message: "Same function with different return type already exists".into(),
-                                                range: function.range,
-                                            });
-                                        if let Some(declaration) = func.declaration {
-                                            self.data.diagnostics.push(parser::Diagnostic {
-                                                severity: parser::Severity::Hint,
-                                                message: "Function with different return type declared here".into(),
-                                                range: declaration,
-                                            });
-                                        }
-                                    }
-
-                                    if let Some(declaration) = func.declaration {
-                                        self.data.diagnostics.push(parser::Diagnostic {
-                                            severity: parser::Severity::Error,
-                                            message: "Function already forward declared".into(),
-                                            range: function.range,
-                                        });
-                                        self.data.diagnostics.push(parser::Diagnostic {
-                                            severity: parser::Severity::Hint,
-                                            message: "Already forward declared here".into(),
-                                            range: declaration,
-                                        });
-                                    } else {
-                                        func.declaration = Some(function.range);
-                                    }
-                                }
-                                None => {
-                                    new_func.declaration = Some(function.range);
-                                    borrow.functions.push(new_func);
-                                }
-                            }
-                        }
-                    }
-                }
-                parser::TopLevelType::FunctionBody(..) => {}
-                parser::TopLevelType::OnBody(..) => {}
-                parser::TopLevelType::EventBody(..) => {}
-                parser::TopLevelType::ExternalFunctions(functions) => {
-                    if let Some(class) = Self::require_class(
-                        &mut self.data,
-                        &current_class,
-                        "External Functions".into(),
-                        top_level.range,
-                    ) {
-                        for function in functions {
-                            let mut new_func =
-                                Function::new(&mut self.data, function.clone(), None, None);
-
-                            let mut borrow = class.borrow_mut();
-                            match borrow.find_exact_function(&new_func) {
-                                Some(func) => {
-                                    if let Some(declaration) = func.declaration {
-                                        self.data.diagnostics.push(parser::Diagnostic {
-                                            severity: parser::Severity::Error,
-                                            message: "Function already forward declared".into(),
-                                            range: function.range,
-                                        });
-                                        self.data.diagnostics.push(parser::Diagnostic {
-                                            severity: parser::Severity::Hint,
-                                            message: "Already forward declared here".into(),
-                                            range: declaration,
-                                        });
-                                    } else {
-                                        func.declaration = Some(function.range);
-                                    }
-                                }
-                                None => {
-                                    new_func.declaration = Some(function.range);
-                                    borrow.external_functions.push(new_func);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        swap(&mut self.borrow_mut().top_levels, &mut top_levels);
+        self.borrow_mut().lint_state = lint_state.clone();
     }
 }
 
@@ -1565,28 +1855,46 @@ pub struct LSPOptions {
 }
 
 pub struct LSP {
-    files: Vec<File>,
-    global_variables: Vec<Variable>,
-    global_functions: Vec<Function>,
+    files: Vec<Rc<RefCell<File>>>,
+    placeholder_file: Rc<RefCell<File>>,
 
+    builtin_enums: Vec<Rc<RefCell<Enum>>>,
+    builtin_functions: Vec<Rc<RefCell<Function>>>,
     builtin_classes: Vec<Rc<RefCell<Class>>>,
 
     options: LSPOptions,
 }
 
 impl LSP {
+    fn find_class_from_file(
+        &mut self,
+        file: &Rc<RefCell<File>>,
+        group: Option<&String>,
+        name: &String,
+    ) -> Option<Rc<RefCell<Class>>> {
+        file.borrow()
+            .find_class(group, name)
+            .or_else(|| self.find_class(group, name, false))
+    }
+
     fn find_class(
         &mut self,
         group: Option<&String>,
         name: &String,
-        include_hidden: bool,
+        include_local: bool,
     ) -> Option<Rc<RefCell<Class>>> {
         self.files
-            .iter_mut()
+            .iter()
             .find_map(|file| {
-                file.data
-                    .find_class(group, name)
-                    .and_then(|class| (include_hidden || class.borrow().is_global).then_some(class))
+                file.borrow().find_class(group, name).and_then(|class| {
+                    (include_local || class.borrow().is_global).then(|| (file.clone(), class))
+                })
+            })
+            .and_then(|(file, class)| {
+                if file.borrow().lint_state < LintState::Shallow {
+                    file.lint(self, &LintState::Shallow);
+                }
+                Some(class)
             })
             .or_else(|| {
                 self.builtin_classes
@@ -1596,41 +1904,82 @@ impl LSP {
             })
     }
 
-    fn find_builtin_class(&mut self, name: &'static str) -> Rc<RefCell<Class>> {
-        // TODO, yay!
-        self.builtin_classes[0].clone()
+    fn find_enum(&self, name: &String) -> Option<Rc<RefCell<Enum>>> {
+        self.builtin_enums
+            .iter()
+            .find(|enumerated| enumerated.borrow().name.eq_ignore_ascii_case(name))
+            .cloned()
     }
 
-    fn find_global_variable(&mut self, name: &String) -> Option<&mut Variable> {
-        self.global_variables
-            .iter_mut()
-            .find(|var| var.parsed().name.eq_ignore_ascii_case(name))
+    fn find_builtin_class(&self, name: &'static str) -> Rc<RefCell<Class>> {
+        self.builtin_classes
+            .iter()
+            .find(|class| class.borrow().name.eq_ignore_ascii_case(name))
+            .expect(format!("Builtin Class not found: {}", name).as_str())
+            .clone()
+    }
+
+    fn find_global_variable(&mut self, name: &String) -> Option<Rc<RefCell<Variable>>> {
+        self.files.iter().find_map(|file| {
+            file.borrow()
+                .global_variables
+                .iter()
+                .find(|var| var.borrow().parsed().name.eq_ignore_ascii_case(name))
+                .cloned()
+        })
     }
 
     fn find_global_function(
         &mut self,
         name: &String,
         arguments: &Vec<DataType>,
-    ) -> Option<&mut Function> {
-        // No need to look for instance functions
-        self.global_functions.iter_mut().find(|global| {
-            global.parsed.name.eq_ignore_ascii_case(name)
-                && global.is_callable(arguments, &tokens::AccessType::PUBLIC)
-        })
+    ) -> Option<Rc<RefCell<Function>>> {
+        let func_class = DataType::Class(self.find_builtin_class("function_object"));
+        self.files
+            .iter()
+            .find_map(|file| {
+                file.borrow().find_class(None, name).and_then(|class| {
+                    if class.borrow().inherits_from(&func_class) {
+                        class.borrow_mut().find_callable_function(
+                            name,
+                            arguments,
+                            &tokens::AccessType::PUBLIC,
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| {
+                self.builtin_functions
+                    .iter()
+                    .find(|global| {
+                        global.borrow().parsed.name.eq_ignore_ascii_case(name)
+                            && global
+                                .borrow()
+                                .is_callable(arguments, &tokens::AccessType::PUBLIC)
+                    })
+                    .cloned()
+            })
     }
 
     pub fn new() -> anyhow::Result<LSP> {
         Ok(LSP {
             files: Vec::new(),
-            global_variables: Vec::new(),
-            global_functions: Vec::new(),
+            placeholder_file: Rc::new(RefCell::new(File {
+                classes: vec![],
+                shared_variables: vec![],
+                global_variables: vec![],
+                diagnostics: vec![],
+                top_levels: vec![],
 
-            builtin_classes: vec![Rc::new(RefCell::new(Class::new(
-                "powerobject".into(),
-                None,
-                None,
-                true,
-            )))],
+                path: "".into(),
+                lint_state: LintState::Complete,
+            })),
+
+            builtin_enums: Vec::new(),
+            builtin_functions: Vec::new(),
+            builtin_classes: Vec::new(),
 
             options: LSPOptions {
                 root: current_dir()?,
@@ -1638,36 +1987,214 @@ impl LSP {
         })
     }
 
-    pub fn add_file(&mut self, path: PathBuf, shallow: bool) -> anyhow::Result<()> {
-        let pos = self.files.iter().position(|file| file.path == path);
-        match pos {
-            Some(pos) => {
-                if !shallow && self.files[pos].shallow {
-                    let mut file = self.files.remove(pos);
-
-                    if file.shallow {
-                        file.shallow = false;
-                        file.lint_rest(self);
-                    }
-
-                    self.files.push(file);
-                }
-            }
+    pub fn add_file(&mut self, path: PathBuf, lint_state: LintState) -> anyhow::Result<()> {
+        let file = match self.files.iter().find(|file| file.borrow().path == path) {
+            Some(file) => file.clone(),
             None => {
-                let mut file = File::new(path, true)?;
-                file.lint_shallow(self);
+                let file = Rc::new(RefCell::new(File::new(path)?));
+                self.files.push(file.clone());
+                file
+            }
+        };
 
-                if !shallow {
-                    file.shallow = false;
-                    file.lint_rest(self);
-                }
+        loop {
+            if file.borrow().lint_state >= lint_state {
+                break;
+            }
 
-                self.files.push(file);
+            let next = file.borrow().lint_state.next();
+            match next {
+                Some(state) => file.lint(self, &state),
+                None => break,
             }
         }
 
-        for diagnostic in &self.files.last().unwrap().data.diagnostics {
+        for diagnostic in &file.borrow().diagnostics {
             println!("{} - {}", diagnostic.range, diagnostic.message)
+        }
+
+        Ok(())
+    }
+
+    fn load_proto_function(
+        &mut self,
+        func: &powerbuilder_proto::Function,
+    ) -> anyhow::Result<(Option<parser::DataType>, Vec<parser::Argument>, bool)> {
+        let mut has_vararg = false;
+        let mut returns = None;
+        let mut arguments = Vec::new();
+
+        if let Some(ret) = &func.ret {
+            if ret != "\u{1}void" {
+                returns = Some(tokenize(&ret)?.parse_type()?);
+            }
+        }
+
+        for arg in &func.argument {
+            let flags = arg.flags.unwrap_or(0);
+
+            if flags & variable::Flag::IsVarlist as u32 > 0 {
+                has_vararg = true;
+            } else {
+                arguments.push(parser::Argument {
+                    is_ref: flags & variable::Flag::IsRef as u32 > 0,
+                    variable: parser::Variable {
+                        constant: flags & variable::Flag::NoWrite as u32 > 0,
+                        data_type: tokenize(&arg.r#type.as_ref().unwrap())?.parse_type()?,
+                        name: arg.name.clone().unwrap(),
+                        initial_value: None,
+                        range: Default::default(),
+                    },
+                })
+            }
+        }
+
+        Ok((returns, arguments, has_vararg))
+    }
+
+    pub fn load_enums(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
+        let enums = powerbuilder_proto::Enums::decode(buf)?;
+
+        self.builtin_enums
+            .extend(enums.r#enum.into_iter().map(|en| {
+                Rc::new(RefCell::new(Enum {
+                    name: en.name,
+                    help: en.help,
+                    values: en.value,
+                }))
+            }));
+
+        Ok(())
+    }
+
+    pub fn load_builtin_classes(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
+        let classes = powerbuilder_proto::Classes::decode(buf)?;
+
+        // TODO make not stupid
+        let mut skipped = std::collections::VecDeque::<powerbuilder_proto::Class>::new();
+        skipped.extend(classes.class.iter().cloned());
+
+        loop {
+            let class = match skipped.pop_front() {
+                Some(class) => class,
+                None => break,
+            };
+
+            match self
+                .builtin_classes
+                .iter()
+                .find(|base| base.borrow().name == class.base)
+                .cloned()
+                .map(DataType::Class)
+                .or_else(|| self.find_enum(&class.base).map(DataType::Enum))
+            {
+                Some(base) => {
+                    let mut new_class = Class::new(class.name, base.clone(), None, true);
+
+                    for var in class.variable {
+                        let parsed = parser::Variable {
+                            constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
+                            data_type: tokenize(&var.r#type.unwrap())?.parse_type()?,
+                            name: var.name.unwrap(),
+                            initial_value: None,
+                            range: Default::default(),
+                        };
+                        new_class
+                            .instance_variables
+                            .push(Rc::new(RefCell::new(Variable {
+                                data_type: parsed
+                                    .data_type
+                                    .lint(self, &self.placeholder_file.clone()),
+                                variable_type: VariableType::Instance(parser::InstanceVariable {
+                                    variable: parsed,
+                                    access: parser::Access {
+                                        read: None,
+                                        write: None,
+                                    },
+                                }),
+                                uses: Vec::new(),
+                            })))
+                    }
+
+                    // let mut parsed_event = parser::Event {
+                    //     name: func.name,
+                    //     range: Default::default(),
+                    //     event_type: parser::EventType::User((), ()),
+                    // };
+                    // Ok(Rc::new(RefCell::new(Function::new(
+                    //     self, &mut file, parsed, None, None,
+                    // ))))
+
+                    for func in class.function {
+                        let (returns, arguments, has_vararg) = self.load_proto_function(&func)?;
+                        new_class.functions.push(Rc::new(RefCell::new(Function::new(
+                            self,
+                            &self.placeholder_file.clone(),
+                            parser::Function {
+                                returns,
+                                scope_modif: None,
+                                access: None,
+                                name: func.name,
+                                arguments,
+                                has_vararg,
+                                range: Default::default(),
+                            },
+                            None,
+                            None,
+                        ))));
+                    }
+
+                    for event in class.event {
+                        let (returns, arguments, has_vararg) = self.load_proto_function(&event)?;
+                        if has_vararg {
+                            todo!();
+                        }
+                        new_class.events.push(Rc::new(RefCell::new(Event::new(
+                            self,
+                            &self.placeholder_file.clone(),
+                            parser::Event {
+                                name: event.name,
+                                range: Default::default(),
+                                event_type: parser::EventType::User(returns, arguments),
+                            },
+                            None,
+                            None,
+                        ))));
+                    }
+
+                    self.builtin_classes.push(Rc::new(RefCell::new(new_class)))
+                }
+                None => skipped.push_back(class),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn load_builtin_functions(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
+        let funcs = powerbuilder_proto::Functions::decode(buf)?;
+
+        for func in funcs.function {
+            let (returns, arguments, has_vararg) = self.load_proto_function(&func)?;
+            let new_func = Rc::new(RefCell::new(Function::new(
+                self,
+                &self.placeholder_file.clone(),
+                parser::Function {
+                    returns,
+                    scope_modif: None,
+                    access: None,
+                    name: func.name,
+                    arguments,
+                    has_vararg,
+                    range: Default::default(),
+                },
+                None,
+                None,
+            )));
+            self.builtin_functions.push(new_func);
         }
 
         Ok(())

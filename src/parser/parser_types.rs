@@ -1,10 +1,20 @@
-use multipeek::{multipeek, MultiPeek};
+use anyhow::anyhow;
 
 use super::tokenizer_types::{self as tokens, Range};
 
 pub enum ParseError {
     EOF,
     UnexpectedToken,
+}
+
+impl From<ParseError> for anyhow::Error {
+    fn from(value: ParseError) -> Self {
+        let err = match value {
+            ParseError::EOF => "Parser: EOF Reached",
+            ParseError::UnexpectedToken => "Parser: Unexpected Token",
+        };
+        anyhow!(err)
+    }
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
@@ -77,6 +87,7 @@ pub struct Function {
     pub access: Option<tokens::AccessType>,
     pub name: String,
     pub arguments: Vec<Argument>,
+    pub has_vararg: bool,
 
     pub range: Range,
 }
@@ -342,9 +353,18 @@ pub struct Statement {
 }
 
 #[derive(Debug)]
+pub struct DatatypeDecl {
+    pub class: Class,
+    pub variables: Vec<InstanceVariable>,
+    pub events: Vec<Event>,
+
+    pub range: Range,
+}
+
+#[derive(Debug)]
 pub enum TopLevelType {
-    DatatypeDecl(Class, Vec<InstanceVariable>, Vec<Event>),
-    ForwardDecl,
+    DatatypeDecl(DatatypeDecl),
+    ForwardDecl(Vec<DatatypeDecl>),
     TypeVariablesDecl(Vec<InstanceVariable>),
     ScopedVariablesDecl(Vec<ScopedVariable>),
     GlobalVariableDecl(Variable),
@@ -363,6 +383,7 @@ pub struct TopLevel {
     pub range: Range,
 }
 
+#[derive(Debug)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,

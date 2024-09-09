@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, mem::replace, path::Path, str::FromStr};
+use std::{fs::File, io::Read, path::Path, str::FromStr};
 
 use anyhow::Result;
 use encoding_rs_io::DecodeReaderBytesBuilder;
@@ -42,13 +42,8 @@ pub struct FileTokenizer {
 }
 
 impl FileTokenizer {
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = DecodeReaderBytesBuilder::new().build(file);
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf)?;
-
-        let out = Self {
+    pub fn new(buf: String) -> Self {
+        Self {
             chars: multipeek(buf.chars().collect::<Vec<_>>().into_iter()),
             buildup: String::new(),
             pos: Position { line: 1, column: 0 },
@@ -59,9 +54,16 @@ impl FileTokenizer {
                 range: Range::default(),
                 error: None,
             },
-        };
+        }
+    }
 
-        Ok(out)
+    pub fn open_file(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = DecodeReaderBytesBuilder::new().build(file);
+        let mut buf = String::new();
+        reader.read_to_string(&mut buf)?;
+
+        Ok(Self::new(buf))
     }
 
     pub fn skip_headers(&mut self) -> Option<()> {
@@ -453,7 +455,10 @@ impl Iterator for FileTokenizer {
                 (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
 
                 // Because nicer
-                (TokenType::Symbol(Symbol::COLONCOLON), TokenType::Keyword(Keyword::CREATE | Keyword::DESTROY)) => {
+                (
+                    TokenType::Symbol(Symbol::COLONCOLON),
+                    TokenType::Keyword(Keyword::CREATE | Keyword::DESTROY),
+                ) => {
                     token.token_type = TokenType::ID;
                 }
 

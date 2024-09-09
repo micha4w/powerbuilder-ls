@@ -1,5 +1,5 @@
 use std::backtrace::Backtrace;
-use std::{iter::Filter, rc::Rc};
+use std::iter::Filter;
 
 use multipeek::{multipeek, MultiPeek};
 
@@ -8,18 +8,18 @@ use super::tokenizer::*;
 use super::tokenizer_types as tokens;
 use super::tokenizer_types::Range;
 
-pub struct Parser<'a> {
-    tokens: MultiPeek<Filter<&'a mut dyn Iterator<Item = Token>, fn(&Token) -> bool>>,
+pub struct Parser {
+    tokens: MultiPeek<Filter<FileTokenizer, fn(&Token) -> bool>>,
     syntax_errors: Vec<Diagnostic>,
 }
 
-impl Parser<'_> {
-    pub fn new<'a>(tokens: &'a mut dyn Iterator<Item = Token>) -> Parser<'a> {
+impl Parser {
+    pub fn new<'a>(tokens: FileTokenizer) -> Parser {
         fn filter(token: &Token) -> bool {
             token.token_type != TokenType::COMMENT
         }
 
-        Parser::<'a> {
+        Parser {
             tokens: multipeek(tokens.filter::<fn(&Token) -> bool>(filter)),
             syntax_errors: Vec::new(),
         }
@@ -64,11 +64,10 @@ impl Parser<'_> {
     }
 
     fn optional(&mut self, token_type: TokenType) -> ParseResult<Option<Token>> {
-        let token = self.peek()?;
-        if token.token_type == token_type {
-            Ok(self.tokens.next())
-        } else {
-            Ok(None)
+        match self.peek() {
+            Ok(token) if token.token_type == token_type => Ok(self.tokens.next()),
+            Ok(_) | Err(ParseError::EOF) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 
@@ -125,7 +124,7 @@ impl Parser<'_> {
     //     None
     // }
 
-    fn parse_type(&mut self) -> ParseResult<DataType> {
+    pub fn parse_type(&mut self) -> ParseResult<DataType> {
         let token = self.expect(TokenType::ID)?;
 
         Ok(
@@ -668,6 +667,7 @@ impl Parser<'_> {
 
     fn parse_function_header(&mut self) -> ParseResult<Function> {
         let mut arguments = Vec::new();
+        let mut has_vararg = false;
         let name;
         let start = self.peek()?.range.start;
 
@@ -711,6 +711,7 @@ impl Parser<'_> {
                 }
                 TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
                     self.next()?;
+                    has_vararg = true;
                     end = self
                         .expect(TokenType::Symbol(tokens::Symbol::RPAREN))?
                         .range
@@ -788,6 +789,8 @@ impl Parser<'_> {
             access,
             name,
             arguments,
+            has_vararg,
+
             range: Range { start, end },
         })
     }
@@ -1075,7 +1078,6 @@ impl Parser<'_> {
                                         _ => {
                                             let range = self.next()?.range;
                                             self.error(&"Dangling end keyword".to_string(), &range);
-                                            // TODO dont always consume line
                                             self.consume_line()?;
                                         }
                                     },
@@ -1842,7 +1844,9 @@ impl Parser<'_> {
                     }
                 },
                 TokenType::Keyword(tokens::Keyword::EVENT) => {
-                    events.push(self.parse_event_header()?);
+                    self.parse_event_header()
+                        .split_eof()?
+                        .map(|ev| events.push(ev));
                 }
                 _ => {
                     if let Ok(statement) = self.parse_statement().split_eof()? {
@@ -1864,8 +1868,8 @@ impl Parser<'_> {
         }
 
         Ok(TopLevel {
-            top_level_type: TopLevelType::DatatypeDecl(
-                Class {
+            top_level_type: TopLevelType::DatatypeDecl(DatatypeDecl {
+                class: Class {
                     scope,
                     name,
                     base,
@@ -1873,7 +1877,8 @@ impl Parser<'_> {
                 },
                 variables,
                 events,
-            ),
+                range: Range { start, end },
+            }),
             range: Range { start, end },
         })
     }
@@ -2098,23 +2103,37 @@ impl Parser<'_> {
 
         _ = self.expect(TokenType::NEWLINE).split_eof()?;
 
+        let mut types = Vec::new();
+
         let end;
         loop {
-            match self.next()?.token_type {
-                TokenType::Keyword(tokens::Keyword::END) => match self.peek()?.token_type {
+            match self.peek()?.token_type.clone() {
+                TokenType::Keyword(tokens::Keyword::END) => match self.peek_nth(1)?.token_type {
                     TokenType::Keyword(tokens::Keyword::FORWARD) => {
+                        self.next()?;
                         end = self.next()?.range.end;
-                        self.expect(TokenType::NEWLINE)?;
+                        self.expect(TokenType::NEWLINE).split_eof()?;
                         break;
                     }
-                    _ => _ = self.consume_line()?,
+                    _ => {
+                        let range = self.next()?.range;
+                        self.error(&"Dangling end keyword".to_string(), &range);
+                        self.consume_line()?;
+                    }
                 },
-                _ => _ = self.consume_line()?,
-            };
+                _ => match self.parse_datatype_decl().split_eof()? {
+                    Ok(TopLevel {
+                        top_level_type: TopLevelType::DatatypeDecl(datatype),
+                        ..
+                    }) => types.push(datatype),
+                    Ok(_) => unreachable!(),
+                    Err(err) => {}
+                },
+            }
         }
 
         Ok(TopLevel {
-            top_level_type: TopLevelType::ForwardDecl,
+            top_level_type: TopLevelType::ForwardDecl(types),
             range: Range { start, end },
         })
     }
