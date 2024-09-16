@@ -3,6 +3,8 @@ use std::iter::Filter;
 
 use multipeek::{multipeek, MultiPeek};
 
+use crate::lsp::lsp_types::GroupedName;
+
 use super::parser_types::*;
 use super::tokenizer::*;
 use super::tokenizer_types as tokens;
@@ -207,7 +209,7 @@ impl Parser {
                 let expression = self.parse_expression()?;
                 end = expression.range.end;
 
-                ExpressionType::PreMinusPlus(operator, Box::new(expression))
+                ExpressionType::UnaryOperation(operator, Box::new(expression))
             }
             TokenType::Keyword(tokens::Keyword::THIS)
             | TokenType::Keyword(tokens::Keyword::SUPER)
@@ -947,6 +949,19 @@ impl Parser {
         })
     }
 
+    fn parse_class_id(&mut self) -> ParseResult<(Option<String>, String)> {
+        let name = self.next()?;
+        if self
+            .optional(TokenType::Symbol(tokens::Symbol::TICK))?
+            .is_some()
+        {
+            let sub_name = self.expect(TokenType::ID)?;
+            Ok((Some(name.content), sub_name.content))
+        } else {
+            Ok((None, name.content))
+        }
+    }
+
     // Consumes trailing newlines
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         match self.peek()?.token_type {
@@ -1324,13 +1339,7 @@ impl Parser {
                         self.expect(TokenType::Keyword(tokens::Keyword::CATCH))?;
 
                         self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?;
-                        let data_type = self.parse_type()?;
-                        let name = self.expect(TokenType::ID)?.content;
-                        _ = self
-                            .expect(TokenType::Symbol(tokens::Symbol::RPAREN))
-                            .split_eof()?;
-
-                        _ = self.expect(TokenType::NEWLINE).split_eof()?;
+                        let var = self.parse_variable_declaration()?;
 
                         let mut statements = Vec::new();
 
@@ -1348,7 +1357,7 @@ impl Parser {
                             }
                         };
 
-                        catches.push((data_type, name, statements));
+                        catches.push((var, statements));
 
                         if exit {
                             break;
@@ -1544,16 +1553,8 @@ impl Parser {
                         CallType::Super
                     }
                     TokenType::ID => {
-                        let name = self.next()?;
-                        if self
-                            .optional(TokenType::Symbol(tokens::Symbol::TICK))?
-                            .is_some()
-                        {
-                            let sub_name = self.expect(TokenType::ID)?;
-                            CallType::Ancestor(Some(name.content), sub_name.content)
-                        } else {
-                            CallType::Ancestor(None, name.content)
-                        }
+                        let (group, name) = self.parse_class_id()?;
+                        CallType::Ancestor(group, name)
                     }
                     _ => {
                         return self.fatal(
@@ -1804,16 +1805,15 @@ impl Parser {
         };
         self.expect(TokenType::Keyword(tokens::Keyword::TYPE))?;
 
-        // TODO! do something with name, from, within
         let name = self.expect(TokenType::ID)?.content;
         self.expect(TokenType::Keyword(tokens::Keyword::FROM))?;
-        let base = self.expect(TokenType::ID)?.content;
+        let base = self.parse_class_id()?;
 
         let within = if self
             .optional(TokenType::Keyword(tokens::Keyword::WITHIN))?
             .is_some()
         {
-            Some(self.expect(TokenType::ID)?.content)
+            Some(self.parse_class_id()?)
         } else {
             None
         };

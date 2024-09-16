@@ -32,6 +32,7 @@ impl<T> KeepEOF<T> for ParseResult<T> {
     }
 }
 
+// TODO merge with lsp_types:: DataType
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
     Decimal(Option<String>),
@@ -144,8 +145,8 @@ pub struct FunctionCall {
 pub struct Class {
     pub scope: Option<tokens::ScopeModif>,
     pub name: String,
-    pub base: String,
-    pub within: Option<String>,
+    pub base: (Option<String>, String),
+    pub within: Option<(Option<String>, String)>,
 }
 
 #[derive(Debug)]
@@ -196,7 +197,7 @@ pub enum ExpressionType {
     Literal(tokens::Literal),
     ArrayLiteral(Vec<Expression>),
     Operation(Box<Expression>, tokens::Operator, Box<Expression>),
-    PreMinusPlus(tokens::Operator, Box<Expression>),
+    UnaryOperation(tokens::Operator, Box<Expression>),
     IncrementDecrement(Box<Expression>, tokens::Symbol),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
@@ -272,7 +273,7 @@ pub struct IfStatement {
 #[derive(Debug)]
 pub struct TryCatchStatement {
     pub statements: Vec<Statement>,
-    pub catches: Vec<(DataType, String, Vec<Statement>)>,
+    pub catches: Vec<(Statement, Vec<Statement>)>,
     pub finally: Option<Vec<Statement>>,
 }
 
