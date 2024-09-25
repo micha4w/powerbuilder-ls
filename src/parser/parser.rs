@@ -3,8 +3,6 @@ use std::iter::Filter;
 
 use multipeek::{multipeek, MultiPeek};
 
-use crate::lsp::lsp_types::GroupedName;
-
 use super::parser_types::*;
 use super::tokenizer::*;
 use super::tokenizer_types as tokens;

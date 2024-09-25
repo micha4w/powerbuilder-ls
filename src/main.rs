@@ -1,15 +1,13 @@
-mod parser;
 mod lsp;
+mod parser;
 
+use std::sync::Arc;
 
-use std::{fs::File, io::BufReader};
+use lsp::lsp_types::{self, Project};
+use tokio::sync::RwLock;
 
-use parser::{tokenizer::FileTokenizer, parser::Parser};
-use lsp::lsp::{LintState, LSP};
-use prost::{bytes::Bytes, Message};
-
-
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // let path = "res/test.sru";
     // let mut tokens = FileTokenizer::open(path)?;
     // tokens.skip_headers();
@@ -34,14 +32,20 @@ fn main() -> anyhow::Result<()> {
     // let buf = std::fs::read("system/enums2.pb")?;
     // let mut cursor: Cursor<Vec<u8>> = Cursor::new(buf);
     // let enums = output::Enums::decode_length_delimited(&mut cursor)?;
-    
-    let mut lsp = LSP::new()?;
 
-    lsp.load_enums("system/enums.pb".into())?;
-    lsp.load_builtin_classes("system/classes.pb".into())?;
-    lsp.load_builtin_functions("system/system_functions.pb".into())?;
-
-    lsp.add_file("res/test.sru".into(), LintState::Complete)?;
+    let proj_arc = Arc::new(RwLock::new(Project::new()));
+    {
+        let mut proj = proj_arc.write().await;
+        proj.load_enums("system/enums.pb".into())?;
+        proj.load_builtin_classes("system/classes.pb".into())?;
+        proj.load_builtin_functions("system/system_functions.pb".into())?;
+    }
+    lsp::add_file(
+        proj_arc.clone(),
+        "res/test.sru".into(),
+        lsp_types::LintProgress::Complete,
+    )
+    .await?;
     // lsp.add_file("res/u_filehandler.sru".into(), LintState::Complete)?;
     // lsp.add_file("res/pfc_w_find.srw".into(), LintState::Complete)?;
 

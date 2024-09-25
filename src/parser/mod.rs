@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use self::{
-    parser::Parser, parser_types::TopLevel, tokenizer::FileTokenizer
+    parser::Parser, tokenizer::FileTokenizer
 };
 
 pub mod parser;

@@ -1,9 +1,10 @@
 use std::{collections::HashMap, ops::Deref, path::PathBuf, sync::Arc};
 
-use tokio::sync::RwLock;
+use futures::future;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    lsp::lsp::add_file,
+    lsp::add_file,
     parser::{
         parser_types as parser, tokenize_file,
         tokenizer_types::{self as tokens, Range},
@@ -49,8 +50,8 @@ impl GroupedName {
     }
 
     pub fn combine(&self) -> String {
-        match self.group {
-            Some(g) => g + "`" + &self.name,
+        match &self.group {
+            Some(g) => g.clone() + "`" + &self.name,
             None => self.name.clone(),
         }
     }
@@ -220,28 +221,28 @@ impl Variable {
     }
 
     pub fn unwrap_local(&self) -> &parser::Variable {
-        match self.variable_type {
+        match &self.variable_type {
             VariableType::Local(var) => &var,
             _ => panic!("unwrap_local failed"),
         }
     }
 
     pub fn unwrap_scoped(&self) -> &parser::ScopedVariable {
-        match self.variable_type {
+        match &self.variable_type {
             VariableType::Scoped(var) => &var,
             _ => panic!("unwrap_scoped failed"),
         }
     }
 
     pub fn unwrap_argument(&self) -> &parser::Argument {
-        match self.variable_type {
+        match &self.variable_type {
             VariableType::Argument(var) => &var,
             _ => panic!("unwrap_argument failed"),
         }
     }
 
     pub fn unwrap_instance(&self) -> &parser::InstanceVariable {
-        match self.variable_type {
+        match &self.variable_type {
             VariableType::Instance(var) => &var,
             _ => panic!("unwrap_instance failed"),
         }
@@ -253,7 +254,7 @@ pub struct Event {
     pub parsed: parser::Event,
 
     pub returns: DataType,
-    pub arguments: Vec<Arc<Variable>>,
+    pub arguments: Vec<Arc<Mutex<Variable>>>,
     pub declaration: Option<Range>,
     pub definition: Option<Range>,
     pub uses: Vec<Range>,
@@ -271,10 +272,13 @@ impl Event {
             parser::EventType::User(ret, args) => {
                 arguments = args
                     .iter()
-                    .map(|arg| Variable {
-                        variable_type: VariableType::Argument(arg.clone()),
-                        data_type: (&arg.variable.data_type).into(),
-                        // uses: Vec::new(),
+                    .map(|arg| {
+                        Mutex::new(Variable {
+                            variable_type: VariableType::Argument(arg.clone()),
+                            data_type: (&arg.variable.data_type).into(),
+                            // uses: Vec::new(),
+                        })
+                        .into()
                     })
                     .collect();
                 returns = ret.as_ref().into()
@@ -302,23 +306,29 @@ impl Event {
         }
     }
 
-    pub fn equals(&self, other: &Event) -> bool {
-        self.returns == other.returns && self.conflicts(other)
+    pub async fn equals(&self, other: &Event) -> bool {
+        self.returns == other.returns && self.conflicts(other).await
     }
 
-    pub fn conflicts(&self, other: &Event) -> bool {
-        self.arguments
-            .iter()
-            .zip(other.arguments.iter())
-            .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
+    pub async fn conflicts(&self, other: &Event) -> bool {
+        self.arguments.len() == other.arguments.len() && {
+            let self_args = future::join_all(self.arguments.iter().map(|arg| arg.lock())).await;
+            let other_args = future::join_all(other.arguments.iter().map(|arg| arg.lock())).await;
+
+            self_args
+                .iter()
+                .zip(other_args)
+                .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
+        }
     }
 
-    pub fn is_callable(&self, arguments: &Vec<DataType>) -> bool {
-        self.arguments
-            .iter()
-            .zip(arguments.iter())
-            .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
-            && self.arguments.len() == arguments.len()
+    pub async fn is_callable(&self, arguments: &Vec<DataType>) -> bool {
+        self.arguments.len() == arguments.len()
+            && future::join_all(self.arguments.iter().map(|arg| arg.lock()))
+                .await
+                .iter()
+                .zip(arguments.iter())
+                .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
     }
 }
 
@@ -327,7 +337,7 @@ pub struct Function {
     pub parsed: parser::Function,
 
     pub returns: DataType,
-    pub arguments: Vec<Arc<Variable>>,
+    pub arguments: Vec<Arc<Mutex<Variable>>>,
     pub help: Option<String>,
 
     pub declaration: Option<Range>,
@@ -351,11 +361,12 @@ impl Function {
                 .arguments
                 .iter()
                 .map(|arg| {
-                    Arc::new(Variable {
+                    Mutex::new(Variable {
                         variable_type: VariableType::Argument(arg.clone()),
                         data_type: (&arg.variable.data_type).into(),
                         // uses: Vec::new(),
                     })
+                    .into()
                 })
                 .collect(),
             returns: parsed.returns.as_ref().into(),
@@ -363,31 +374,45 @@ impl Function {
         }
     }
 
-    pub fn equals(&self, other: &Function) -> bool {
-        self.returns == other.returns && self.conflicts(other)
+    pub async fn equals(&self, other: &Function) -> bool {
+        self.returns == other.returns && self.conflicts(other).await
     }
 
-    pub fn conflicts(&self, other: &Function) -> bool {
-        self.arguments
-            .iter()
-            .zip(other.arguments.iter())
-            .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
+    pub async fn conflicts(&self, other: &Function) -> bool {
+        self.arguments.len() == other.arguments.len() && {
+            let self_args = future::join_all(self.arguments.iter().map(|arg| arg.lock())).await;
+            let other_args = future::join_all(other.arguments.iter().map(|arg| arg.lock())).await;
+
+            self_args
+                .iter()
+                .zip(other_args)
+                .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
+        }
     }
 
-    pub fn is_callable(&self, arguments: &Vec<DataType>, min_access: &tokens::AccessType) -> bool {
+    pub async fn is_callable(
+        &self,
+        arguments: &Vec<DataType>,
+        min_access: &tokens::AccessType,
+    ) -> bool {
         min_access.strictness()
             >= self
                 .parsed
                 .access
                 .map(|access| access.strictness())
                 .unwrap_or(0)
-            && self
-                .arguments
-                .iter()
-                .zip(arguments)
-                .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
             && (self.arguments.len() == arguments.len()
                 || (self.arguments.len() < arguments.len() && self.parsed.has_vararg))
+            // && self
+            //     .arguments
+            //     .iter()
+            //     .zip(arguments)
+            //     .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
+            && future::join_all(self.arguments.iter().map(|arg| arg.lock()))
+                .await
+                .iter()
+                .zip(arguments.iter())
+                .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
     }
 }
 
@@ -408,12 +433,12 @@ pub struct Class {
     pub is_global: bool,
     pub usage: Usage,
 
-    pub ons: HashMap<IString, Arc<Function>>,
-    pub events: HashMap<IString, Arc<Event>>,
-    pub functions: HashMap<IString, Vec<Arc<Function>>>,
-    pub external_functions: HashMap<IString, Vec<Arc<Function>>>,
+    pub ons: HashMap<IString, Arc<Mutex<Function>>>,
+    pub events: HashMap<IString, Arc<Mutex<Event>>>,
+    pub functions: HashMap<IString, Vec<Arc<Mutex<Function>>>>,
+    pub external_functions: HashMap<IString, Vec<Arc<Mutex<Function>>>>,
 
-    pub instance_variables: HashMap<IString, Arc<Variable>>,
+    pub instance_variables: HashMap<IString, Arc<Mutex<Variable>>>,
 }
 
 impl Class {
@@ -452,31 +477,30 @@ impl Class {
         variable: &parser::VariableAccess,
         access: &tokens::AccessType,
         write: bool,
-    ) -> Option<Arc<Variable>> {
-        let mut class_holder;
+    ) -> Option<Arc<Mutex<Variable>>> {
+        let mut class_arc_holder;
+        let mut class_holder = None;
         let mut class = self;
         let mut strictness = access.strictness();
         loop {
-            if let Some(found) = class
-                .instance_variables
-                .get(&(&variable.name).into())
-                .and_then(|var| {
-                    let access = &var.unwrap_instance().access;
-                    (write
-                        .then_some(&access.write)
-                        .unwrap_or(&access.read)
-                        .map_or(0, |acc| acc.strictness())
-                        > strictness)
-                        .then_some(var)
-                })
-            {
-                return Some(found.clone());
+            if let Some(found) = class.instance_variables.get(&(&variable.name).into()) {
+                let access = &found.lock().await.unwrap_instance().access.clone();
+                if write
+                    .then_some(&access.write)
+                    .unwrap_or(&access.read)
+                    .map_or(0, |acc| acc.strictness())
+                    > strictness
+                {
+                    return Some(found.clone());
+                }
             }
 
             match state.find_class(&class.base).await {
                 Some(Complex::Class(cls)) => {
-                    class_holder = cls.clone();
-                    class = &class_holder;
+                    drop(class_holder);
+                    class_arc_holder = cls.clone();
+                    class_holder = Some(class_arc_holder.lock().await);
+                    class = class_holder.as_ref().unwrap();
                 }
                 Some(Complex::Enum(_)) | None => break,
             }
@@ -496,22 +520,28 @@ impl Class {
     //         .cloned()
     // }
 
-    pub fn find_conflicting_event(&self, event: &Event) -> Option<Arc<Event>> {
-        self.events
-            .get(&(&event.parsed.name).into())
-            .and_then(|ev| ev.conflicts(event).then_some(ev))
-            .cloned()
+    pub async fn find_conflicting_event(&self, event: &Event) -> Option<Arc<Mutex<Event>>> {
+        if let Some(ev) = self.events.get(&(&event.parsed.name).into()) {
+            ev.lock().await.conflicts(event).await.then_some(ev.clone())
+        } else {
+            None
+        }
     }
 
-    pub fn find_callable_event(
+    pub async fn find_callable_event(
         &self,
         name: &String,
         arguments: &Vec<DataType>,
-    ) -> Option<Arc<Event>> {
-        self.events
-            .get(&name.into())
-            .and_then(|ev| ev.is_callable(arguments).then_some(ev))
-            .cloned()
+    ) -> Option<Arc<Mutex<Event>>> {
+        if let Some(ev) = self.events.get(&name.into()) {
+            ev.lock()
+                .await
+                .is_callable(arguments)
+                .await
+                .then_some(ev.clone())
+        } else {
+            None
+        }
     }
 
     // fn find_exact_function(&self, function: &Function) -> Option<&Function> {
@@ -527,32 +557,36 @@ impl Class {
     //     None
     // }
 
-    pub fn find_conflicting_function(&self, function: &Function) -> Option<Arc<Function>> {
+    pub async fn find_conflicting_function(
+        &self,
+        function: &Function,
+    ) -> Option<Arc<Mutex<Function>>> {
         for functions in [&self.functions, &self.external_functions] {
-            if let Some(func) = functions
-                .get(&(&function.parsed.name).into())
-                .and_then(|funcs| funcs.iter().find(|func| func.conflicts(function)))
-            {
-                return Some(func.clone());
+            if let Some(funcs) = functions.get(&(&function.parsed.name).into()) {
+                for func in funcs {
+                    if func.lock().await.conflicts(function).await {
+                        return Some(func.clone());
+                    }
+                }
             }
         }
 
         None
     }
 
-    pub fn find_callable_function(
+    pub async fn find_callable_function(
         &self,
         name: &String,
         arguments: &Vec<DataType>,
         min_access: &tokens::AccessType,
-    ) -> Option<Arc<Function>> {
+    ) -> Option<Arc<Mutex<Function>>> {
         for functions in [&self.functions, &self.external_functions] {
-            if let Some(func) = functions.get(&name.into()).and_then(|funcs| {
-                funcs
-                    .iter()
-                    .find(|func| func.is_callable(arguments, min_access))
-            }) {
-                return Some(func.clone());
+            if let Some(funcs) = functions.get(&name.into()) {
+                for func in funcs {
+                    if func.lock().await.is_callable(arguments, min_access).await {
+                        return Some(func.clone());
+                    }
+                }
             }
         }
 
@@ -562,26 +596,26 @@ impl Class {
 
 #[derive(Debug, Clone)]
 pub enum Complex {
-    Class(Arc<Class>),
-    Enum(Arc<Enum>),
+    Class(Arc<Mutex<Class>>),
+    Enum(Arc<Mutex<Enum>>),
 }
 
 impl Complex {
-    pub fn name(&self) -> &String {
+    pub async fn name(&self) -> String {
         match self {
-            Complex::Class(class) => &class.name,
-            Complex::Enum(r#enum) => &r#enum.name,
+            Complex::Class(class) => class.lock().await.name.clone(),
+            Complex::Enum(r#enum) => r#enum.lock().await.name.clone(),
         }
     }
 
-    pub fn help(&self) -> &Option<String> {
+    pub async fn help(&self) -> Option<String> {
         match self {
-            Complex::Class(class) => &class.help,
-            Complex::Enum(r#enum) => &r#enum.help,
+            Complex::Class(class) => class.lock().await.help.clone(),
+            Complex::Enum(r#enum) => r#enum.lock().await.help.clone(),
         }
     }
 
-    pub fn unwrap_class(&self) -> &Arc<Class> {
+    pub fn unwrap_class(&self) -> &Arc<Mutex<Class>> {
         match self {
             Complex::Class(class) => class,
             Complex::Enum(_) => panic!("unwrap_class failed"),
@@ -590,7 +624,7 @@ impl Complex {
 }
 
 #[derive(Default, Clone, Debug)]
-struct Usage {
+pub struct Usage {
     pub declaration: Option<Range>,
     pub definition: Option<Range>,
     // uses: Vec<Range>,
@@ -599,9 +633,9 @@ struct Usage {
 pub struct LintState<'a> {
     pub proj: Arc<RwLock<Project>>,
     pub file: Option<&'a mut File>,
-    pub class: Option<Arc<Class>>,
+    pub class: Option<Arc<Mutex<Class>>>,
 
-    pub variables: Vec<Arc<Variable>>,
+    pub variables: Vec<Arc<Mutex<Variable>>>,
     pub return_type: DataType,
 }
 
@@ -616,34 +650,34 @@ impl<'a> LintState<'a> {
         }
     }
 
-    pub fn push_diagnostic(&self, diagnostic: parser::Diagnostic) {
+    pub fn push_diagnostic(&mut self, diagnostic: parser::Diagnostic) {
         if let Some(file) = &mut self.file {
             (*file).diagnostics.push(diagnostic);
         }
     }
 
-    pub fn diagnostic_error(&self, message: String, range: Range) {
+    pub fn diagnostic_error(&mut self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Error,
             message,
             range,
         });
     }
-    pub fn diagnostic_warning(&self, message: String, range: Range) {
+    pub fn diagnostic_warning(&mut self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Warning,
             message,
             range,
         });
     }
-    pub fn diagnostic_info(&self, message: String, range: Range) {
+    pub fn diagnostic_info(&mut self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Info,
             message,
             range,
         });
     }
-    pub fn diagnostic_hint(&self, message: String, range: Range) {
+    pub fn diagnostic_hint(&mut self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Hint,
             message,
@@ -651,7 +685,7 @@ impl<'a> LintState<'a> {
         });
     }
 
-    pub fn unwrap_file(&self) -> &mut File {
+    pub fn unwrap_file(&mut self) -> &mut File {
         match &mut self.file {
             Some(file) => *file,
             None => panic!("unwrap_file failed"),
@@ -675,25 +709,25 @@ impl<'a> LintState<'a> {
         &self,
         variable: &parser::VariableAccess,
         write: bool,
-    ) -> Option<Arc<Variable>> {
-        if let Some(found) = self
-            .variables
-            .iter()
-            .find(|var| var.parsed().name == variable.name)
-        {
-            return Some(found.clone());
+    ) -> Option<Arc<Mutex<Variable>>> {
+        for var in &self.variables {
+            if var.lock().await.parsed().name == variable.name {
+                return Some(var.clone());
+            }
+        }
+
+        if let Some(current_class) = &self.class {
+            if let Some(found) = current_class
+                .lock()
+                .await
+                .find_variable(&self, variable, &tokens::AccessType::PRIVATE, write)
+                .await
+            {
+                return Some(found);
+            }
         }
 
         if let Some(current_file) = &self.file {
-            if let Some(current_class) = self.get_current_class().await {
-                if let Some(found) = current_class
-                    .find_variable(&self, variable, &tokens::AccessType::PRIVATE, write)
-                    .await
-                {
-                    return Some(found);
-                }
-            }
-
             if let Some(found) = current_file.variables.get(&(&variable.name).into()) {
                 return Some(found.clone());
             }
@@ -708,15 +742,10 @@ impl<'a> LintState<'a> {
 
             let file = _file_lock.read().await;
 
-            if let Some(found) = file
-                .variables
-                .get(&(&variable.name).into())
+            if let Some(found) = file.variables.get(&(&variable.name).into()) {
                 // TODO: do error handling if not is_global
-                .and_then(|var| {
-                    (var.unwrap_scoped().scope == tokens::ScopeModif::GLOBAL).then_some(var)
-                })
-            {
-                return Some(found.clone());
+                return (found.lock().await.unwrap_scoped().scope == tokens::ScopeModif::GLOBAL)
+                    .then_some(found.clone());
             }
         }
 
@@ -727,28 +756,32 @@ impl<'a> LintState<'a> {
         &self,
         name: &String,
         arguments: &Vec<DataType>,
-    ) -> Option<Arc<Function>> {
-        if let Some(current_file) = &self.file {
-            if let Some(mut current_class) = self.class.clone() {
-                let mut first_iter = true;
-                loop {
-                    match self.find_class(&current_class).await {
-                        Some(Complex::Class(cls)) => {
-                            if let Some(found) = cls.find_callable_function(
-                                name,
-                                arguments,
-                                first_iter
-                                    .then_some(&tokens::AccessType::PRIVATE)
-                                    .unwrap_or(&tokens::AccessType::PROTECTED),
-                            ) {
-                                return Some(found);
-                            }
-                            current_class = cls.base.clone();
-                            first_iter = false;
-                        }
-                        Some(Complex::Enum(_)) | None => break,
-                    }
+    ) -> Option<Arc<Mutex<Function>>> {
+        if let Some(mut class_arc) = self.class.clone() {
+            let mut first_iter = true;
+            loop {
+                let class = class_arc.lock().await;
+                if let Some(found) = class
+                    .find_callable_function(
+                        name,
+                        arguments,
+                        first_iter
+                            .then_some(&tokens::AccessType::PRIVATE)
+                            .unwrap_or(&tokens::AccessType::PROTECTED),
+                    )
+                    .await
+                {
+                    return Some(found);
                 }
+
+                match self.find_class(&class.base).await {
+                    Some(Complex::Class(base)) => {
+                        drop(class);
+                        class_arc = base;
+                    }
+                    Some(Complex::Enum(_)) | None => break,
+                }
+                first_iter = false;
             }
         }
 
@@ -762,9 +795,11 @@ impl<'a> LintState<'a> {
             let file = _file_lock.read().await;
 
             for (name, class) in &file.classes {
+                let class = class.lock().await;
                 if class.base.combine().to_lowercase() == "function_object" {
-                    if let Some(func) =
-                        class.find_callable_function(name, arguments, &tokens::AccessType::PUBLIC)
+                    if let Some(func) = class
+                        .find_callable_function(name, arguments, &tokens::AccessType::PUBLIC)
+                        .await
                     {
                         return Some(func.clone());
                     }
@@ -779,44 +814,15 @@ impl<'a> LintState<'a> {
         let GroupedName { group, name } = grouped_name;
 
         if let Some(current_file) = &self.file {
-            if let Some(found) = current_file.classes.get(&name.into()).and_then(|class| {
-                (group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref())
-                    .then(|| Complex::Class(class.clone()))
-            }) {
-                return Some(found);
+            if let Some(class_arc) = current_file.classes.get(&name.into()) {
+                let class = class_arc.lock().await;
+                if group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref() {
+                    return Some(Complex::Class(class_arc.clone()));
+                }
             }
         }
 
         let proj = self.proj.read().await;
-        for (path, _file_lock) in &proj.files {
-            match &self.file {
-                Some(file) if file.path == *path => continue,
-                _ => {}
-            }
-
-            let file = _file_lock.read().await;
-
-            if let Some(found) = file
-                .classes
-                .get(&name.into())
-                // TODO: do error handling if not is_global
-                .and_then(|class| {
-                    (class.is_global
-                        && (group.is_none()
-                            || class.within.as_ref().map(|w| &w.name) == group.as_ref()))
-                    .then(|| Complex::Class(class.clone()))
-                })
-            {
-                if file.lint_progress < LintProgress::Shallow {
-                    drop(file);
-                    // TODO call lint_file directly?
-                    add_file(self.proj.clone(), path.clone(), LintProgress::Shallow).await;
-                    todo!("Lint the File!");
-                }
-                return Some(found);
-            }
-        }
-
         if group.is_none() {
             if let Some(found) = proj
                 .builtin_classes
@@ -835,6 +841,33 @@ impl<'a> LintState<'a> {
                 return Some(found);
             }
         }
+
+        for (path, _file_lock) in &proj.files {
+            match &self.file {
+                Some(file) if file.path == *path => continue,
+                _ => {}
+            }
+
+            let file = _file_lock.read().await;
+
+            if let Some(class_arc) = file.classes.get(&name.into()).cloned() {
+                let class = class_arc.lock().await;
+                // TODO: do error handling if not is_global
+                if class.is_global
+                    && (group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref())
+                {
+                    if file.lint_progress < LintProgress::Shallow {
+                        drop(class);
+                        drop(file);
+                        // TODO call lint_file directly?
+                        add_file(self.proj.clone(), path.clone(), LintProgress::Shallow).await;
+                    }
+                    return Some(Complex::Class(class_arc.clone()));
+                }
+            }
+        }
+
+        // TODO scan more files?
 
         None
     }
@@ -856,14 +889,14 @@ impl<'a> LintState<'a> {
                         if Arc::ptr_eq(&base, &child) {
                             return Some(true);
                         }
-                        child_name = child.base.clone();
+                        child_name = child.lock().await.base.clone();
                     }
                     Complex::Enum(_) => return Some(false),
                 }
             },
             Complex::Enum(base) => loop {
                 match self.find_class(&child_name).await? {
-                    Complex::Class(child) => child_name = child.base.clone(),
+                    Complex::Class(child) => child_name = child.lock().await.base.clone(),
                     Complex::Enum(child) => return Some(Arc::ptr_eq(&base, &child)),
                 }
             },
@@ -874,9 +907,9 @@ impl<'a> LintState<'a> {
 #[derive(PartialEq, PartialOrd, Clone, Debug)]
 pub enum LintProgress {
     None,
-    OnlyTypes,
-    Shallow,
-    Complete,
+    OnlyTypes, // Only parse the first types block
+    Shallow,   // Only parses the type and prototype blocks
+    Complete,  // Parse all the Statements
 }
 
 impl LintProgress {
@@ -891,9 +924,9 @@ impl LintProgress {
 }
 
 pub struct File {
-    pub classes: HashMap<IString, Arc<Class>>,
+    pub classes: HashMap<IString, Arc<Mutex<Class>>>,
     // Shared with all instances
-    pub variables: HashMap<IString, Arc<Variable>>,
+    pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
 
     pub diagnostics: Vec<parser::Diagnostic>,
 
@@ -920,16 +953,16 @@ pub struct Project {
     // Keep the writing of RwLock to the minimal
     pub files: HashMap<PathBuf, RwLock<File>>,
     // placeholder_file: File,
-    pub builtin_enums: HashMap<IString, Arc<Enum>>,
-    pub builtin_functions: HashMap<IString, Vec<Arc<Function>>>,
-    pub builtin_classes: HashMap<IString, Arc<Class>>,
+    pub builtin_enums: HashMap<IString, Arc<Mutex<Enum>>>,
+    pub builtin_functions: HashMap<IString, Vec<Arc<Mutex<Function>>>>,
+    pub builtin_classes: HashMap<IString, Arc<Mutex<Class>>>,
 }
 
 // Use Arc<RwLock<Project>> and only write when necessary and only very short!!!
 
 impl Project {
-    pub fn new() -> anyhow::Result<Project> {
-        Ok(Project {
+    pub fn new() -> Project {
+        Project {
             files: HashMap::new(),
             // placeholder_file: Rc::new(RefCell::new(File {
             //     classes: vec![],
@@ -944,6 +977,6 @@ impl Project {
             builtin_enums: HashMap::new(),
             builtin_functions: HashMap::new(),
             builtin_classes: HashMap::new(),
-        })
+        }
     }
 }
