@@ -1,5 +1,5 @@
 [package]
-name = "powerbuilder-lsp"
+name = "powerbuilder-ls"
 version = "0.1.0"
 edition = "2021"
 
@@ -16,6 +16,7 @@ encoding_rs = "0.8.34"
 encoding_rs_io = "0.1.7"
 futures = "0.3.30"
 multipeek = "0.1.2"
+notify = "6.1.1"
 pbjson = "0.7.0"
 prost = "0.13.2"
 serde = "1.0.210"

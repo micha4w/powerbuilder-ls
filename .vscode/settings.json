@@ -7,6 +7,19 @@
         "./Cargo.toml"
     ],
     "rust-analyzer.showUnlinkedFileNotification": false,
+    "rust-analyzer.debug.engine": "ms-vscode.cpptools",
+    "rust-analyzer.debug.engineSettings": {
+        "cppdbg": {
+            "miDebuggerPath": "rust-gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": false
+                }
+            ],
+        }
+    },
     "cSpell.words": [
         "COLONCOLON",
         "DIVEQ",

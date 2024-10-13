@@ -3,14 +3,12 @@ use anyhow::anyhow;
 use super::tokenizer_types::{self as tokens, Range};
 
 pub enum ParseError {
-    EOF,
     UnexpectedToken,
 }
 
 impl From<ParseError> for anyhow::Error {
     fn from(value: ParseError) -> Self {
         let err = match value {
-            ParseError::EOF => "Parser: EOF Reached",
             ParseError::UnexpectedToken => "Parser: Unexpected Token",
         };
         anyhow!(err)
@@ -18,27 +16,56 @@ impl From<ParseError> for anyhow::Error {
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
+pub type EOFResult<T> = Option<T>;
+pub type EOFPossibleResult<T> = EOFResult<(Option<T>, Option<ParseError>)>;
 
-pub trait KeepEOF<T> {
-    fn split_eof(self) -> ParseResult<ParseResult<T>>;
+pub trait EOFPossibleResultT<T> {
+    fn failed(&self) -> bool;
+    fn returned(&self) -> bool;
+    fn success(value: T) -> Self;
+    fn fail(value: ParseError) -> Self;
 }
 
-impl<T> KeepEOF<T> for ParseResult<T> {
-    fn split_eof(self) -> ParseResult<ParseResult<T>> {
-        match self {
-            Err(eof @ ParseError::EOF) => Err(eof),
-            rest => Ok(rest),
-        }
+impl<T> EOFPossibleResultT<T> for (Option<T>, Option<ParseError>) {
+    fn failed(&self) -> bool {
+        self.1.is_some()
+    }
+    fn returned(&self) -> bool {
+        self.0.is_some()
+    }
+    fn success(value: T) -> Self {
+        (Some(value), None)
+    }
+    fn fail(value: ParseError) -> Self {
+        (None, Some(value))
     }
 }
 
-// TODO merge with lsp_types:: DataType
+// pub trait KeepEOF<T> {
+//     fn split_eof(self) -> ParseResult<ParseResult<T>>;
+// }
+
+// impl<T> KeepEOF<T> for ParseResult<T> {
+//     fn split_eof(self) -> ParseResult<()> {
+//         match self {
+//             Some(eof @ ParseError::EOF) => Err(eof),
+//             rest => Ok(()),
+//         }
+//     }
+// }
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum DataType {
+pub enum DataTypeType {
     Decimal(Option<String>),
     Array(Box<DataType>),
     Complex(String, String),
     ID(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataType {
+    pub data_type_type: DataTypeType,
+    pub range: Range,
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +300,7 @@ pub struct IfStatement {
 #[derive(Debug)]
 pub struct TryCatchStatement {
     pub statements: Vec<Statement>,
-    pub catches: Vec<(Statement, Vec<Statement>)>,
+    pub catches: Vec<(Variable, Vec<Statement>)>,
     pub finally: Option<Vec<Statement>>,
 }
 

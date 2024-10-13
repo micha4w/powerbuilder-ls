@@ -3,10 +3,11 @@ use std::{fs::File, io::Read, path::Path, str::FromStr};
 use anyhow::Result;
 use encoding_rs_io::DecodeReaderBytesBuilder;
 use multipeek::{multipeek, MultiPeek};
+use strum::Display;
 
 use super::tokenizer_types::*;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Display, PartialEq)]
 pub enum TokenType {
     ScopeModif(ScopeModif),
     AccessType(AccessType),
@@ -46,7 +47,7 @@ impl FileTokenizer {
         Self {
             chars: multipeek(buf.chars().collect::<Vec<_>>().into_iter()),
             buildup: String::new(),
-            pos: Position { line: 1, column: 0 },
+            pos: Position { line: 0, column: 0 },
             next: None,
             previous: Token {
                 token_type: TokenType::INVALID,
@@ -478,7 +479,7 @@ impl Iterator for FileTokenizer {
                     // println!("double open/close");
 
                     if let TokenType::Symbol(Symbol::LPAREN) = cur {
-                        println!("condition lbrace");
+                        // println!("condition lbrace");
                         self.previous.token_type = TokenType::ID;
                     }
                     break Some(self.previous.clone());

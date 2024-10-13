@@ -1,10 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
-use lsp_types::{File, LintProgress, LintState, Project};
+use ls_types::{File, LintProgress, LintState, Project};
 use tokio::sync::RwLock;
 
-pub mod lsp;
-pub mod lsp_types;
+pub mod ls;
+pub mod ls_types;
 
 pub mod powerbuilder_proto {
     include!(concat!(env!("OUT_DIR"), "/protobuf/powerbuilder.rs"));
@@ -13,10 +13,10 @@ pub mod powerbuilder_proto {
 
 pub async fn add_file(
     proj: Arc<RwLock<Project>>,
-    path: PathBuf,
+    path: &PathBuf,
     lint_progress: LintProgress,
 ) -> anyhow::Result<()> {
-    if !proj.read().await.files.contains_key(&path) {
+    if !proj.read().await.files.contains_key(path) {
         proj.write()
             .await
             .files
@@ -24,7 +24,7 @@ pub async fn add_file(
     }
 
     let proj_r = proj.read().await;
-    let _file_lock = proj_r.files.get(&path).unwrap();
+    let _file_lock = proj_r.files.get(path).unwrap();
     let mut current_progress = _file_lock.read().await.lint_progress.clone();
 
     while current_progress < lint_progress {
@@ -38,9 +38,9 @@ pub async fn add_file(
         }
     }
 
-    for diagnostic in &_file_lock.read().await.diagnostics {
-        println!("{} - {}", diagnostic.range, diagnostic.message)
-    }
+    // for diagnostic in &_file_lock.read().await.diagnostics {
+    //     println!("{} - {}", diagnostic.range, diagnostic.message)
+    // }
 
     Ok(())
 }

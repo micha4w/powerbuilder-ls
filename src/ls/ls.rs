@@ -1,7 +1,8 @@
 use std::{mem::swap, path::PathBuf, sync::Arc};
 
-use super::lsp_types::*;
+use super::ls_types::*;
 use super::powerbuilder_proto::{self, variable};
+use anyhow::anyhow;
 use futures::{future::BoxFuture, FutureExt};
 use prost::{bytes::Bytes, Message};
 use tokio::sync::Mutex;
@@ -102,19 +103,7 @@ impl<'a> LintState<'a> {
                             }
                         }
                     } else {
-                        let func = self
-                            .class
-                            .as_ref()
-                            .unwrap()
-                            .lock()
-                            .await
-                            .find_callable_function(
-                                &call.name,
-                                &types,
-                                &tokens::AccessType::PRIVATE,
-                            )
-                            .await;
-                        match func {
+                        match self.find_function(&call.name, &types).await {
                             Some(func) => {
                                 // func.uses.push(call.range.clone());
                                 func.lock().await.returns.clone()
@@ -435,7 +424,7 @@ impl<'a> LintState<'a> {
                 parser::ExpressionType::Create(name) => {
                     let grouped_name = GroupedName::new(None, name.clone());
                     match self.find_class(&grouped_name).await {
-                        Some(Complex::Class(class)) => DataType::Complex(grouped_name),
+                        Some(Complex::Class(_)) => DataType::Complex(grouped_name),
                         Some(Complex::Enum(_)) => {
                             self.diagnostic_error("Cannot create Enum".into(), expression.range);
                             DataType::Unknown
@@ -450,10 +439,7 @@ impl<'a> LintState<'a> {
                     let class_type = self.lint_expression(class).await;
 
                     if !class_type.is_convertible(&DataType::String) {
-                        self.diagnostic_error(
-                            "Invalid type, expected string".into(),
-                            expression.range,
-                        );
+                        self.diagnostic_error("Invalid type, expected String".into(), class.range);
                     }
 
                     DataType::Unknown
@@ -602,7 +588,8 @@ impl<'a> LintState<'a> {
                 }) => {
                     self.lint_statements(statements).await;
                     for (var, statements) in catches {
-                        self.lint_statement(var).await;
+                        // TODO
+                        // self.lint_statement(var).await;
                         self.lint_statements(statements).await;
                     }
                     if let Some(statements) = finally {
@@ -670,7 +657,7 @@ impl<'a> LintState<'a> {
                                     literals.push((from, &case.range));
                                     literals.push((to, &case.range));
                                 }
-                                parser::CaseSpecifierType::Is(operator, literal) => {
+                                parser::CaseSpecifierType::Is(_, literal) => {
                                     literals.push((literal, &case.range));
                                 }
                                 parser::CaseSpecifierType::Else => {
@@ -752,8 +739,15 @@ impl<'a> LintState<'a> {
                                 )
                                 .await
                             {
-                                Some(_) => todo!(),
-                                None => todo!(),
+                                Some(_) => {}
+                                None => {
+                                    if !function.dynamic {
+                                        self.diagnostic_error(
+                                            "Method not found".into(),
+                                            function.range,
+                                        );
+                                    }
+                                }
                             }
                         }
                         Some(Complex::Enum(_)) => {
@@ -1003,7 +997,7 @@ impl<'a> LintState<'a> {
                             {
                                 let mut class = class_arc.lock().await;
                                 for function in functions {
-                                    add_function(self, function, &mut class, false);
+                                    add_function(self, function, &mut class, false).await;
                                 }
                             }
                         }
@@ -1015,7 +1009,7 @@ impl<'a> LintState<'a> {
                             {
                                 let mut class = class_arc.lock().await;
                                 for function in functions {
-                                    add_function(self, function, &mut class, true);
+                                    add_function(self, function, &mut class, true).await;
                                 }
                             }
                         }
@@ -1084,7 +1078,7 @@ impl<'a> LintState<'a> {
                     }
                     parser::TopLevelType::OnBody(on, statements) => {
                         if matches!(lint_progress, LintProgress::Complete) {
-                            if let Some(class) = self
+                            if let Some(_) = self
                                 .find_class(&GroupedName::new(None, on.class.clone()).clone())
                                 .await
                             {
@@ -1092,6 +1086,7 @@ impl<'a> LintState<'a> {
                                 self.return_type = DataType::Void;
 
                                 self.lint_statements(statements).await;
+                                // TODO do something with the on?
                             } else {
                                 self.diagnostic_error(
                                     "On Body for non Existing Class".into(),
@@ -1171,7 +1166,13 @@ impl Project {
 
         if let Some(ret) = &func.ret {
             if ret != "\u{1}void" {
-                returns = Some(tokenize(&ret)?.parse_type()?);
+                returns = Some(
+                    tokenize(&(ret.to_owned() + "\n"))?
+                        .parse_type()
+                        .ok_or(anyhow!("Unexpected EOF"))?
+                        .0
+                        .ok_or(anyhow!("Invalid Type"))?,
+                );
             }
         }
 
@@ -1185,7 +1186,11 @@ impl Project {
                     is_ref: flags & variable::Flag::IsRef as u32 > 0,
                     variable: parser::Variable {
                         constant: flags & variable::Flag::NoWrite as u32 > 0,
-                        data_type: tokenize(&arg.r#type.as_ref().unwrap())?.parse_type()?,
+                        data_type: tokenize(&(arg.r#type.as_ref().unwrap().to_owned() + "\n"))?
+                            .parse_type()
+                            .ok_or(anyhow!("Unexpected EOF"))?
+                            .0
+                            .ok_or(anyhow!("Invalid Type"))?,
                         name: arg.name.clone().unwrap(),
                         initial_value: None,
                         range: Default::default(),
@@ -1242,7 +1247,7 @@ impl Project {
                         .cloned()
                         .map(Complex::Enum)
                 }) {
-                Some(base) => {
+                Some(_) => {
                     let iname = (&class.name).into();
                     let mut new_class =
                         Class::new(class.name, GroupedName::new(None, class.base), None, true);
@@ -1251,7 +1256,11 @@ impl Project {
                         let iname = var.name.as_ref().unwrap().into();
                         let parsed = parser::Variable {
                             constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
-                            data_type: tokenize(&var.r#type.unwrap())?.parse_type()?,
+                            data_type: tokenize(&(var.r#type.unwrap() + "\n"))?
+                                .parse_type()
+                                .ok_or(anyhow!("Unexpected EOF"))?
+                                .0
+                                .ok_or(anyhow!("Invalid Type"))?,
                             name: var.name.unwrap(),
                             initial_value: None,
                             range: Default::default(),

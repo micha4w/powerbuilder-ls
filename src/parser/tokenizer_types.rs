@@ -4,8 +4,8 @@ use strum_macros::EnumString;
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Position {
-    pub line: usize,
-    pub column: usize,
+    pub line: u32,
+    pub column: u32,
 }
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

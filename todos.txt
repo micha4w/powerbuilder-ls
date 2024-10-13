@@ -1,3 +1,4 @@
++ Rename to powerbuilder-ls
 Lint checks:
  - if elements inside arrays are the same
  - operators: check if types are valid

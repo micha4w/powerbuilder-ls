@@ -1,10 +1,15 @@
-use std::{collections::HashMap, ops::Deref, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use futures::future;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    lsp::add_file,
+    ls::add_file,
     parser::{
         parser_types as parser, tokenize_file,
         tokenizer_types::{self as tokens, Range},
@@ -102,15 +107,24 @@ impl From<Option<&parser::DataType>> for DataType {
 
 impl From<&parser::DataType> for DataType {
     fn from(src: &parser::DataType) -> DataType {
+        (&src.data_type_type).into()
+    }
+}
+
+impl From<&parser::DataTypeType> for DataType {
+    fn from(src: &parser::DataTypeType) -> DataType {
         match src {
-            parser::DataType::Decimal(precission) => {
+            parser::DataTypeType::Decimal(precission) => {
                 DataType::Decimal(precission.as_ref().map(|str| str.parse().unwrap()))
             }
-            parser::DataType::Array(sub_type) => DataType::Array(Box::new((&**sub_type).into())),
-            parser::DataType::Complex(group, name) => {
+            parser::DataTypeType::Array(sub_type) => {
+                DataType::Array(Box::new((&**sub_type).into()))
+            }
+            parser::DataTypeType::Complex(group, name) => {
                 DataType::Complex(GroupedName::new(Some(group.clone()), name.clone()))
             }
-            parser::DataType::ID(id) => match id.to_lowercase().as_str() {
+            parser::DataTypeType::ID(id) => match id.to_lowercase().as_str() {
+                "any" => DataType::Any,
                 "blob" => DataType::Blob,
                 "boolean" => DataType::Boolean,
                 "byte" => DataType::Byte,
@@ -807,6 +821,19 @@ impl<'a> LintState<'a> {
             }
         }
 
+        if let Some(funcs) = proj.builtin_functions.get(&name.into()) {
+            for func in funcs {
+                if func
+                    .lock()
+                    .await
+                    .is_callable(arguments, &tokens::AccessType::PUBLIC)
+                    .await
+                {
+                    return Some(func.clone());
+                }
+            }
+        }
+
         None
     }
 
@@ -860,7 +887,7 @@ impl<'a> LintState<'a> {
                         drop(class);
                         drop(file);
                         // TODO call lint_file directly?
-                        add_file(self.proj.clone(), path.clone(), LintProgress::Shallow).await;
+                        let err = add_file(self.proj.clone(), path, LintProgress::Shallow).await;
                     }
                     return Some(Complex::Class(class_arc.clone()));
                 }
@@ -923,6 +950,7 @@ impl LintProgress {
     }
 }
 
+#[derive(Debug)]
 pub struct File {
     pub classes: HashMap<IString, Arc<Mutex<Class>>>,
     // Shared with all instances
@@ -937,18 +965,22 @@ pub struct File {
 
 impl File {
     pub fn new(path: PathBuf) -> anyhow::Result<File> {
+        let mut file = tokenize_file(&path)?;
+
         Ok(File {
             classes: HashMap::new(),
             variables: HashMap::new(),
-            diagnostics: Vec::new(),
 
-            top_levels: tokenize_file(&path)?.parse_tokens(),
+            top_levels: file.parse_tokens(),
+            diagnostics: file.get_syntax_errors(),
+
             path,
             lint_progress: LintProgress::None,
         })
     }
 }
 
+#[derive(Debug)]
 pub struct Project {
     // Keep the writing of RwLock to the minimal
     pub files: HashMap<PathBuf, RwLock<File>>,
@@ -961,8 +993,12 @@ pub struct Project {
 // Use Arc<RwLock<Project>> and only write when necessary and only very short!!!
 
 impl Project {
-    pub fn new() -> Project {
-        Project {
+    pub fn new(
+        enums_file: PathBuf,
+        classes_file: PathBuf,
+        functions_file: PathBuf,
+    ) -> anyhow::Result<Project> {
+        let mut proj = Project {
             files: HashMap::new(),
             // placeholder_file: Rc::new(RefCell::new(File {
             //     classes: vec![],
@@ -977,6 +1013,14 @@ impl Project {
             builtin_enums: HashMap::new(),
             builtin_functions: HashMap::new(),
             builtin_classes: HashMap::new(),
-        }
+        };
+
+        proj.load_enums(enums_file)?;
+        proj.load_builtin_classes(classes_file)?;
+        proj.load_builtin_functions(functions_file)?;
+
+        let x = Some(19);
+            
+        Ok(proj)
     }
 }

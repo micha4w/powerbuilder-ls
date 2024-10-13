@@ -1,0 +1,29 @@
+// See https://go.microsoft.com/fwlink/?LinkId=733558
+// for the documentation about the tasks.json format
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run VSCode",
+			"type": "shell",
+			"command": "env",
+			"args": [
+				"SERVER_PATH=/home/micha4w/Code/Rust/powerbuilder-ls/target/debug/powerbuilder-ls",
+				"code",
+				"--extensionDevelopmentPath=${workspaceRoot}",
+				"/home/micha4w/Code/Rust/powerbuilder-ls/res"
+			]
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build"
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		}
+	]
+}

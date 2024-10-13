@@ -1,16 +1,77 @@
 {
+    "version": "0.2.0",
     "configurations": [
         {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceRoot}/target/debug/powerbuilder-ls",
+            "cwd": "${fileDirname}",
+            "MIMode": "gdb",
+            "miDebuggerPath": "rust-gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb) Attach",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceRoot}/target/debug/powerbuilder-ls",
+            "MIMode": "gdb",
+            "miDebuggerPath": "rust-gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Lauch",
             "type": "lldb",
             "request": "launch",
-            "name": "Debug Rust",
             "cargo": {
                 "args": [
                     "build",
-                    "--manifest-path",
-                    "${workspaceFolder}/Cargo.toml"
-                ]
-            }
+                    "--bin=powerbuilder-ls",
+                    "--package=powerbuilder-ls"
+                ],
+                "filter": {
+                    "name": "powerbuilder-ls",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "name": "Attach",
+            "type": "lldb",
+            "request": "attach",
+            "program": "${workspaceFolder}/target/debug/powerbuilder-ls",
+            "waitFor": true,
+            "sourceLanguages": [
+                "rust"
+            ]
         }
     ]
 }
