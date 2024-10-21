@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use self::{
-    parser::Parser, tokenizer::FileTokenizer
-};
+use self::{parser::Parser, tokenizer::FileTokenizer};
 
 pub mod parser;
 pub mod parser_types;
@@ -16,7 +14,6 @@ pub fn tokenize_file(file: &Path) -> anyhow::Result<Parser> {
 
     Ok(Parser::new(tokens))
 }
-
 
 pub fn tokenize(buf: &String) -> anyhow::Result<Parser> {
     let tokens = FileTokenizer::new(buf.clone());

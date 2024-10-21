@@ -1,15 +1,33 @@
 use std::fmt;
 
+use strum::Display;
 use strum_macros::EnumString;
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Debug)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
 }
+
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.line, self.column)
+    }
+}
+impl Into<tower_lsp::lsp_types::Position> for Position {
+    fn into(self) -> tower_lsp::lsp_types::Position {
+        tower_lsp::lsp_types::Position {
+            line: self.line,
+            character: self.column,
+        }
+    }
+}
+impl From<tower_lsp::lsp_types::Position> for Position {
+    fn from(value: tower_lsp::lsp_types::Position) -> Self {
+        Self {
+            line: value.line,
+            column: value.character,
+        }
     }
 }
 
@@ -19,12 +37,17 @@ pub struct Range {
     pub end: Position,
 }
 
+impl Range {
+    pub fn contains(&self, pos: &Position) -> bool {
+        &self.start <= pos && pos <= &self.end
+    }
+}
+
 impl fmt::Display for Range {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({} - {})", self.start, self.end)
     }
 }
-
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum Literal {
@@ -36,7 +59,7 @@ pub enum Literal {
     BOOLEAN,
 }
 
-#[derive(Clone, Copy, EnumString, Debug, PartialEq)]
+#[derive(Clone, Copy, EnumString, Debug, PartialEq, Display)]
 pub enum ScopeModif {
     GLOBAL,
     SHARED,
@@ -296,7 +319,6 @@ pub enum Symbol {
     TICK,
     COMMA,
     // SEMI,
-
     DOTDOTDOT,
     DOT,
 

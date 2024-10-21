@@ -1,11 +1,16 @@
 use std::{
+    backtrace::Backtrace,
     collections::HashMap,
+    mem,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use futures::future;
+use futures::{
+    future::{self, BoxFuture},
+    FutureExt,
+};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
@@ -160,6 +165,44 @@ impl From<&tokens::Literal> for DataType {
     }
 }
 
+impl ToString for DataType {
+    fn to_string(&self) -> String {
+        match self {
+            DataType::Byte => "byte".into(),
+            DataType::Char => "char".into(),
+            DataType::String => "string".into(),
+            DataType::Blob => "blob".into(),
+
+            DataType::Date => "date".into(),
+            DataType::Time => "time".into(),
+            DataType::Datetime => "datetime".into(),
+
+            DataType::Boolean => "boolean".into(),
+            DataType::Int => "int".into(),
+            DataType::Uint => "unsigned int".into(),
+            DataType::Long => "long".into(),
+            DataType::Ulong => "unsigned long".into(),
+            DataType::Longlong => "longlong".into(),
+            DataType::Longptr => "longptr".into(),
+            DataType::Real => "real".into(),
+            DataType::Double => "double".into(),
+            DataType::Decimal(precission) => {
+                if let Some(prec) = precission {
+                    format!("decimal {{{}}}", prec)
+                } else {
+                    "decimal".into()
+                }
+            }
+            DataType::Complex(grouped_name) => grouped_name.combine(),
+            DataType::Array(data_type) => data_type.to_string() + "[]",
+
+            DataType::Any => "any".into(),
+            DataType::Unknown => "<Error>".into(),
+            DataType::Void => "void".into(),
+        }
+    }
+}
+
 impl DataType {
     pub fn is_numeric(&self) -> bool {
         self.numeric_precedence().is_some()
@@ -190,20 +233,6 @@ impl DataType {
             | DataType::Complex(_)
             | DataType::Array(_)
             | DataType::Void => None,
-        }
-    }
-
-    pub fn is_convertible(&self, other: &DataType) -> bool {
-        match (self, other) {
-            (DataType::Unknown, _) | (_, DataType::Unknown) => true,
-            (DataType::Any, _) | (_, DataType::Any) => true,
-            (DataType::Array(self_type), DataType::Array(other_type)) => {
-                self_type.is_convertible(&other_type)
-            }
-            (DataType::Complex(_), DataType::Complex(_)) => {
-                todo!("Check if one class in ancestor of other");
-            }
-            _ => self == other || (self.is_numeric() && other.is_numeric()),
         }
     }
 }
@@ -270,7 +299,7 @@ pub struct Event {
     pub returns: DataType,
     pub arguments: Vec<Arc<Mutex<Variable>>>,
     pub declaration: Option<Range>,
-    pub definition: Option<Range>,
+    pub definition: Option<FunctionDefinition>,
     pub uses: Vec<Range>,
 }
 
@@ -278,7 +307,7 @@ impl Event {
     pub fn new(
         parsed: parser::Event,
         declaration: Option<Range>,
-        definition: Option<Range>,
+        definition: Option<FunctionDefinition>,
     ) -> Self {
         let returns;
         let arguments;
@@ -335,14 +364,34 @@ impl Event {
                 .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
         }
     }
+}
 
-    pub async fn is_callable(&self, arguments: &Vec<DataType>) -> bool {
-        self.arguments.len() == arguments.len()
-            && future::join_all(self.arguments.iter().map(|arg| arg.lock()))
-                .await
+#[derive(Clone, Debug)]
+pub struct FunctionDefinition {
+    pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
+    pub range: Range,
+}
+
+impl FunctionDefinition {
+    pub fn new(args: &Vec<parser::Argument>, range: Range) -> Self {
+        FunctionDefinition {
+            range,
+
+            variables: args
                 .iter()
-                .zip(arguments.iter())
-                .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
+                .map(|arg| {
+                    (
+                        (&arg.variable.name).into(),
+                        Mutex::new(Variable {
+                            variable_type: VariableType::Argument(arg.clone()),
+                            data_type: (&arg.variable.data_type).into(),
+                            // uses: Vec::new(),
+                        })
+                        .into(),
+                    )
+                })
+                .collect(),
+        }
     }
 }
 
@@ -351,11 +400,10 @@ pub struct Function {
     pub parsed: parser::Function,
 
     pub returns: DataType,
-    pub arguments: Vec<Arc<Mutex<Variable>>>,
     pub help: Option<String>,
 
     pub declaration: Option<Range>,
-    pub definition: Option<Range>,
+    pub definition: Option<FunctionDefinition>,
     // pub uses: Vec<Range>,
 }
 
@@ -367,22 +415,11 @@ impl Function {
     ) -> Self {
         Function {
             declaration,
-            definition,
+            definition: definition.map(|range| FunctionDefinition::new(&parsed.arguments, range)),
+
             // uses: Vec::new(),
             help: None,
 
-            arguments: parsed
-                .arguments
-                .iter()
-                .map(|arg| {
-                    Mutex::new(Variable {
-                        variable_type: VariableType::Argument(arg.clone()),
-                        data_type: (&arg.variable.data_type).into(),
-                        // uses: Vec::new(),
-                    })
-                    .into()
-                })
-                .collect(),
             returns: parsed.returns.as_ref().into(),
             parsed,
         }
@@ -393,40 +430,17 @@ impl Function {
     }
 
     pub async fn conflicts(&self, other: &Function) -> bool {
-        self.arguments.len() == other.arguments.len() && {
-            let self_args = future::join_all(self.arguments.iter().map(|arg| arg.lock())).await;
-            let other_args = future::join_all(other.arguments.iter().map(|arg| arg.lock())).await;
-
-            self_args
-                .iter()
-                .zip(other_args)
-                .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
-        }
-    }
-
-    pub async fn is_callable(
-        &self,
-        arguments: &Vec<DataType>,
-        min_access: &tokens::AccessType,
-    ) -> bool {
-        min_access.strictness()
-            >= self
-                .parsed
-                .access
-                .map(|access| access.strictness())
-                .unwrap_or(0)
-            && (self.arguments.len() == arguments.len()
-                || (self.arguments.len() < arguments.len() && self.parsed.has_vararg))
-            // && self
-            //     .arguments
-            //     .iter()
-            //     .zip(arguments)
-            //     .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
-            && future::join_all(self.arguments.iter().map(|arg| arg.lock()))
-                .await
-                .iter()
-                .zip(arguments.iter())
-                .all(|(self_arg, call_arg)| call_arg.is_convertible(&self_arg.data_type))
+        self.parsed.arguments.len() == other.parsed.arguments.len()
+            && self.parsed.has_vararg == other.parsed.has_vararg
+            && {
+                self.parsed
+                    .arguments
+                    .iter()
+                    .zip(&other.parsed.arguments)
+                    .all(|(self_arg, other_arg)| {
+                        self_arg.variable.data_type == other_arg.variable.data_type
+                    })
+            }
     }
 }
 
@@ -503,7 +517,7 @@ impl Class {
                     .then_some(&access.write)
                     .unwrap_or(&access.read)
                     .map_or(0, |acc| acc.strictness())
-                    > strictness
+                    <= strictness
                 {
                     return Some(found.clone());
                 }
@@ -541,23 +555,6 @@ impl Class {
             None
         }
     }
-
-    pub async fn find_callable_event(
-        &self,
-        name: &String,
-        arguments: &Vec<DataType>,
-    ) -> Option<Arc<Mutex<Event>>> {
-        if let Some(ev) = self.events.get(&name.into()) {
-            ev.lock()
-                .await
-                .is_callable(arguments)
-                .await
-                .then_some(ev.clone())
-        } else {
-            None
-        }
-    }
-
     // fn find_exact_function(&self, function: &Function) -> Option<&Function> {
     //     for functions in [&self.functions, &self.external_functions] {
     //         if let Some(func) = functions
@@ -579,25 +576,6 @@ impl Class {
             if let Some(funcs) = functions.get(&(&function.parsed.name).into()) {
                 for func in funcs {
                     if func.lock().await.conflicts(function).await {
-                        return Some(func.clone());
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    pub async fn find_callable_function(
-        &self,
-        name: &String,
-        arguments: &Vec<DataType>,
-        min_access: &tokens::AccessType,
-    ) -> Option<Arc<Mutex<Function>>> {
-        for functions in [&self.functions, &self.external_functions] {
-            if let Some(funcs) = functions.get(&name.into()) {
-                for func in funcs {
-                    if func.lock().await.is_callable(arguments, min_access).await {
                         return Some(func.clone());
                     }
                 }
@@ -649,7 +627,7 @@ pub struct LintState<'a> {
     pub file: Option<&'a mut File>,
     pub class: Option<Arc<Mutex<Class>>>,
 
-    pub variables: Vec<Arc<Mutex<Variable>>>,
+    pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
     pub return_type: DataType,
 }
 
@@ -659,13 +637,14 @@ impl<'a> LintState<'a> {
             proj,
             file,
             class: None,
-            variables: Vec::new(),
+            variables: HashMap::new(),
             return_type: DataType::Void,
         }
     }
 
-    pub fn push_diagnostic(&mut self, diagnostic: parser::Diagnostic) {
+    pub fn push_diagnostic(&mut self, mut diagnostic: parser::Diagnostic) {
         if let Some(file) = &mut self.file {
+            diagnostic.message += format!("\n {}", Backtrace::capture()).as_str();
             (*file).diagnostics.push(diagnostic);
         }
     }
@@ -724,11 +703,10 @@ impl<'a> LintState<'a> {
         variable: &parser::VariableAccess,
         write: bool,
     ) -> Option<Arc<Mutex<Variable>>> {
-        for var in &self.variables {
-            if var.lock().await.parsed().name == variable.name {
-                return Some(var.clone());
-            }
-        }
+        let iname = (&variable.name).into();
+        if let Some(var) = self.variables.get(&iname) {
+            return Some(var.clone());
+        };
 
         if let Some(current_class) = &self.class {
             if let Some(found) = current_class
@@ -774,9 +752,9 @@ impl<'a> LintState<'a> {
         if let Some(mut class_arc) = self.class.clone() {
             let mut first_iter = true;
             loop {
-                let class = class_arc.lock().await;
-                if let Some(found) = class
-                    .find_callable_function(
+                if let Some(found) = self
+                    .find_callable_function_in_class(
+                        &class_arc,
                         name,
                         arguments,
                         first_iter
@@ -788,9 +766,9 @@ impl<'a> LintState<'a> {
                     return Some(found);
                 }
 
-                match self.find_class(&class.base).await {
+                let complex = self.find_class(&class_arc.lock().await.base).await;
+                match complex {
                     Some(Complex::Class(base)) => {
-                        drop(class);
                         class_arc = base;
                     }
                     Some(Complex::Enum(_)) | None => break,
@@ -809,10 +787,14 @@ impl<'a> LintState<'a> {
             let file = _file_lock.read().await;
 
             for (name, class) in &file.classes {
-                let class = class.lock().await;
-                if class.base.combine().to_lowercase() == "function_object" {
-                    if let Some(func) = class
-                        .find_callable_function(name, arguments, &tokens::AccessType::PUBLIC)
+                if class.lock().await.base.combine().to_lowercase() == "function_object" {
+                    if let Some(func) = self
+                        .find_callable_function_in_class(
+                            &class,
+                            name,
+                            arguments,
+                            &tokens::AccessType::PUBLIC,
+                        )
                         .await
                     {
                         return Some(func.clone());
@@ -823,10 +805,9 @@ impl<'a> LintState<'a> {
 
         if let Some(funcs) = proj.builtin_functions.get(&name.into()) {
             for func in funcs {
-                if func
-                    .lock()
-                    .await
-                    .is_callable(arguments, &tokens::AccessType::PUBLIC)
+                let func_holder = func.lock().await;
+                if self
+                    .is_function_callable(&func_holder, arguments, &tokens::AccessType::PUBLIC)
                     .await
                 {
                     return Some(func.clone());
@@ -883,7 +864,7 @@ impl<'a> LintState<'a> {
                 if class.is_global
                     && (group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref())
                 {
-                    if file.lint_progress < LintProgress::Shallow {
+                    if file.top_levels.get_progress() < LintProgress::Shallow {
                         drop(class);
                         drop(file);
                         // TODO call lint_file directly?
@@ -897,6 +878,114 @@ impl<'a> LintState<'a> {
         // TODO scan more files?
 
         None
+    }
+
+    pub async fn is_event_callable(&self, event: &Event, arguments: &Vec<DataType>) -> bool {
+        event.arguments.len() == arguments.len()
+            && future::join_all(
+                future::join_all(event.arguments.iter().map(|arg| arg.lock()))
+                    .await
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(self_arg, call_arg)| {
+                        self.is_convertible(&call_arg, &self_arg.data_type)
+                    }),
+            )
+            .await
+            .iter()
+            .all(|x| *x)
+    }
+    pub async fn is_function_callable(
+        &self,
+        func: &Function,
+        arguments: &Vec<DataType>,
+        min_access: &tokens::AccessType,
+    ) -> bool {
+        min_access.strictness()
+            >= func
+                .parsed
+                .access
+                .map(|access| access.strictness())
+                .unwrap_or(0)
+            && (func.parsed.arguments.len() == arguments.len()
+                || (func.parsed.arguments.len() < arguments.len() && func.parsed.has_vararg))
+            && future::join_all(
+                func.parsed
+                    .arguments
+                    .iter()
+                    .map(|arg| (&arg.variable.data_type).into())
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .zip(arguments)
+                    .map(|(self_arg, call_arg)| self.is_convertible(call_arg, self_arg)),
+            )
+            .await
+            .iter()
+            .all(|x| *x)
+    }
+
+    pub fn find_callable_function_in_class<'b>(
+        &'b self,
+        class_mut: &'b Arc<Mutex<Class>>,
+        name: &'b String,
+        arguments: &'b Vec<DataType>,
+        min_access: &'b tokens::AccessType,
+    ) -> BoxFuture<Option<Arc<Mutex<Function>>>> {
+        async move {
+            let class = class_mut.lock().await;
+            let all_functions = [&class.functions, &class.external_functions]
+                .map(|funcs| funcs.get(&name.into()).cloned());
+            drop(class);
+
+            for functions in all_functions {
+                let Some(functions) = functions else {
+                    continue;
+                };
+                for func_mut in functions {
+                    let func = func_mut.lock().await;
+                    if self
+                        .is_function_callable(&func, arguments, min_access)
+                        .await
+                    {
+                        return Some(func_mut.clone());
+                    }
+                }
+            }
+
+            match self.find_class(&class_mut.lock().await.base).await {
+                Some(Complex::Class(base)) => {
+                    self.find_callable_function_in_class(&base, name, arguments, min_access)
+                        .await
+                }
+                _ => None,
+            }
+        }
+        .boxed()
+    }
+
+    pub fn find_callable_event_in_class<'b>(
+        &'b self,
+        class: &'b Arc<Mutex<Class>>,
+        name: &'b String,
+        arguments: &'b Vec<DataType>,
+    ) -> BoxFuture<Option<Arc<Mutex<Event>>>> {
+        async move {
+            if let Some(event_mut) = class.lock().await.events.get(&name.into()).cloned() {
+                let event = event_mut.lock().await;
+                if self.is_event_callable(&event, arguments).await {
+                    return Some(event_mut.clone());
+                }
+            }
+
+            match self.find_class(&class.lock().await.base).await {
+                Some(Complex::Class(base)) => {
+                    self.find_callable_event_in_class(&base, name, arguments)
+                        .await
+                }
+                _ => None,
+            }
+        }
+        .boxed()
     }
 
     pub async fn inherits_from(
@@ -929,6 +1018,126 @@ impl<'a> LintState<'a> {
             },
         }
     }
+
+    pub fn is_convertible<'b>(
+        &'b self,
+        from: &'b DataType,
+        to: &'b DataType,
+    ) -> BoxFuture<'b, bool> {
+        async move {
+            match (from, to) {
+                (DataType::Unknown, _) | (_, DataType::Unknown) => true,
+                (DataType::Any, _) | (_, DataType::Any) => true,
+                (DataType::Array(nested_from), DataType::Array(nested_to)) => {
+                    self.is_convertible(&nested_from, &nested_to).await
+                }
+                (DataType::Complex(from_name), DataType::Complex(to_name)) => {
+                    self.inherits_from(from_name, to_name)
+                        .await
+                        .unwrap_or(false)
+                        || self
+                            .inherits_from(to_name, from_name)
+                            .await
+                            .unwrap_or(false)
+                }
+                _ => from == to || (from.is_numeric() && to.is_numeric()),
+            }
+        }
+        .boxed()
+    }
+}
+
+pub trait IndexableProgress<Idx> {
+    type T: std::fmt::Debug;
+}
+
+#[derive(Debug)]
+pub struct LintProgressOnlyTypes;
+impl<B: std::fmt::Debug, C, D> IndexableProgress<LintProgressOnlyTypes> for (B, C, D) {
+    type T = B;
+}
+#[derive(Debug)]
+pub struct LintProgressShallow;
+impl<B, C: std::fmt::Debug, D> IndexableProgress<LintProgressShallow> for (B, C, D) {
+    type T = C;
+}
+#[derive(Debug)]
+pub struct LintProgressComplete;
+impl<B, C, D: std::fmt::Debug> IndexableProgress<LintProgressComplete> for (B, C, D) {
+    type T = D;
+}
+
+pub type LintedInOnlyTypes<A, B> = ((A, B), (A, B), (A, B));
+pub type LintedInShallow<A, B> = (A, (A, B), (A, B));
+pub type LintedInComplete<A, B> = (A, A, (A, B));
+
+pub type ForwardDecl =
+    LintedInOnlyTypes<Vec<parser::DatatypeDecl>, HashMap<IString, Arc<Mutex<Class>>>>;
+pub type ScopedVariableDecl = LintedInOnlyTypes<parser::ScopedVariable, Arc<Mutex<Variable>>>;
+pub type ScopedVariablesDecl =
+    LintedInOnlyTypes<Vec<parser::ScopedVariable>, HashMap<IString, Arc<Mutex<Variable>>>>;
+
+pub type DatatypeDecl = LintedInShallow<parser::DatatypeDecl, Arc<Mutex<Class>>>;
+pub type TypeVariablesDecl = LintedInShallow<
+    Vec<parser::InstanceVariable>,
+    (
+        Option<Arc<Mutex<Class>>>,
+        HashMap<IString, Arc<Mutex<Variable>>>,
+    ),
+>;
+pub type FunctionsForwardDecl = LintedInShallow<
+    Vec<parser::Function>,
+    (
+        Option<Arc<Mutex<Class>>>,
+        HashMap<IString, Arc<Mutex<Function>>>,
+    ),
+>;
+pub type ExternalFunctions = LintedInShallow<
+    Vec<parser::Function>,
+    (
+        Option<Arc<Mutex<Class>>>,
+        HashMap<IString, Arc<Mutex<Function>>>,
+    ),
+>;
+
+pub type FunctionBody = LintedInComplete<
+    (parser::Function, Vec<parser::Statement>),
+    (Option<Arc<Mutex<Class>>>, Arc<Mutex<Function>>),
+>;
+pub type EventBody = LintedInComplete<
+    (parser::Event, Vec<parser::Statement>),
+    (Option<Arc<Mutex<Class>>>, Arc<Mutex<Event>>),
+>;
+pub type OnBody =
+    LintedInComplete<(parser::On, Vec<parser::Statement>), (Option<Arc<Mutex<Class>>>,)>;
+
+#[derive(Debug)]
+pub enum TopLevelType<Idx>
+where
+    ForwardDecl: IndexableProgress<Idx>,
+    ScopedVariableDecl: IndexableProgress<Idx>,
+    ScopedVariablesDecl: IndexableProgress<Idx>,
+    DatatypeDecl: IndexableProgress<Idx>,
+    FunctionsForwardDecl: IndexableProgress<Idx>,
+    ExternalFunctions: IndexableProgress<Idx>,
+    TypeVariablesDecl: IndexableProgress<Idx>,
+    FunctionBody: IndexableProgress<Idx>,
+    EventBody: IndexableProgress<Idx>,
+    OnBody: IndexableProgress<Idx>,
+{
+    ForwardDecl(<ForwardDecl as IndexableProgress<Idx>>::T),
+
+    ScopedVariableDecl(<ScopedVariableDecl as IndexableProgress<Idx>>::T),
+    ScopedVariablesDecl(<ScopedVariablesDecl as IndexableProgress<Idx>>::T),
+
+    DatatypeDecl(<DatatypeDecl as IndexableProgress<Idx>>::T),
+    TypeVariablesDecl(<TypeVariablesDecl as IndexableProgress<Idx>>::T),
+    FunctionsForwardDecl(<FunctionsForwardDecl as IndexableProgress<Idx>>::T),
+    ExternalFunctions(<ExternalFunctions as IndexableProgress<Idx>>::T),
+
+    FunctionBody(<FunctionBody as IndexableProgress<Idx>>::T),
+    EventBody(<EventBody as IndexableProgress<Idx>>::T),
+    OnBody(<OnBody as IndexableProgress<Idx>>::T),
 }
 
 #[derive(PartialEq, PartialOrd, Clone, Debug)]
@@ -951,16 +1160,33 @@ impl LintProgress {
 }
 
 #[derive(Debug)]
+pub enum ProgressedTopLevels {
+    None(Vec<parser::TopLevel>),
+    OnlyTypes(Vec<(Range, TopLevelType<LintProgressOnlyTypes>)>),
+    Shallow(Vec<(Range, TopLevelType<LintProgressShallow>)>),
+    Complete(Vec<(Range, TopLevelType<LintProgressComplete>)>),
+}
+impl ProgressedTopLevels {
+    pub fn get_progress(&self) -> LintProgress {
+        match self {
+            ProgressedTopLevels::None(_) => LintProgress::None,
+            ProgressedTopLevels::OnlyTypes(_) => LintProgress::OnlyTypes,
+            ProgressedTopLevels::Shallow(_) => LintProgress::Shallow,
+            ProgressedTopLevels::Complete(_) => LintProgress::Complete,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct File {
     pub classes: HashMap<IString, Arc<Mutex<Class>>>,
-    // Shared with all instances
+    // Shared and Global variables
     pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
 
     pub diagnostics: Vec<parser::Diagnostic>,
 
-    pub top_levels: Vec<parser::TopLevel>,
+    pub top_levels: ProgressedTopLevels,
     pub path: PathBuf,
-    pub lint_progress: LintProgress,
 }
 
 impl File {
@@ -971,11 +1197,10 @@ impl File {
             classes: HashMap::new(),
             variables: HashMap::new(),
 
-            top_levels: file.parse_tokens(),
+            top_levels: ProgressedTopLevels::None(file.parse_tokens()),
             diagnostics: file.get_syntax_errors(),
 
             path,
-            lint_progress: LintProgress::None,
         })
     }
 }
@@ -1019,8 +1244,6 @@ impl Project {
         proj.load_builtin_classes(classes_file)?;
         proj.load_builtin_functions(functions_file)?;
 
-        let x = Some(19);
-            
         Ok(proj)
     }
 }

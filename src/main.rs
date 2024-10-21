@@ -3,12 +3,9 @@ mod parser;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ls::ls_types::{self, LintProgress, Project};
-use notify::Watcher;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+use ls::ls_types;
+use ls::ls_types::{LintProgress, Project};
 use tokio::sync::RwLock;
 
 use parser::parser_types;
@@ -20,22 +17,22 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 #[derive(Debug)]
 struct PowerBuilderLSCreator {
     proj: Arc<RwLock<Project>>,
-    watcher: Arc<Mutex<notify::INotifyWatcher>>,
-    watcher_rx: mpsc::Receiver<notify::Event>,
+    // watcher: Arc<Mutex<notify::INotifyWatcher>>,
+    // watcher_rx: mpsc::Receiver<notify::Event>,
 }
 
 impl PowerBuilderLSCreator {
     fn new(system_files_root: PathBuf) -> anyhow::Result<Self> {
-        let (tx, rx) = mpsc::channel::<notify::Event>(1);
-        let watcher =
-            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                let err = match res {
-                    Ok(event) => tx.blocking_send(event).map_err(anyhow::Error::msg),
-                    Err(err) => Err(anyhow::Error::msg(err)),
-                };
+        // let (tx, rx) = mpsc::channel::<notify::Event>(1);
+        // let watcher =
+        //     notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        //         let err = match res {
+        //             Ok(event) => tx.blocking_send(event).map_err(anyhow::Error::msg),
+        //             Err(err) => Err(anyhow::Error::msg(err)),
+        //         };
 
-                eprintln!("File watcher failed to watch: {:?}", err);
-            })?;
+        //         eprintln!("File watcher failed to watch: {:?}", err);
+        //     })?;
 
         let proj = Arc::new(RwLock::new(Project::new(
             system_files_root.join("enums.pb"),
@@ -45,8 +42,8 @@ impl PowerBuilderLSCreator {
 
         Ok(Self {
             proj,
-            watcher: Arc::new(Mutex::new(watcher)),
-            watcher_rx: rx,
+            // watcher: Arc::new(Mutex::new(watcher)),
+            // watcher_rx: rx,
         })
     }
 }
@@ -55,80 +52,28 @@ impl PowerBuilderLSCreator {
 struct PowerBuilderLS {
     client: Client,
     m: PowerBuilderLSCreator,
+    ver: i32,
 }
 
 impl PowerBuilderLS {
     fn new(client: Client, creator: PowerBuilderLSCreator) -> Self {
-        Self { client, m: creator }
-    }
-
-    async fn file_change_watcher(&mut self) {
-        while let Some(i) = self.m.watcher_rx.recv().await {
-            for path in i.paths {}
+        Self {
+            client,
+            m: creator,
+            ver: 0,
         }
     }
-}
 
-#[tower_lsp::async_trait]
-impl LanguageServer for PowerBuilderLS {
-    async fn initialize(&self, _: InitializeParams) -> jsonrpc::Result<InitializeResult> {
-        Ok(InitializeResult {
-            server_info: None,
-            capabilities: ServerCapabilities {
-                workspace: Some(WorkspaceServerCapabilities {
-                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
-                        supported: Some(true),
-                        change_notifications: Some(OneOf::Left(true)),
-                    }),
-                    file_operations: None,
-                }),
-                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
-                    DiagnosticOptions {
-                        identifier: None,
-                        inter_file_dependencies: true,
-                        workspace_diagnostics: false,
-                        work_done_progress_options: WorkDoneProgressOptions {
-                            work_done_progress: None,
-                        },
-                    },
-                )),
-                ..Default::default()
-            },
-        })
-    }
-
-    async fn initialized(&self, _: InitializedParams) {
-        self.client
-            .log_message(MessageType::INFO, "server initialized!")
-            .await;
-    }
-
-    async fn diagnostic(
-        &self,
-        params: DocumentDiagnosticParams,
-    ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("file diagnostics! {:?}", params.text_document),
-            )
-            .await;
-
-        let path: PathBuf = params.text_document.uri.path().into();
-
-        // self.m
-        //     .watcher
-        //     .watch(&path, notify::RecursiveMode::NonRecursive)
-        //     .map_err(|err| {
-        //         let mut json_err = jsonrpc::Error::internal_error();
-        //         json_err.message = err.to_string().into();
-        //         json_err
-        //     })?;
+    async fn get_file_diagnostics(&self, path: PathBuf) -> jsonrpc::Result<Vec<Diagnostic>> {
         self.m.proj.write().await.files.remove(&path);
         if let Err(err) = ls::add_file(self.m.proj.clone(), &path, LintProgress::Complete).await {
-            let mut json_err = jsonrpc::Error::internal_error();
-            json_err.message = err.to_string().into();
-            return Err(json_err);
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to Lint File: {:?}", err),
+                )
+                .await;
+            return Err(jsonrpc::Error::internal_error());
         }
 
         let items;
@@ -159,16 +104,86 @@ impl LanguageServer for PowerBuilderLS {
             return Err(json_err);
         }
 
-        Ok(DocumentDiagnosticReportResult::Report(
-            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
-                related_documents: None,
-                full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                    result_id: None,
-                    items,
-                },
-            }),
-        ))
+        Ok(items)
     }
+
+    // async fn file_change_watcher(&mut self) {
+    //     while let Some(i) = self.m.watcher_rx.recv().await {
+    //         for path in i.paths {}
+    //     }
+    // }
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for PowerBuilderLS {
+    async fn initialize(&self, _: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        Ok(InitializeResult {
+            server_info: None,
+            capabilities: ServerCapabilities {
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
+                // diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                //     DiagnosticOptions {
+                //         identifier: None,
+                //         inter_file_dependencies: true,
+                //         workspace_diagnostics: false,
+                //         work_done_progress_options: WorkDoneProgressOptions {
+                //             work_done_progress: None,
+                //         },
+                //     },
+                // )),
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
+                )),
+                completion_provider: Some(CompletionOptions {
+                    completion_item: Some(CompletionOptionsCompletionItem {
+                        label_details_support: Some(true),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        })
+    }
+
+    async fn initialized(&self, _: InitializedParams) {
+        self.client
+            .log_message(MessageType::INFO, "server initialized!")
+            .await;
+    }
+
+    // async fn diagnostic(
+    //     &self,
+    //     params: DocumentDiagnosticParams,
+    // ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
+    //     self.client
+    //         .log_message(
+    //             MessageType::INFO,
+    //             format!("file diagnostics! {:?}", params.text_document),
+    //         )
+    //         .await;
+
+    //     let path: PathBuf = params.text_document.uri.path().into();
+    //     let items = self.get_file_diagnostics(path).await?;
+    //     Ok(DocumentDiagnosticReportResult::Report(
+    //         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+    //             related_documents: None,
+    //             full_document_diagnostic_report: FullDocumentDiagnosticReport {
+    //                 result_id: None,
+    //                 items,
+    //             },
+    //         }),
+    //     ))
+    // }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.client
@@ -178,12 +193,181 @@ impl LanguageServer for PowerBuilderLS {
             )
             .await;
 
-        // self.on_change(TextDocumentItem {
-        //     uri: params.text_document.uri,
-        //     text: params.text_document.text,
-        //     version: params.text_document.version,
-        // })
-        // .await
+        let path = match std::path::absolute(params.text_document.uri.path()) {
+            Ok(path) => path,
+            Err(err) => {
+                return self
+                    .client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to canonicalize Path: {}", err),
+                    )
+                    .await
+            }
+        };
+        match self.get_file_diagnostics(path).await {
+            Ok(items) => {
+                self.client
+                    .publish_diagnostics(params.text_document.uri, items, None)
+                    .await
+            }
+            Err(err) => {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to get File diagnostics: {:?}", err),
+                    )
+                    .await
+            }
+        }
+    }
+
+    // async fn did_change(&self, params: DidChangeTextDocumentParams) {
+    //     self.m.proj.write().await.ver =  params.text_document.version;
+    // }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("file saved! {:?}", params.text_document),
+            )
+            .await;
+
+        let path = match std::path::absolute(params.text_document.uri.path()) {
+            Ok(path) => path,
+            Err(err) => {
+                return self
+                    .client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to canonicalize Path: {}", err),
+                    )
+                    .await
+            }
+        };
+        match self.get_file_diagnostics(path).await {
+            Ok(items) => {
+                self.client
+                    .publish_diagnostics(params.text_document.uri, items, None)
+                    .await
+            }
+            Err(err) => {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to get File diagnostics: {:?}", err),
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> jsonrpc::Result<Option<CompletionResponse>> {
+        let mut items = Vec::new();
+
+        let path = match std::path::absolute(params.text_document_position.text_document.uri.path())
+        {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(jsonrpc::Error::invalid_params(format!(
+                    "Invalid path: {}",
+                    err
+                )))
+            }
+        };
+
+        if let Err(err) = ls::add_file(self.m.proj.clone(), &path, LintProgress::Complete).await {
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to Lint File: {:?}", err),
+                )
+                .await;
+            return Err(jsonrpc::Error::internal_error());
+        }
+
+        let proj = self.m.proj.read().await;
+        let Some(file_lock) = proj.files.get(&path) else {
+            return Ok(Some(CompletionResponse::Array(items)));
+        };
+        let file = file_lock.read().await;
+        let top_levels = match &file.top_levels {
+            ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
+            _ => return Ok(Some(CompletionResponse::Array(items))),
+        };
+
+        let pos = &params.text_document_position.position.into();
+        for (range, top_level_type) in top_levels {
+            if !range.contains(pos) {
+                continue;
+            }
+            match top_level_type {
+                ls_types::TopLevelType::ForwardDecl(_) => todo!(),
+                ls_types::TopLevelType::ScopedVariableDecl(_) => todo!(),
+                ls_types::TopLevelType::ScopedVariablesDecl(_) => todo!(),
+                ls_types::TopLevelType::DatatypeDecl(_) => todo!(),
+                ls_types::TopLevelType::TypeVariablesDecl(_) => todo!(),
+                ls_types::TopLevelType::FunctionsForwardDecl(_) => todo!(),
+                ls_types::TopLevelType::ExternalFunctions(_) => todo!(),
+                ls_types::TopLevelType::FunctionBody((
+                    (_parsed, _statements),
+                    (class_mut, function),
+                )) => {
+                    let mut add_variable = |var: &ls_types::Variable| {
+                        let name = var.parsed().name.clone();
+                        let data_type = var.data_type.to_string();
+                        let variable_type = match &var.variable_type {
+                            ls_types::VariableType::Local(_) => "Local".into(),
+                            ls_types::VariableType::Scoped(scoped_variable) => scoped_variable.scope.to_string(),
+                            ls_types::VariableType::Argument(_) => "Argument".into(),
+                            ls_types::VariableType::Instance(_) => "Instance".into(),
+                        };
+
+                        let detail = format!("{} {} : {} Variable", name, data_type, variable_type);
+
+                        items.push(CompletionItem {
+                            label: name,
+                            label_details: Some(CompletionItemLabelDetails {
+                                detail: Some(data_type),
+                                description: None,
+                            }),
+                            detail: Some(detail),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            ..Default::default()
+                        });
+                    };
+
+                    if let Some(definition) = &function.lock().await.definition {
+                        for (_, var_lock) in &definition.variables {
+                            let var = var_lock.lock().await;
+                            if &var.parsed().range.end < pos {
+                                add_variable(&var);
+                            }
+                        }
+                    }
+
+                    if let Some(class_mut) = class_mut {
+                        for (_, var_lock) in &class_mut.lock().await.instance_variables {
+                            let var = var_lock.lock().await;
+                            add_variable(&var);
+                        }
+                    }
+
+                    for var_lock in file.variables.values() {
+                        let var = var_lock.lock().await;
+                        add_variable(&var);
+                    }
+                }
+                ls_types::TopLevelType::EventBody(_) => todo!(),
+                ls_types::TopLevelType::OnBody(_) => todo!(),
+            }
+        }
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn shutdown(&self) -> jsonrpc::Result<()> {
@@ -196,6 +380,19 @@ async fn main() -> anyhow::Result<()> {
     let creator =
         PowerBuilderLSCreator::new("/home/micha4w/Code/Rust/powerbuilder-ls/system".into())?;
 
+    // ls::add_file(
+    //     creator.proj.clone(),
+    //     &"/home/micha4w/Code/Rust/powerbuilder-ls/res/pfc_w_find.srw".into(),
+    //     ls_types::LintProgress::Complete,
+    // )
+    // .await?;
+
+    // for (x,y) in &creator.proj.read().await.files {
+    //     for diagnostic in &y.read().await.diagnostics {
+    //         println!("{:?}", diagnostic)
+    //     }
+    // }
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
@@ -206,13 +403,6 @@ async fn main() -> anyhow::Result<()> {
     //     proj_arc.clone(),
     //     "res/test.sru".into(),
     //     lsp_types::LintProgress::Complete,
-    // )
-    // .await?;
-
-    // ls::add_file(
-    //     proj_arc.clone(),
-    //     &"res/pfc_w_find.srw".into(),
-    //     ls_types::LintProgress::Complete,
     // )
     // .await?;
 

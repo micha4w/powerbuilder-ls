@@ -7,6 +7,7 @@ use super::parser_types::*;
 use super::tokenizer::*;
 use super::tokenizer_types as tokens;
 use super::tokenizer_types::Range;
+use super::tokenizer_types::ScopeModif;
 
 pub struct Parser {
     last_token: Option<Token>,
@@ -27,20 +28,20 @@ impl Parser {
         }
     }
 
-    fn next(&mut self) -> EOFResult<Token> {
+    fn next(&mut self) -> EOFor<Token> {
         self.last_token = self.tokens.next();
         self.last_token.clone()
     }
 
-    fn peek(&mut self) -> EOFResult<&Token> {
+    fn peek(&mut self) -> EOFor<&Token> {
         self.tokens.peek()
     }
 
-    fn peek_nth(&mut self, n: usize) -> EOFResult<&Token> {
+    fn peek_nth(&mut self, n: usize) -> EOFor<&Token> {
         self.tokens.peek_nth(n)
     }
 
-    fn consume_line(&mut self) -> EOFResult<()> {
+    fn consume_line(&mut self) -> EOFor<()> {
         loop {
             match self.next()?.token_type {
                 TokenType::NEWLINE => break Some(()),
@@ -72,7 +73,7 @@ impl Parser {
         Some((None, Some(ParseError::UnexpectedToken)))
     }
 
-    fn optional(&mut self, token_type: TokenType) -> EOFResult<Option<Token>> {
+    fn optional(&mut self, token_type: TokenType) -> EOFor<Option<Token>> {
         if self.peek()?.token_type == token_type {
             Some(Some(self.next()?))
         } else {
@@ -134,11 +135,10 @@ impl Parser {
     // }
 
     pub fn parse_type(&mut self) -> EOFPossibleResult<DataType> {
-        let res = self.expect(TokenType::ID)?;
-        if res.failed() {
-            return Some((None, res.1));
-        }
-        let token = res.0.unwrap();
+        let token = match self.expect(TokenType::ID)? {
+            (Some(token), None) => token,
+            (_, err) => return Some((None, err)),
+        };
 
         Some(
             if token.content.eq_ignore_ascii_case("decimal")
@@ -312,7 +312,10 @@ impl Parser {
                         let class = self.next()?;
 
                         end = class.range.end;
-                        ExpressionType::Create(class.content)
+                        ExpressionType::Create(DataType {
+                            data_type_type: DataTypeType::ID(class.content),
+                            range: class.range,
+                        })
                     }
                     _ => {
                         let range = self.peek()?.range;
@@ -688,7 +691,7 @@ impl Parser {
     fn parse_argument_list_declaration(
         &mut self,
     ) -> EOFPossibleResult<(Range, Vec<Argument>, bool)> {
-        let start = match self.expect(TokenType::Symbol(tokens::Symbol::LBRACE))? {
+        let start = match self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))? {
             (Some(token), None) => token.range.start,
             (_, err) => return Some((None, err)),
         };
@@ -1203,7 +1206,7 @@ impl Parser {
     }
 
     // Consumes trailing newlines
-    fn parse_statement(&mut self) -> EOFResult<Option<Statement>> {
+    fn parse_statement(&mut self) -> EOFor<Option<Statement>> {
         match self.peek()?.token_type {
             TokenType::Keyword(tokens::Keyword::CONSTANT) => {
                 Some(self.parse_variable_declaration()?.0)
@@ -1414,6 +1417,7 @@ impl Parser {
                                     TokenType::Keyword(tokens::Keyword::ELSE) => {
                                         part = tokens::Keyword::ELSE;
                                         self.next()?;
+                                        self.expect(TokenType::NEWLINE)?;
                                         break;
                                     }
                                     TokenType::Keyword(tokens::Keyword::ELSEIF) => {
@@ -1821,6 +1825,7 @@ impl Parser {
 
                 self.next()?; // end
                 let end = self.next()?.range.end; // try
+                self.expect(TokenType::NEWLINE)?;
 
                 Some(Some(Statement {
                     range: Range {
@@ -2176,7 +2181,7 @@ impl Parser {
         }
     }
 
-    fn parse_event(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_event(&mut self) -> EOFor<Option<TopLevel>> {
         let event = match self.parse_event_header()? {
             (Some(event), _) => event,
             _ => return Some(None),
@@ -2221,7 +2226,7 @@ impl Parser {
         }))
     }
 
-    fn parse_function(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_function(&mut self) -> EOFor<Option<TopLevel>> {
         let function = match self.parse_function_header()? {
             (Some(function), _) => function,
             _ => return Some(None),
@@ -2287,7 +2292,7 @@ impl Parser {
         }))
     }
 
-    fn parse_on(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_on(&mut self) -> EOFor<Option<TopLevel>> {
         let start = match self.expect(TokenType::Keyword(tokens::Keyword::ON))? {
             (Some(token), None) => token.range.start,
             _ => return Some(None),
@@ -2359,7 +2364,7 @@ impl Parser {
         }))
     }
 
-    fn parse_datatype_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_datatype_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = self.peek()?.range.start;
 
         let scope = if let TokenType::ScopeModif(scope) = self.peek()?.token_type {
@@ -2463,12 +2468,12 @@ impl Parser {
         }))
     }
 
-    fn parse_global_variable_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_scoped_variable_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = self.peek()?.range.start;
 
-        match self.expect(TokenType::ScopeModif(tokens::ScopeModif::GLOBAL))? {
-            (Some(_), None) => {}
-            _ => return Some(None),
+        let scope = match self.optional(TokenType::ScopeModif(tokens::ScopeModif::GLOBAL))? {
+            Some(_) => ScopeModif::GLOBAL,
+            None => ScopeModif::SHARED,
         };
         let variable = match self.parse_variable_declaration()? {
             (Some(var), _) => var,
@@ -2488,14 +2493,17 @@ impl Parser {
                     start,
                     end: variable.range.end,
                 },
-                top_level_type: TopLevelType::GlobalVariableDecl(var.variable),
+                top_level_type: TopLevelType::ScopedVariableDecl(ScopedVariable {
+                    scope,
+                    variable: var.variable,
+                }),
             }))
         } else {
             unreachable!();
         }
     }
 
-    fn parse_scoped_variables_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_scoped_variables_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = self.peek()?.range.start;
 
         let scope = match self.peek()?.token_type {
@@ -2563,7 +2571,7 @@ impl Parser {
         }))
     }
 
-    fn parse_type_variables_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_type_variables_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = self.peek()?.range.start;
         match self.expect(TokenType::Keyword(tokens::Keyword::TYPE))? {
             (Some(_), None) => {}
@@ -2639,7 +2647,7 @@ impl Parser {
         }))
     }
 
-    fn parse_functions_forward_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_functions_forward_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = match self.expect(TokenType::Keyword(tokens::Keyword::FORWARD))? {
             (Some(token), None) => token.range.start,
             _ => return Some(None),
@@ -2687,7 +2695,7 @@ impl Parser {
         }))
     }
 
-    fn parse_external_functions(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_external_functions(&mut self) -> EOFor<Option<TopLevel>> {
         let start = match self.expect(TokenType::Keyword(tokens::Keyword::TYPE))? {
             (Some(token), None) => token.range.start,
             _ => return Some(None),
@@ -2735,7 +2743,7 @@ impl Parser {
         }))
     }
 
-    fn parse_forward_decl(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_forward_decl(&mut self) -> EOFor<Option<TopLevel>> {
         let start = match self.expect(TokenType::Keyword(tokens::Keyword::FORWARD))? {
             (Some(token), None) => token.range.start,
             _ => return Some(None),
@@ -2779,7 +2787,7 @@ impl Parser {
         }))
     }
 
-    fn parse_top_level(&mut self) -> EOFResult<Option<TopLevel>> {
+    fn parse_top_level(&mut self) -> EOFor<Option<TopLevel>> {
         match self.peek()?.token_type {
             TokenType::Keyword(tokens::Keyword::FORWARD) => match self.peek_nth(1)?.token_type {
                 TokenType::Keyword(tokens::Keyword::PROTOTYPES) => {
@@ -2815,8 +2823,13 @@ impl Parser {
                 TokenType::Keyword(tokens::Keyword::VARIABLES) => {
                     self.parse_scoped_variables_decl()
                 }
-                _ => self.parse_global_variable_decl(),
+                _ => self.parse_scoped_variable_decl(),
             },
+            TokenType::ID => self.parse_scoped_variable_decl(),
+            TokenType::NEWLINE => {
+                self.next();
+                Some(None)
+            }
             _ => {
                 let range = self.peek()?.range;
                 return Some(

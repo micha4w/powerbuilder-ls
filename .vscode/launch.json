@@ -72,6 +72,17 @@
             "sourceLanguages": [
                 "rust"
             ]
+        },
+        {
+            "name": "Remote launch",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/powerbuilder-ls",
+            "initCommands": [
+                "platform select remote-linux",
+                "platform connect connect://localhost:12345",
+            ],
+            "env": { }
         }
     ]
 }

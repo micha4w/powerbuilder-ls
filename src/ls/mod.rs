@@ -25,13 +25,15 @@ pub async fn add_file(
 
     let proj_r = proj.read().await;
     let _file_lock = proj_r.files.get(path).unwrap();
-    let mut current_progress = _file_lock.read().await.lint_progress.clone();
+    let mut current_progress = _file_lock.read().await.top_levels.get_progress();
 
     while current_progress < lint_progress {
         match current_progress.next() {
             Some(progress) => {
                 let mut file = _file_lock.write().await;
-                LintState::new(proj.clone(), Some(&mut file)).lint_file(progress.clone()).await;
+                LintState::new(proj.clone(), Some(&mut file))
+                    .lint_file()
+                    .await;
                 current_progress = progress;
             }
             None => break,

@@ -8,11 +8,13 @@
 			"type": "shell",
 			"command": "env",
 			"args": [
+				"RUST_BACKTRACE=1",
 				"SERVER_PATH=/home/micha4w/Code/Rust/powerbuilder-ls/target/debug/powerbuilder-ls",
 				"code",
-				"--extensionDevelopmentPath=${workspaceRoot}",
+				"--extensionDevelopmentPath=/home/micha4w/Code/PB/powerbuilder-vscode",
 				"/home/micha4w/Code/Rust/powerbuilder-ls/res"
-			]
+			],
+			"problemMatcher": []
 		},
 		{
 			"label": "Build",

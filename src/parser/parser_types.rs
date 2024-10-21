@@ -16,8 +16,10 @@ impl From<ParseError> for anyhow::Error {
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
-pub type EOFResult<T> = Option<T>;
-pub type EOFPossibleResult<T> = EOFResult<(Option<T>, Option<ParseError>)>;
+pub type EOFor<T> = Option<T>;
+// TODO change to EOFResult<Result<T, (ParseError, Option<T>)>
+pub type EOFPossibleResult<T> = EOFor<(Option<T>, Option<ParseError>)>;
+// pub type EOFPossibleResult<T> = EOFResult<(Option<T>, Option<ParseError>)>;
 
 pub trait EOFPossibleResultT<T> {
     fn failed(&self) -> bool;
@@ -135,6 +137,16 @@ pub struct Event {
     pub range: Range,
 }
 
+impl Event {
+    pub fn get_arguments(&self) -> Option<&Vec<Argument>> {
+        match &self.event_type {
+            EventType::User(_, args) => Some(&args),
+            EventType::Predefined => None,
+            EventType::System(_) => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct On {
     pub class: String,
@@ -228,7 +240,7 @@ pub enum ExpressionType {
     IncrementDecrement(Box<Expression>, tokens::Symbol),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
-    Create(String),
+    Create(DataType),
     CreateUsing(Box<Expression>),
     LValue(LValue),
 }
@@ -391,18 +403,19 @@ pub struct DatatypeDecl {
 
 #[derive(Debug)]
 pub enum TopLevelType {
-    DatatypeDecl(DatatypeDecl),
     ForwardDecl(Vec<DatatypeDecl>),
-    TypeVariablesDecl(Vec<InstanceVariable>),
+
+    ScopedVariableDecl(ScopedVariable),
     ScopedVariablesDecl(Vec<ScopedVariable>),
-    GlobalVariableDecl(Variable),
-    ConstantDecl,
-    FunctionForwardDecl,
-    ExternalFunctions(Vec<Function>),
+
+    DatatypeDecl(DatatypeDecl),
+    TypeVariablesDecl(Vec<InstanceVariable>),
     FunctionsForwardDecl(Vec<Function>),
+    ExternalFunctions(Vec<Function>),
+
     FunctionBody(Function, Vec<Statement>),
-    OnBody(On, Vec<Statement>),
     EventBody(Event, Vec<Statement>),
+    OnBody(On, Vec<Statement>),
 }
 
 #[derive(Debug)]
