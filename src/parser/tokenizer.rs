@@ -29,6 +29,7 @@ pub struct Token {
     pub token_type: TokenType,
     pub content: String,
     pub range: Range,
+    // TODO: change this to a Vec<Diagnostic>?
     pub error: Option<String>,
 }
 

@@ -8,6 +8,7 @@ use futures::{future::BoxFuture, FutureExt};
 use prost::{bytes::Bytes, Message};
 use tokio::sync::Mutex;
 
+use crate::parser::parser_types::EOFPossibleResultT as _;
 use crate::parser::{
     // parser::*,
     parser_types as parser,
@@ -468,6 +469,7 @@ impl<'a> LintState<'a> {
 
                     expression_type
                 }
+                parser::ExpressionType::Error => DataType::Unknown,
             }
         }
         .boxed()
@@ -1272,7 +1274,7 @@ impl Project {
                     tokenize(&(ret.to_owned() + "\n"))?
                         .parse_type()
                         .ok_or(anyhow!("Unexpected EOF"))?
-                        .0
+                        .value()
                         .ok_or(anyhow!("Invalid Type"))?,
                 );
             }
@@ -1291,7 +1293,7 @@ impl Project {
                         data_type: tokenize(&(arg.r#type.as_ref().unwrap().to_owned() + "\n"))?
                             .parse_type()
                             .ok_or(anyhow!("Unexpected EOF"))?
-                            .0
+                            .value()
                             .ok_or(anyhow!("Invalid Type"))?,
                         name: arg.name.clone().unwrap(),
                         initial_value: None,
@@ -1361,7 +1363,7 @@ impl Project {
                             data_type: tokenize(&(var.r#type.unwrap() + "\n"))?
                                 .parse_type()
                                 .ok_or(anyhow!("Unexpected EOF"))?
-                                .0
+                                .value()
                                 .ok_or(anyhow!("Invalid Type"))?,
                             name: var.name.unwrap(),
                             initial_value: None,

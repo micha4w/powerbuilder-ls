@@ -16,30 +16,27 @@ impl From<ParseError> for anyhow::Error {
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
-pub type EOFor<T> = Option<T>;
-// TODO change to EOFResult<Result<T, (ParseError, Option<T>)>
-pub type EOFPossibleResult<T> = EOFor<(Option<T>, Option<ParseError>)>;
-// pub type EOFPossibleResult<T> = EOFResult<(Option<T>, Option<ParseError>)>;
+pub type EOFOr<T> = Option<T>;
+pub type EOFOrParserResult<T> = EOFOr<Result<T, (ParseError, Option<T>)>>;
 
 pub trait EOFPossibleResultT<T> {
-    fn failed(&self) -> bool;
-    fn returned(&self) -> bool;
-    fn success(value: T) -> Self;
-    fn fail(value: ParseError) -> Self;
+    fn value(self) -> Option<T>;
+    fn split(self) -> (Option<T>, Option<ParseError>);
 }
 
-impl<T> EOFPossibleResultT<T> for (Option<T>, Option<ParseError>) {
-    fn failed(&self) -> bool {
-        self.1.is_some()
+impl<T> EOFPossibleResultT<T> for Result<T, (ParseError, Option<T>)> {
+    fn value(self) -> Option<T> {
+        match self {
+            Ok(t) => Some(t),
+            Err((_, t)) => t,
+        }
     }
-    fn returned(&self) -> bool {
-        self.0.is_some()
-    }
-    fn success(value: T) -> Self {
-        (Some(value), None)
-    }
-    fn fail(value: ParseError) -> Self {
-        (None, Some(value))
+
+    fn split(self) -> (Option<T>, Option<ParseError>) {
+        match self {
+            Ok(t) => (Some(t), None),
+            Err((err, t)) => (t, Some(err)),
+        }
     }
 }
 
@@ -243,6 +240,7 @@ pub enum ExpressionType {
     Create(DataType),
     CreateUsing(Box<Expression>),
     LValue(LValue),
+    Error,
 }
 
 #[derive(Debug, Clone)]
