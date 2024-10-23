@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Weak;
 use std::{mem::swap, path::PathBuf, sync::Arc};
 
 use super::ls_types::*;
@@ -786,15 +787,14 @@ impl<'a> LintState<'a> {
                 }
                 parser::StatementType::Exit => {} // TODO stack?
                 parser::StatementType::Continue => {}
-                parser::StatementType::Error => {}
-                parser::StatementType::Empty => {}
                 parser::StatementType::SQL => {}
+                parser::StatementType::Error => {}
             }
         }
         .boxed()
     }
 
-    async fn lint_datatype_decl(&mut self, decl: &parser::DatatypeDecl) -> Class {
+    async fn lint_datatype_decl(&mut self, decl: &parser::DatatypeDecl) -> Arc<Mutex<Class>> {
         let within = match &decl.class.within {
             Some((group, name)) => {
                 let within_name = GroupedName::new(group.clone(), name.clone());
@@ -814,33 +814,40 @@ impl<'a> LintState<'a> {
         if base.is_none() {
             self.diagnostic_error("Base Class not found".into(), decl.range);
         }
-        let mut new_class = Class::new(
+        let new_class_mut = Arc::new(Mutex::new(Class::new(
             decl.class.name.clone(),
             base_name,
             within,
             matches!(decl.class.scope, Some(tokens::ScopeModif::GLOBAL)),
-        );
+        )));
 
-        for var in &decl.variables {
-            new_class.instance_variables.insert(
-                (&var.variable.name).into(),
-                Mutex::new(Variable {
-                    variable_type: VariableType::Instance(var.clone()),
-                    data_type: (&var.variable.data_type).into(),
-                    // uses: Vec::new(),
-                })
-                .into(),
-            );
+        {
+            let mut new_class = new_class_mut.lock().await;
+
+            for var in &decl.variables {
+                new_class.instance_variables.insert(
+                    (&var.variable.name).into(),
+                    Mutex::new(Variable {
+                        variable_type: VariableType::Instance((
+                            Arc::downgrade(&new_class_mut),
+                            var.clone(),
+                        )),
+                        data_type: (&var.variable.data_type).into(),
+                        // uses: Vec::new(),
+                    })
+                    .into(),
+                );
+            }
+
+            for event in &decl.events {
+                new_class.events.insert(
+                    (&event.name).into(),
+                    Mutex::new(Event::new(event.clone(), Some(event.range), None)).into(),
+                );
+            }
         }
 
-        for event in &decl.events {
-            new_class.events.insert(
-                (&event.name).into(),
-                Mutex::new(Event::new(event.clone(), Some(event.range), None)).into(),
-            );
-        }
-
-        new_class
+        new_class_mut
     }
 
     fn require_class(&mut self, top_level_type: String, range: Range) -> Option<Arc<Mutex<Class>>> {
@@ -974,7 +981,7 @@ impl<'a> LintState<'a> {
                             TopLevelType::DatatypeDecl(datatype)
                                 =>
                             {
-                                let mut new_class = self.lint_datatype_decl(&datatype).await;
+                                let new_class_mut = self.lint_datatype_decl(&datatype).await;
 
                                 let class = match self
                                     .unwrap_file()
@@ -983,6 +990,8 @@ impl<'a> LintState<'a> {
                                     .cloned()
                                 {
                                     Some(class_arc) => {
+                                        let new_class = Arc::try_unwrap(new_class_mut).unwrap().into_inner();
+
                                         self.class = Some(class_arc.clone());
                                         let mut class = class_arc.lock().await;
                                         match class.usage.definition {
@@ -995,26 +1004,44 @@ impl<'a> LintState<'a> {
                                             }
                                             None => {
                                                 class.usage.definition = new_class.usage.definition;
-                                                swap(&mut class.events, &mut new_class.events);
-                                                swap(
-                                                    &mut class.instance_variables,
-                                                    &mut new_class.instance_variables,
-                                                );
-                                                swap(&mut class.base, &mut new_class.base);
-                                                swap(&mut class.within, &mut new_class.within);
+                                                // swap(&mut class.events, &mut new_class.events);
+                                                // swap(
+                                                //     &mut class.instance_variables,
+                                                //     &mut new_class.instance_variables,
+                                                // );
+                                                // swap(&mut class.base, &mut new_class.base);
+                                                // swap(&mut class.within, &mut new_class.within);
                                             }
                                         }
+
+                                        for (iname, var) in new_class.instance_variables {
+                                            if !class.instance_variables.contains_key(&iname) {
+                                                if let VariableType::Instance(inst) = &mut var.lock().await.variable_type {
+                                                    inst.0 = Arc::downgrade(&class_arc);
+                                                }
+                                                class.instance_variables.insert(iname, var);
+                                            }
+                                        }
+                                        for (iname, event) in new_class.events {
+                                            if !class.events.contains_key(&iname) {
+                                                class.events.insert(iname, event);
+                                            }
+                                        }
+
                                         class_arc.clone()
                                     }
                                     None => {
-                                        let iname = (&new_class.name).into();
-                                        if new_class.is_global {
-                                            self.diagnostic_warning("Global Classes should be Forward Declared, otherwise they might not be seen by other Files".into(), datatype.range);
+                                        {
+                                            let new_class = new_class_mut.lock().await;
+                                            let iname = (&new_class.name).into();
+                                            if new_class.is_global {
+                                                self.diagnostic_warning("Global Classes should be Forward Declared, otherwise they might not be seen by other Files".into(), datatype.range);
+                                            }
+                                            self.class = Some(new_class_mut.clone());
+                                            self.unwrap_file().classes.insert(iname, new_class_mut.clone());
                                         }
-                                        let new_class_arc: Arc<_> = Mutex::new(new_class).into();
-                                        self.class = Some(new_class_arc.clone());
-                                        self.unwrap_file().classes.insert(iname, new_class_arc.clone());
-                                        new_class_arc
+
+                                        new_class_mut
                                     }
                                 };
 
@@ -1029,7 +1056,10 @@ impl<'a> LintState<'a> {
                                         new_vars.insert(
                                             (&var.variable.name).into(),
                                             Mutex::new(Variable {
-                                                variable_type: VariableType::Instance(var.clone()),
+                                                variable_type: VariableType::Instance((
+                                                    self.class.as_ref().map_or(Weak::new(), |class| Arc::downgrade(&class)),
+                                                    var.clone(),
+                                                )),
                                                 data_type,
                                                 // uses: Vec::new(),
                                             })
@@ -1326,7 +1356,7 @@ impl Project {
         Ok(())
     }
 
-    pub fn load_builtin_classes(&mut self, path: PathBuf) -> anyhow::Result<()> {
+    pub async fn load_builtin_classes(&mut self, path: PathBuf) -> anyhow::Result<()> {
         let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
         let classes = powerbuilder_proto::Classes::decode(buf)?;
 
@@ -1353,87 +1383,99 @@ impl Project {
                 }) {
                 Some(_) => {
                     let iname = (&class.name).into();
-                    let mut new_class =
-                        Class::new(class.name, GroupedName::new(None, class.base), None, true);
+                    let new_class_mut = Arc::new(Mutex::new(Class::new(
+                        class.name,
+                        GroupedName::new(None, class.base),
+                        None,
+                        true,
+                    )));
+                    {
+                        let mut new_class = new_class_mut.lock().await;
 
-                    for var in class.variable {
-                        let iname = var.name.as_ref().unwrap().into();
-                        let parsed = parser::Variable {
-                            constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
-                            data_type: tokenize(&(var.r#type.unwrap() + "\n"))?
-                                .parse_type()
-                                .ok_or(anyhow!("Unexpected EOF"))?
-                                .value()
-                                .ok_or(anyhow!("Invalid Type"))?,
-                            name: var.name.unwrap(),
-                            initial_value: None,
-                            range: Default::default(),
-                        };
-                        new_class.instance_variables.insert(
-                            iname,
-                            Mutex::new(Variable {
-                                data_type: (&parsed.data_type).into(),
-                                variable_type: VariableType::Instance(parser::InstanceVariable {
-                                    variable: parsed,
-                                    access: parser::Access {
-                                        read: None,
-                                        write: None,
-                                    },
-                                }),
-                            })
-                            .into(),
-                        );
-                    }
-
-                    for func in class.function {
-                        let (returns, arguments, has_vararg) = Self::load_proto_function(&func)?;
-
-                        let iname = (&func.name).into();
-                        let new_func = Mutex::new(Function::new(
-                            parser::Function {
-                                returns,
-                                scope_modif: None,
-                                access: None,
-                                name: func.name,
-                                arguments,
-                                has_vararg,
+                        for var in class.variable {
+                            let iname = var.name.as_ref().unwrap().into();
+                            let parsed = parser::Variable {
+                                constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32
+                                    > 0,
+                                data_type: tokenize(&(var.r#type.unwrap() + "\n"))?
+                                    .parse_type()
+                                    .ok_or(anyhow!("Unexpected EOF"))?
+                                    .value()
+                                    .ok_or(anyhow!("Invalid Type"))?,
+                                name: var.name.unwrap(),
+                                initial_value: None,
                                 range: Default::default(),
-                            },
-                            None,
-                            None,
-                        ))
-                        .into();
-
-                        match new_class.functions.get_mut(&iname) {
-                            Some(funcs) => funcs.push(new_func),
-                            None => {
-                                new_class.functions.insert(iname, vec![new_func]);
-                            }
-                        };
-                    }
-
-                    for event in class.event {
-                        let (returns, arguments, has_vararg) = Self::load_proto_function(&event)?;
-                        if has_vararg {
-                            todo!();
+                            };
+                            new_class.instance_variables.insert(
+                                iname,
+                                Mutex::new(Variable {
+                                    data_type: (&parsed.data_type).into(),
+                                    variable_type: VariableType::Instance((
+                                        Arc::downgrade(&new_class_mut),
+                                        parser::InstanceVariable {
+                                            variable: parsed,
+                                            access: parser::Access {
+                                                read: None,
+                                                write: None,
+                                            },
+                                        },
+                                    )),
+                                })
+                                .into(),
+                            );
                         }
-                        new_class.events.insert(
-                            (&event.name).into(),
-                            Mutex::new(Event::new(
-                                parser::Event {
-                                    name: event.name,
+
+                        for func in class.function {
+                            let (returns, arguments, has_vararg) =
+                                Self::load_proto_function(&func)?;
+
+                            let iname = (&func.name).into();
+                            let new_func = Mutex::new(Function::new(
+                                parser::Function {
+                                    returns,
+                                    scope_modif: None,
+                                    access: None,
+                                    name: func.name,
+                                    arguments,
+                                    has_vararg,
                                     range: Default::default(),
-                                    event_type: parser::EventType::User(returns, arguments),
                                 },
                                 None,
                                 None,
                             ))
-                            .into(),
-                        );
+                            .into();
+
+                            match new_class.functions.get_mut(&iname) {
+                                Some(funcs) => funcs.push(new_func),
+                                None => {
+                                    new_class.functions.insert(iname, vec![new_func]);
+                                }
+                            };
+                        }
+
+                        for event in class.event {
+                            let (returns, arguments, has_vararg) =
+                                Self::load_proto_function(&event)?;
+                            if has_vararg {
+                                todo!();
+                            }
+                            new_class.events.insert(
+                                (&event.name).into(),
+                                Mutex::new(Event::new(
+                                    parser::Event {
+                                        name: event.name,
+                                        range: Default::default(),
+                                        event_type: parser::EventType::User(returns, arguments),
+                                    },
+                                    None,
+                                    None,
+                                ))
+                                .into(),
+                            );
+                        }
                     }
 
-                    self.builtin_classes
-                        .insert(iname, Mutex::new(new_class).into());
+                    self.builtin_classes.insert(iname, new_class_mut);
                 }
                 None => skipped.push_back(class),
             }

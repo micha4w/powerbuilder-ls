@@ -380,7 +380,6 @@ pub enum StatementType {
     Exit,
     Continue,
     SQL,
-    Empty,
     Error,
 }
 

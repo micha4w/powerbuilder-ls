@@ -4,7 +4,7 @@ use std::{
     mem,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use futures::{
@@ -17,7 +17,7 @@ use crate::{
     ls::add_file,
     parser::{
         parser_types as parser, tokenize_file,
-        tokenizer_types::{self as tokens, Range},
+        tokenizer_types::{self as tokens, Position, Range},
     },
 };
 
@@ -242,7 +242,7 @@ pub enum VariableType {
     Local(parser::Variable),
     Scoped(parser::ScopedVariable),
     Argument(parser::Argument),
-    Instance(parser::InstanceVariable),
+    Instance((Weak<Mutex<Class>>, parser::InstanceVariable)),
 }
 
 #[derive(Clone, Debug)]
@@ -259,7 +259,7 @@ impl Variable {
             VariableType::Local(local) => &local,
             VariableType::Scoped(scoped) => &scoped.variable,
             VariableType::Argument(arg) => &arg.variable,
-            VariableType::Instance(instance) => &instance.variable,
+            VariableType::Instance((_, instance)) => &instance.variable,
         }
     }
 
@@ -284,9 +284,9 @@ impl Variable {
         }
     }
 
-    pub fn unwrap_instance(&self) -> &parser::InstanceVariable {
+    pub fn unwrap_instance(&self) -> (&Weak<Mutex<Class>>, &parser::InstanceVariable) {
         match &self.variable_type {
-            VariableType::Instance(var) => &var,
+            VariableType::Instance((class, var)) => (&class, &var),
             _ => panic!("unwrap_instance failed"),
         }
     }
@@ -499,6 +499,55 @@ impl Class {
         }
     }
 
+    pub async fn get_accessible_variables(
+        &self,
+        state: &LintState<'_>,
+        access: &tokens::AccessType,
+        write: bool,
+    ) -> (
+        Vec<Arc<Mutex<Variable>>>,
+        Vec<(Arc<Mutex<Variable>>, &'static str)>,
+    ) {
+        let mut variables = Vec::new();
+        let mut err_variables = Vec::new();
+
+        let mut class_arc_holder;
+        let mut class_holder = None;
+        let mut class = self;
+        let mut strictness = access.strictness();
+        loop {
+            for var in class.instance_variables.values() {
+                let access = var.lock().await.unwrap_instance().1.access.clone();
+                if write
+                    .then_some(&access.write)
+                    .unwrap_or(&access.read)
+                    .map_or(0, |acc| acc.strictness())
+                    <= strictness
+                {
+                    variables.push(var.clone());
+                } else {
+                    err_variables.push((var.clone(), "Cannot access Private Variable"));
+                }
+            }
+
+            match state.find_class(&class.base).await {
+                Some(Complex::Class(cls)) => {
+                    drop(class_holder);
+                    class_arc_holder = cls.clone();
+                    class_holder = Some(class_arc_holder.lock().await);
+                    class = class_holder.as_ref().unwrap();
+                }
+                Some(Complex::Enum(_)) | None => break,
+            }
+
+            if strictness < tokens::AccessType::PRIVATE.strictness() {
+                strictness = tokens::AccessType::PROTECTED.strictness();
+            }
+        }
+
+        (variables, err_variables)
+    }
+
     pub async fn find_variable(
         &self,
         state: &LintState<'_>,
@@ -512,7 +561,7 @@ impl Class {
         let mut strictness = access.strictness();
         loop {
             if let Some(found) = class.instance_variables.get(&(&variable.name).into()) {
-                let access = &found.lock().await.unwrap_instance().access.clone();
+                let access = &found.lock().await.unwrap_instance().1.access.clone();
                 if write
                     .then_some(&access.write)
                     .unwrap_or(&access.read)
@@ -697,6 +746,62 @@ impl<'a> LintState<'a> {
     //         None => None,
     //     }
     // }
+
+    pub async fn get_accessible_variables(
+        &self,
+        local_before: &Position,
+        write: bool,
+    ) -> (
+        Vec<Arc<Mutex<Variable>>>,
+        Vec<(Arc<Mutex<Variable>>, &'static str)>,
+    ) {
+        let mut variables = Vec::new();
+        let mut err_variables = Vec::new();
+
+        for (_, var) in &self.variables {
+            if &var.lock().await.parsed().range.end < local_before {
+                variables.push(var.clone());
+            } else {
+                err_variables.push((var.clone(), "Variable has not been defined yet"));
+            }
+        }
+
+        if let Some(current_class) = &self.class {
+            let (vars, err_vars) = current_class
+                .lock()
+                .await
+                .get_accessible_variables(self, &tokens::AccessType::PRIVATE, write)
+                .await;
+
+            variables.extend(vars);
+            err_variables.extend(err_vars);
+        }
+
+        if let Some(current_file) = &self.file {
+            for (_, var) in &current_file.variables {
+                variables.push(var.clone());
+            }
+        }
+
+        let proj = self.proj.read().await;
+        for (path, _file_lock) in &proj.files {
+            match &self.file {
+                Some(file) if file.path == *path => continue,
+                _ => {}
+            }
+
+            let file = _file_lock.read().await;
+
+            for (_, var) in &file.variables {
+                match var.lock().await.unwrap_scoped().scope {
+                    tokens::ScopeModif::GLOBAL => variables.push(var.clone()),
+                    tokens::ScopeModif::SHARED => err_variables.push((var.clone(), "Variable is not defined as Global")),
+                }
+            }
+        }
+
+        (variables, err_variables)
+    }
 
     pub async fn find_variable(
         &self,
@@ -1218,7 +1323,7 @@ pub struct Project {
 // Use Arc<RwLock<Project>> and only write when necessary and only very short!!!
 
 impl Project {
-    pub fn new(
+    pub async fn new(
         enums_file: PathBuf,
         classes_file: PathBuf,
         functions_file: PathBuf,
@@ -1241,7 +1346,7 @@ impl Project {
         };
 
         proj.load_enums(enums_file)?;
-        proj.load_builtin_classes(classes_file)?;
+        proj.load_builtin_classes(classes_file).await?;
         proj.load_builtin_functions(functions_file)?;
 
         Ok(proj)

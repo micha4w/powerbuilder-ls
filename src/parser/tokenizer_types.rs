@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, u32};
 
 use strum::Display;
 use strum_macros::EnumString;
@@ -7,6 +7,15 @@ use strum_macros::EnumString;
 pub struct Position {
     pub line: u32,
     pub column: u32,
+}
+
+impl Position {
+    fn end() -> Position {
+        Position {
+            line: u32::MAX,
+            column: u32::MAX,
+        }
+    }
 }
 
 impl fmt::Display for Position {

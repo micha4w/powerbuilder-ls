@@ -1,10 +1,11 @@
 mod ls;
 mod parser;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ls::ls_types;
+use ls::ls_types::{self, LintState};
 use ls::ls_types::{LintProgress, Project};
 use tokio::sync::RwLock;
 
@@ -22,7 +23,7 @@ struct PowerBuilderLSCreator {
 }
 
 impl PowerBuilderLSCreator {
-    fn new(system_files_root: PathBuf) -> anyhow::Result<Self> {
+    async fn new(system_files_root: PathBuf) -> anyhow::Result<Self> {
         // let (tx, rx) = mpsc::channel::<notify::Event>(1);
         // let watcher =
         //     notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
@@ -34,11 +35,14 @@ impl PowerBuilderLSCreator {
         //         eprintln!("File watcher failed to watch: {:?}", err);
         //     })?;
 
-        let proj = Arc::new(RwLock::new(Project::new(
-            system_files_root.join("enums.pb"),
-            system_files_root.join("classes.pb"),
-            system_files_root.join("system_functions.pb"),
-        )?));
+        let proj = Arc::new(RwLock::new(
+            Project::new(
+                system_files_root.join("enums.pb"),
+                system_files_root.join("classes.pb"),
+                system_files_root.join("system_functions.pb"),
+            )
+            .await?,
+        ));
 
         Ok(Self {
             proj,
@@ -294,17 +298,15 @@ impl LanguageServer for PowerBuilderLS {
         let Some(file_lock) = proj.files.get(&path) else {
             return Ok(Some(CompletionResponse::Array(items)));
         };
-        let file = file_lock.read().await;
+        let mut file = file_lock.write().await;
         let top_levels = match &file.top_levels {
             ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
             _ => return Ok(Some(CompletionResponse::Array(items))),
         };
 
         let pos = &params.text_document_position.position.into();
-        for (range, top_level_type) in top_levels {
-            if !range.contains(pos) {
-                continue;
-            }
+        if let Some((_, top_level_type)) = top_levels.iter().find(|(range, _)| range.contains(pos))
+        {
             match top_level_type {
                 ls_types::TopLevelType::ForwardDecl(_) => todo!(),
                 ls_types::TopLevelType::ScopedVariableDecl(_) => todo!(),
@@ -317,55 +319,82 @@ impl LanguageServer for PowerBuilderLS {
                     (_parsed, _statements),
                     (class_mut, function),
                 )) => {
-                    let mut add_variable = |var: &ls_types::Variable| {
+                    async fn add_variable(
+                        items: &mut Vec<CompletionItem>,
+                        var: &ls_types::Variable,
+                        err: Option<String>,
+                    ) {
                         let name = var.parsed().name.clone();
                         let data_type = var.data_type.to_string();
                         let variable_type = match &var.variable_type {
-                            ls_types::VariableType::Local(_) => "Local".into(),
-                            ls_types::VariableType::Scoped(scoped_variable) => scoped_variable.scope.to_string(),
+                            ls_types::VariableType::Local(_) => "Local Variable".into(),
+                            ls_types::VariableType::Scoped(scoped_variable) => {
+                                match scoped_variable.scope {
+                                    parser::tokenizer_types::ScopeModif::GLOBAL => {
+                                        "Global Variable".into()
+                                    }
+                                    parser::tokenizer_types::ScopeModif::SHARED => {
+                                        "Shared Variable".into()
+                                    }
+                                }
+                            }
                             ls_types::VariableType::Argument(_) => "Argument".into(),
-                            ls_types::VariableType::Instance(_) => "Instance".into(),
+                            ls_types::VariableType::Instance((class_weak, _)) => {
+                                match class_weak.upgrade() {
+                                    Some(class) => {
+                                        format!("Instance variable of {}", class.lock().await.name)
+                                    }
+                                    None => "Instance Variable".into(),
+                                }
+                            }
                         };
 
-                        let detail = format!("{} {} : {} Variable", name, data_type, variable_type);
+                        let unavailable = err.as_ref().map(|_| true);
+
+                        let detail = format!("{} {} : {}", name, data_type, variable_type);
 
                         items.push(CompletionItem {
                             label: name,
                             label_details: Some(CompletionItemLabelDetails {
-                                detail: Some(data_type),
-                                description: None,
+                                detail: None,
+                                description: Some(data_type),
                             }),
                             detail: Some(detail),
+                            deprecated: unavailable,
+                            documentation: err.map(Documentation::String),
                             kind: Some(CompletionItemKind::VARIABLE),
                             ..Default::default()
                         });
+                    }
+
+                    let mut state = LintState {
+                        proj: self.m.proj.clone(),
+                        class: class_mut.clone(),
+                        variables: function
+                            .lock()
+                            .await
+                            .definition
+                            .as_ref()
+                            .map_or(HashMap::new(), |def| def.variables.clone()),
+                        return_type: ls_types::DataType::Void,
+                        file: None,
                     };
+                    state.file = Some(&mut file);
 
-                    if let Some(definition) = &function.lock().await.definition {
-                        for (_, var_lock) in &definition.variables {
-                            let var = var_lock.lock().await;
-                            if &var.parsed().range.end < pos {
-                                add_variable(&var);
-                            }
-                        }
+                    let (variables, err_variables) =
+                        state.get_accessible_variables(pos, false).await;
+
+                    for var in variables {
+                        add_variable(&mut items, &&var.lock().await, None).await;
                     }
-
-                    if let Some(class_mut) = class_mut {
-                        for (_, var_lock) in &class_mut.lock().await.instance_variables {
-                            let var = var_lock.lock().await;
-                            add_variable(&var);
-                        }
-                    }
-
-                    for var_lock in file.variables.values() {
-                        let var = var_lock.lock().await;
-                        add_variable(&var);
+                    for (var, err) in err_variables {
+                        add_variable(&mut items, &&var.lock().await, Some(err.into())).await;
                     }
                 }
                 ls_types::TopLevelType::EventBody(_) => todo!(),
                 ls_types::TopLevelType::OnBody(_) => todo!(),
-            }
-        }
+            };
+        };
 
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -378,7 +407,7 @@ impl LanguageServer for PowerBuilderLS {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let creator =
-        PowerBuilderLSCreator::new("/home/micha4w/Code/Rust/powerbuilder-ls/system".into())?;
+        PowerBuilderLSCreator::new("/home/micha4w/Code/Rust/powerbuilder-ls/system".into()).await?;
 
     // ls::add_file(
     //     creator.proj.clone(),
