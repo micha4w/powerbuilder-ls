@@ -31,7 +31,7 @@ pub async fn add_file(
         match current_progress.next() {
             Some(progress) => {
                 let mut file = _file_lock.write().await;
-                LintState::new(proj.clone(), Some(&mut file))
+                LintState::new(proj.clone(), ls_types::MaybeMut::Mut(&mut file))
                     .lint_file()
                     .await;
                 current_progress = progress;

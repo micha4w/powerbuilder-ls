@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     backtrace::Backtrace,
     collections::HashMap,
@@ -7,8 +8,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
+use dashmap::mapref::one::Ref;
 use futures::{
-    future::{self, BoxFuture},
+    future::{self, BoxFuture, Either},
     FutureExt,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -16,10 +18,49 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     ls::add_file,
     parser::{
-        parser_types as parser, tokenize_file,
+        parser_types::{self as parser, EitherOr, Expression, Statement},
+        tokenize_file,
+        tokenizer::Token,
         tokenizer_types::{self as tokens, Position, Range},
     },
 };
+
+pub enum MaybeRef<'a, T> {
+    Ref(&'a T),
+    No(T),
+}
+
+impl<T> AsRef<T> for MaybeRef<'_, T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            MaybeRef::Ref(t) => t,
+            MaybeRef::No(t) => t,
+        }
+    }
+}
+
+pub enum MaybeMut<'a, T> {
+    Mut(&'a mut T),
+    No(&'a T),
+}
+
+impl<T> MaybeMut<'_, T> {
+    pub fn unwrap_mut(&mut self) -> &mut T {
+        match self {
+            MaybeMut::Mut(t) => t,
+            MaybeMut::No(_) => panic!("MaybeMut unwrapped when it wasn't Mutable"),
+        }
+    }
+}
+
+impl<T> AsRef<T> for MaybeMut<'_, T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            MaybeMut::Mut(t) => t,
+            MaybeMut::No(t) => t,
+        }
+    }
+}
 
 #[derive(Eq, PartialEq, Hash, Debug, Clone)]
 pub struct IString {
@@ -44,13 +85,28 @@ impl Deref for IString {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupedName {
-    group: Option<String>,
-    name: String,
+    pub group: Option<String>,
+    pub name: String,
 }
 
 impl From<(Option<String>, String)> for GroupedName {
     fn from((group, name): (Option<String>, String)) -> Self {
         Self { group, name }
+    }
+}
+
+impl From<&(Option<Token>, Token)> for GroupedName {
+    fn from((group, name): &(Option<Token>, Token)) -> Self {
+        (group, name).into()
+    }
+}
+
+impl From<(&Option<Token>, &Token)> for GroupedName {
+    fn from((group, name): (&Option<Token>, &Token)) -> Self {
+        Self::new(
+            group.as_ref().map(|g| g.content.clone()),
+            name.content.clone(),
+        )
     }
 }
 
@@ -152,18 +208,18 @@ impl From<&parser::DataTypeType> for DataType {
     }
 }
 
-impl From<&tokens::Literal> for DataType {
-    fn from(src: &tokens::Literal) -> DataType {
-        match src {
-            tokens::Literal::NUMBER => DataType::Int,
-            tokens::Literal::DATE => DataType::Date,
-            tokens::Literal::TIME => DataType::Time,
-            tokens::Literal::STRING => DataType::String,
-            tokens::Literal::BOOLEAN => DataType::Boolean,
-            tokens::Literal::ENUM => DataType::Any, // TODO scrape https://docs.appeon.com/pb2022/powerscript_reference
-        }
-    }
-}
+// impl From<&tokens::Literal> for DataType {
+//     fn from(src: &tokens::Literal) -> DataType {
+//         match src {
+//             tokens::Literal::NUMBER => DataType::Int,
+//             tokens::Literal::DATE => DataType::Date,
+//             tokens::Literal::TIME => DataType::Time,
+//             tokens::Literal::STRING => DataType::String,
+//             tokens::Literal::BOOLEAN => DataType::Boolean,
+//             tokens::Literal::ENUM => DataType::Any, // TODO scrape https://docs.appeon.com/pb2022/powerscript_reference
+//         }
+//     }
+// }
 
 impl ToString for DataType {
     fn to_string(&self) -> String {
@@ -381,7 +437,7 @@ impl FunctionDefinition {
                 .iter()
                 .map(|arg| {
                     (
-                        (&arg.variable.name).into(),
+                        (&arg.variable.name.content).into(),
                         Mutex::new(Variable {
                             variable_type: VariableType::Argument(arg.clone()),
                             data_type: (&arg.variable.data_type).into(),
@@ -412,13 +468,14 @@ impl Function {
         parsed: parser::Function,
         declaration: Option<Range>,
         definition: Option<Range>,
+        help: Option<String>,
     ) -> Self {
         Function {
             declaration,
             definition: definition.map(|range| FunctionDefinition::new(&parsed.arguments, range)),
 
             // uses: Vec::new(),
-            help: None,
+            help,
 
             returns: parsed.returns.as_ref().into(),
             parsed,
@@ -431,7 +488,7 @@ impl Function {
 
     pub async fn conflicts(&self, other: &Function) -> bool {
         self.parsed.arguments.len() == other.parsed.arguments.len()
-            && self.parsed.has_vararg == other.parsed.has_vararg
+            && self.parsed.vararg.is_some() == other.parsed.vararg.is_some()
             && {
                 self.parsed
                     .arguments
@@ -505,8 +562,8 @@ impl Class {
         access: &tokens::AccessType,
         write: bool,
     ) -> (
-        Vec<Arc<Mutex<Variable>>>,
-        Vec<(Arc<Mutex<Variable>>, &'static str)>,
+        Vec<(IString, Arc<Mutex<Variable>>)>,
+        Vec<(IString, Arc<Mutex<Variable>>, &'static str)>,
     ) {
         let mut variables = Vec::new();
         let mut err_variables = Vec::new();
@@ -516,7 +573,7 @@ impl Class {
         let mut class = self;
         let mut strictness = access.strictness();
         loop {
-            for var in class.instance_variables.values() {
+            for (name, var) in &class.instance_variables {
                 let access = var.lock().await.unwrap_instance().1.access.clone();
                 if write
                     .then_some(&access.write)
@@ -524,9 +581,13 @@ impl Class {
                     .map_or(0, |acc| acc.strictness())
                     <= strictness
                 {
-                    variables.push(var.clone());
+                    variables.push((name.clone(), var.clone()));
                 } else {
-                    err_variables.push((var.clone(), "Cannot access Private Variable"));
+                    err_variables.push((
+                        name.clone(),
+                        var.clone(),
+                        "Cannot access Private Variable",
+                    ));
                 }
             }
 
@@ -560,7 +621,10 @@ impl Class {
         let mut class = self;
         let mut strictness = access.strictness();
         loop {
-            if let Some(found) = class.instance_variables.get(&(&variable.name).into()) {
+            if let Some(found) = class
+                .instance_variables
+                .get(&(&variable.name.content).into())
+            {
                 let access = &found.lock().await.unwrap_instance().1.access.clone();
                 if write
                     .then_some(&access.write)
@@ -598,7 +662,7 @@ impl Class {
     // }
 
     pub async fn find_conflicting_event(&self, event: &Event) -> Option<Arc<Mutex<Event>>> {
-        if let Some(ev) = self.events.get(&(&event.parsed.name).into()) {
+        if let Some(ev) = self.events.get(&(&event.parsed.name.content).into()) {
             ev.lock().await.conflicts(event).await.then_some(ev.clone())
         } else {
             None
@@ -622,7 +686,7 @@ impl Class {
         function: &Function,
     ) -> Option<Arc<Mutex<Function>>> {
         for functions in [&self.functions, &self.external_functions] {
-            if let Some(funcs) = functions.get(&(&function.parsed.name).into()) {
+            if let Some(funcs) = functions.get(&(&function.parsed.name.content).into()) {
                 for func in funcs {
                     if func.lock().await.conflicts(function).await {
                         return Some(func.clone());
@@ -673,7 +737,7 @@ pub struct Usage {
 
 pub struct LintState<'a> {
     pub proj: Arc<RwLock<Project>>,
-    pub file: Option<&'a mut File>,
+    pub file: MaybeMut<'a, File>,
     pub class: Option<Arc<Mutex<Class>>>,
 
     pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
@@ -681,7 +745,7 @@ pub struct LintState<'a> {
 }
 
 impl<'a> LintState<'a> {
-    pub fn new(proj: Arc<RwLock<Project>>, file: Option<&'a mut File>) -> Self {
+    pub fn new(proj: Arc<RwLock<Project>>, file: MaybeMut<'a, File>) -> Self {
         Self {
             proj,
             file,
@@ -692,9 +756,9 @@ impl<'a> LintState<'a> {
     }
 
     pub fn push_diagnostic(&mut self, mut diagnostic: parser::Diagnostic) {
-        if let Some(file) = &mut self.file {
+        if let MaybeMut::Mut(file) = &mut self.file {
             diagnostic.message += format!("\n {}", Backtrace::capture()).as_str();
-            (*file).diagnostics.push(diagnostic);
+            file.diagnostics.push(diagnostic);
         }
     }
 
@@ -727,13 +791,6 @@ impl<'a> LintState<'a> {
         });
     }
 
-    pub fn unwrap_file(&mut self) -> &mut File {
-        match &mut self.file {
-            Some(file) => *file,
-            None => panic!("unwrap_file failed"),
-        }
-    }
-
     // pub async fn get_current_class(&self) -> Option<Arc<Class>> {
     //     match &self.class {
     //         Some(current) => Some(
@@ -747,22 +804,87 @@ impl<'a> LintState<'a> {
     //     }
     // }
 
+    pub async fn get_accessible_data_types(
+        &self,
+    ) -> (Vec<DataType>, Vec<(DataType, &'static str)>) {
+        let mut err_data_types = Vec::new();
+        let mut data_types = vec![
+            DataType::Any,
+            DataType::Blob,
+            DataType::Boolean,
+            DataType::Byte,
+            DataType::Char,
+            DataType::Date,
+            DataType::Datetime,
+            DataType::Decimal(None),
+            DataType::Double,
+            DataType::Int,
+            DataType::Long,
+            DataType::Longlong,
+            DataType::Longptr,
+            DataType::Real,
+            DataType::String,
+            DataType::Time,
+            DataType::Uint,
+            DataType::Ulong,
+        ];
+        // .into_iter()
+        // .map(|dt| Arc::new(Mutex::new(dt)))
+        // .collect::<Vec<_>>();
+
+        // Complex(GroupedName),
+
+        for class in self.file.as_ref().classes.values() {
+            data_types.push(DataType::Complex(GroupedName::new(
+                None,
+                class.lock().await.name.clone(),
+            )));
+        }
+
+        let proj = self.proj.read().await;
+        for (path, _file_lock) in &proj.files {
+            if self.file.as_ref().path == *path {
+                continue;
+            }
+
+            let file = _file_lock.read().await;
+
+            for class_mut in file.classes.values() {
+                let class = class_mut.lock().await;
+                let complex = DataType::Complex(GroupedName::new(None, class.name.clone()));
+                if class.is_global {
+                    data_types.push(complex);
+                } else {
+                    err_data_types.push((complex, "Cannot access non Global Class"));
+                }
+            }
+        }
+
+        // TODO arrays?
+
+        (data_types, err_data_types)
+    }
+
     pub async fn get_accessible_variables(
         &self,
         local_before: &Position,
         write: bool,
     ) -> (
-        Vec<Arc<Mutex<Variable>>>,
-        Vec<(Arc<Mutex<Variable>>, &'static str)>,
+        Vec<(IString, Arc<Mutex<Variable>>)>,
+        Vec<(IString, Arc<Mutex<Variable>>, &'static str)>,
     ) {
         let mut variables = Vec::new();
         let mut err_variables = Vec::new();
 
-        for (_, var) in &self.variables {
+        for (name, var) in &self.variables {
             if &var.lock().await.parsed().range.end < local_before {
-                variables.push(var.clone());
+                variables.push((name.clone(), var.clone()));
             } else {
-                err_variables.push((var.clone(), "Variable has not been defined yet"));
+                err_variables.push((
+                    name.clone(),
+                    var.clone(),
+                    "Variable has not been defined yet",
+                ));
             }
         }
 
@@ -777,25 +899,26 @@ impl<'a> LintState<'a> {
             err_variables.extend(err_vars);
         }
 
-        if let Some(current_file) = &self.file {
-            for (_, var) in &current_file.variables {
-                variables.push(var.clone());
-            }
+        for (name, var) in &self.file.as_ref().variables {
+            variables.push((name.clone(), var.clone()));
         }
 
         let proj = self.proj.read().await;
         for (path, _file_lock) in &proj.files {
-            match &self.file {
-                Some(file) if file.path == *path => continue,
-                _ => {}
+            if self.file.as_ref().path == *path {
+                continue;
             }
 
             let file = _file_lock.read().await;
 
-            for (_, var) in &file.variables {
+            for (name, var) in &file.variables {
                 match var.lock().await.unwrap_scoped().scope {
-                    tokens::ScopeModif::GLOBAL => variables.push(var.clone()),
-                    tokens::ScopeModif::SHARED => err_variables.push((var.clone(), "Variable is not defined as Global")),
+                    tokens::ScopeModif::GLOBAL => variables.push((name.clone(), var.clone())),
+                    tokens::ScopeModif::SHARED => err_variables.push((
+                        name.clone(),
+                        var.clone(),
+                        "Variable is not defined as Global",
+                    )),
                 }
             }
         }
@@ -808,7 +931,7 @@ impl<'a> LintState<'a> {
         variable: &parser::VariableAccess,
         write: bool,
     ) -> Option<Arc<Mutex<Variable>>> {
-        let iname = (&variable.name).into();
+        let iname = (&variable.name.content).into();
         if let Some(var) = self.variables.get(&iname) {
             return Some(var.clone());
         };
@@ -824,22 +947,24 @@ impl<'a> LintState<'a> {
             }
         }
 
-        if let Some(current_file) = &self.file {
-            if let Some(found) = current_file.variables.get(&(&variable.name).into()) {
-                return Some(found.clone());
-            }
+        if let Some(found) = self
+            .file
+            .as_ref()
+            .variables
+            .get(&(&variable.name.content).into())
+        {
+            return Some(found.clone());
         }
 
         let proj = self.proj.read().await;
         for (path, _file_lock) in &proj.files {
-            match &self.file {
-                Some(file) if file.path == *path => continue,
-                _ => {}
+            if self.file.as_ref().path == *path {
+                continue;
             }
 
             let file = _file_lock.read().await;
 
-            if let Some(found) = file.variables.get(&(&variable.name).into()) {
+            if let Some(found) = file.variables.get(&(&variable.name.content).into()) {
                 // TODO: do error handling if not is_global
                 return (found.lock().await.unwrap_scoped().scope == tokens::ScopeModif::GLOBAL)
                     .then_some(found.clone());
@@ -884,9 +1009,8 @@ impl<'a> LintState<'a> {
 
         let proj = self.proj.read().await;
         for (path, _file_lock) in &proj.files {
-            match &self.file {
-                Some(file) if file.path == *path => continue,
-                _ => {}
+            if self.file.as_ref().path == *path {
+                continue;
             }
 
             let file = _file_lock.read().await;
@@ -926,12 +1050,10 @@ impl<'a> LintState<'a> {
     pub async fn find_class(&self, grouped_name: &GroupedName) -> Option<Complex> {
         let GroupedName { group, name } = grouped_name;
 
-        if let Some(current_file) = &self.file {
-            if let Some(class_arc) = current_file.classes.get(&name.into()) {
-                let class = class_arc.lock().await;
-                if group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref() {
-                    return Some(Complex::Class(class_arc.clone()));
-                }
+        if let Some(class_arc) = self.file.as_ref().classes.get(&name.into()) {
+            let class = class_arc.lock().await;
+            if group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref() {
+                return Some(Complex::Class(class_arc.clone()));
             }
         }
 
@@ -956,9 +1078,8 @@ impl<'a> LintState<'a> {
         }
 
         for (path, _file_lock) in &proj.files {
-            match &self.file {
-                Some(file) if file.path == *path => continue,
-                _ => {}
+            if self.file.as_ref().path == *path {
+                continue;
             }
 
             let file = _file_lock.read().await;
@@ -1013,7 +1134,7 @@ impl<'a> LintState<'a> {
                 .map(|access| access.strictness())
                 .unwrap_or(0)
             && (func.parsed.arguments.len() == arguments.len()
-                || (func.parsed.arguments.len() < arguments.len() && func.parsed.has_vararg))
+                || (func.parsed.arguments.len() < arguments.len() && func.parsed.vararg.is_some()))
             && future::join_all(
                 func.parsed
                     .arguments
@@ -1243,6 +1364,117 @@ where
     FunctionBody(<FunctionBody as IndexableProgress<Idx>>::T),
     EventBody(<EventBody as IndexableProgress<Idx>>::T),
     OnBody(<OnBody as IndexableProgress<Idx>>::T),
+}
+
+impl TopLevelType<LintProgressComplete> {
+    pub fn get_class(&self) -> Option<&Arc<Mutex<Class>>> {
+        match self {
+            TopLevelType::ForwardDecl(_)
+            | TopLevelType::ScopedVariableDecl(_)
+            | TopLevelType::ScopedVariablesDecl(_) => None,
+
+            TopLevelType::DatatypeDecl((_, class)) => Some(&class),
+            TopLevelType::TypeVariablesDecl((_, (class, _)))
+            | TopLevelType::FunctionsForwardDecl((_, (class, _)))
+            | TopLevelType::ExternalFunctions((_, (class, _)))
+            | TopLevelType::FunctionBody((_, (class, _)))
+            | TopLevelType::EventBody((_, (class, _)))
+            | TopLevelType::OnBody((_, (class,))) => class.as_ref(),
+        }
+    }
+
+    pub async fn get_variables(&self) -> Option<HashMap<IString, Arc<Mutex<Variable>>>> {
+        match self {
+            TopLevelType::ForwardDecl(_) => None,
+            TopLevelType::ScopedVariableDecl(_) => None,
+            TopLevelType::DatatypeDecl(_) => None,
+            TopLevelType::FunctionsForwardDecl(_) => None,
+            TopLevelType::ExternalFunctions(_) => None,
+
+            TopLevelType::OnBody(_) => None, // TODO
+            TopLevelType::TypeVariablesDecl((_, (_, vars)))
+            | TopLevelType::ScopedVariablesDecl((_, vars)) => Some(vars.clone()),
+            TopLevelType::FunctionBody((_, (_, func))) => func
+                .lock()
+                .await
+                .definition
+                .as_ref()
+                .map(|def| def.variables.clone()),
+            TopLevelType::EventBody((_, (_, event))) => event
+                .lock()
+                .await
+                .definition
+                .as_ref()
+                .map(|def| def.variables.clone()),
+        }
+    }
+
+    pub fn get_statement_at(&self, pos: &Position) -> Option<&Statement> {
+        match self {
+            TopLevelType::ForwardDecl(_)
+            | TopLevelType::ScopedVariableDecl(_)
+            | TopLevelType::ScopedVariablesDecl(_)
+            | TopLevelType::DatatypeDecl(_)
+            | TopLevelType::TypeVariablesDecl(_)
+            | TopLevelType::FunctionsForwardDecl(_)
+            | TopLevelType::ExternalFunctions(_) => None,
+
+            TopLevelType::FunctionBody(((_, statements), _))
+            | TopLevelType::EventBody(((_, statements), _))
+            | TopLevelType::OnBody(((_, statements), _)) => statements
+                .iter()
+                .find_map(|statement| statement.get_statement_at(pos)),
+        }
+    }
+
+    pub fn get_expression_at(
+        &self,
+        pos: &Position,
+    ) -> Option<EitherOr<&Expression, &parser::LValue>> {
+        macro_rules! ret_if_contains {
+            ( $val:expr ) => {
+                if let Some(val) = $val.get_expression_at(pos) {
+                    return Some(val);
+                }
+            };
+        }
+        macro_rules! ret_if_one_contains {
+            ( $vec:expr ) => {
+                for val in $vec {
+                    ret_if_contains!(val);
+                }
+            };
+        }
+
+        match &self {
+            TopLevelType::ForwardDecl(..)
+            | TopLevelType::TypeVariablesDecl(..)
+            | TopLevelType::FunctionsForwardDecl(..)
+            | TopLevelType::ExternalFunctions(..)
+            | TopLevelType::FunctionBody(..)
+            | TopLevelType::EventBody(..)
+            | TopLevelType::OnBody(..) => {}
+
+            TopLevelType::ScopedVariableDecl((var, _)) => {
+                ret_if_one_contains!(var.variable.initial_value.iter());
+            }
+            TopLevelType::ScopedVariablesDecl((vars, _)) => ret_if_one_contains!(vars
+                .iter()
+                .filter_map(|var| var.variable.initial_value.as_ref())),
+            TopLevelType::DatatypeDecl((decl, _)) => ret_if_one_contains!(decl
+                .variables
+                .iter()
+                .filter_map(|var| var.variable.initial_value.as_ref())),
+        }
+
+        if let Some(statement) = &self.get_statement_at(pos) {
+            if let Some(expression) = statement.get_expression_at(pos) {
+                return Some(expression);
+            };
+        };
+
+        None
+    }
 }
 
 #[derive(PartialEq, PartialOrd, Clone, Debug)]

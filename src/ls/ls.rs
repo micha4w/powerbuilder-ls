@@ -10,6 +10,7 @@ use prost::{bytes::Bytes, Message};
 use tokio::sync::Mutex;
 
 use crate::parser::parser_types::EOFPossibleResultT as _;
+use crate::parser::tokenizer::{Token, TokenType};
 use crate::parser::{
     // parser::*,
     parser_types as parser,
@@ -25,13 +26,34 @@ impl<'a> LintState<'a> {
                 var.lock().await.data_type.clone()
             }
             None => {
-                self.diagnostic_error("Variable not found".into(), access.range);
+                self.diagnostic_error("Variable not found".into(), access.name.range);
                 DataType::Unknown
             }
         }
     }
 
-    fn lint_lvalue<'b>(&'b mut self, lvalue: &'b parser::LValue) -> BoxFuture<'b, DataType> {
+    async fn lint_literal(&mut self, literal: &parser::Literal) -> DataType {
+        match literal.literal_type {
+            tokens::Literal::NUMBER => DataType::Int,
+            tokens::Literal::DATE => DataType::Date,
+            tokens::Literal::TIME => DataType::Time,
+            tokens::Literal::STRING => DataType::String,
+            tokens::Literal::BOOLEAN => DataType::Boolean,
+            tokens::Literal::ENUM => {
+                for enumerated_mut in self.proj.read().await.builtin_enums.values() {
+                    let enumerated = enumerated_mut.lock().await;
+                    if enumerated.values.contains(&(literal.content.clone() + "!")) {
+                        return DataType::Complex(GroupedName::new(None, enumerated.name.clone()));
+                    }
+                }
+
+                self.diagnostic_error("Unknown Enum Literal".into(), literal.range);
+                DataType::Unknown
+            }
+        }
+    }
+
+    pub fn lint_lvalue<'b>(&'b mut self, lvalue: &'b parser::LValue) -> BoxFuture<'b, DataType> {
         async move {
             match &lvalue.lvalue_type {
                 parser::LValueType::This => DataType::Complex(GroupedName::new(
@@ -84,10 +106,10 @@ impl<'a> LintState<'a> {
                     // }
                     let types = self.lint_expressions(&call.arguments).await;
 
-                    let ret = if call.event {
+                    let ret = if call.event.is_some() {
                         let class = self.class.as_ref().unwrap();
                         let event = self
-                            .find_callable_event_in_class(&class, &call.name, &types)
+                            .find_callable_event_in_class(&class, &call.name.content, &types)
                             .await;
                         match event {
                             Some(event) => {
@@ -95,20 +117,20 @@ impl<'a> LintState<'a> {
                                 event.lock().await.returns.clone()
                             }
                             None => {
-                                if !call.dynamic {
+                                if call.dynamic.is_none() {
                                     self.diagnostic_error("Event not found".into(), lvalue.range);
                                 }
                                 DataType::Unknown
                             }
                         }
                     } else {
-                        match self.find_function(&call.name, &types).await {
+                        match self.find_function(&call.name.content, &types).await {
                             Some(func) => {
                                 // func.uses.push(call.range.clone());
                                 func.lock().await.returns.clone()
                             }
                             None => {
-                                if !call.dynamic {
+                                if call.dynamic.is_none() {
                                     self.diagnostic_error(
                                         "Function not found".into(),
                                         lvalue.range,
@@ -119,7 +141,7 @@ impl<'a> LintState<'a> {
                         }
                     };
 
-                    if call.post {
+                    if call.post.is_some() {
                         DataType::Void
                     } else {
                         ret
@@ -133,10 +155,12 @@ impl<'a> LintState<'a> {
                     match data_type {
                         DataType::Complex(name) => match self.find_class(&name).await {
                             Some(Complex::Class(class_mut)) => {
-                                let ret = if call.event {
+                                let ret = if call.event.is_some() {
                                     match self
                                         .find_callable_event_in_class(
-                                            &class_mut, &call.name, &types,
+                                            &class_mut,
+                                            &call.name.content,
+                                            &types,
                                         )
                                         .await
                                     {
@@ -145,7 +169,7 @@ impl<'a> LintState<'a> {
                                             event.lock().await.returns.clone()
                                         }
                                         None => {
-                                            if !call.dynamic {
+                                            if call.dynamic.is_none() {
                                                 self.diagnostic_error(
                                                     "Event not found".into(),
                                                     lvalue.range,
@@ -158,7 +182,7 @@ impl<'a> LintState<'a> {
                                     match self
                                         .find_callable_function_in_class(
                                             &class_mut,
-                                            &call.name,
+                                            &call.name.content,
                                             &types,
                                             &tokens::AccessType::PUBLIC,
                                         )
@@ -169,7 +193,7 @@ impl<'a> LintState<'a> {
                                             func.lock().await.returns.clone()
                                         }
                                         None => {
-                                            if !call.dynamic {
+                                            if call.dynamic.is_none() {
                                                 self.diagnostic_error(
                                                     "Method not found".into(),
                                                     lvalue.range,
@@ -180,7 +204,7 @@ impl<'a> LintState<'a> {
                                     }
                                 };
 
-                                if call.post {
+                                if call.post.is_some() {
                                     DataType::Void
                                 } else {
                                     ret
@@ -229,7 +253,7 @@ impl<'a> LintState<'a> {
                                     None => {
                                         self.diagnostic_error(
                                             "Member not found".into(),
-                                            member.range,
+                                            member.name.range,
                                         );
                                         DataType::Unknown
                                     }
@@ -291,7 +315,7 @@ impl<'a> LintState<'a> {
     ) -> BoxFuture<'b, DataType> {
         async move {
             match &expression.expression_type {
-                parser::ExpressionType::Literal(literal) => literal.into(),
+                parser::ExpressionType::Literal(literal) => self.lint_literal(literal).await,
                 parser::ExpressionType::ArrayLiteral(expressions) => {
                     let types = self.lint_expressions(expressions).await;
 
@@ -583,7 +607,7 @@ impl<'a> LintState<'a> {
                     }
 
                     self.variables.insert(
-                        (&var.variable.name).into(),
+                        (&var.variable.name.content).into(),
                         Mutex::new(Variable {
                             variable_type: VariableType::Local(var.variable.clone()),
                             data_type,
@@ -610,8 +634,7 @@ impl<'a> LintState<'a> {
                 }) => {
                     self.lint_statements(statements).await;
                     for (var, statements) in catches {
-                        // TODO
-                        // self.lint_statement(var).await;
+                        self.lint_statement(var).await;
                         self.lint_statements(statements).await;
                     }
                     if let Some(statements) = finally {
@@ -630,7 +653,7 @@ impl<'a> LintState<'a> {
                     let stop_type = self.lint_expression(stop).await;
 
                     let mut to_check = vec![
-                        (variable_type, &variable.range),
+                        (variable_type, &variable.name.range),
                         (start_type, &start.range),
                         (stop_type, &stop.range),
                     ];
@@ -697,7 +720,8 @@ impl<'a> LintState<'a> {
                         }
 
                         for (literal, range) in literals {
-                            if self.is_convertible(&choose_type, &literal.into()).await {
+                            let literal_type = self.lint_literal(literal).await;
+                            if self.is_convertible(&choose_type, &literal_type).await {
                                 self.diagnostic_error("Wrong Literal Type".into(), range.clone());
                             }
                         }
@@ -727,7 +751,7 @@ impl<'a> LintState<'a> {
                                 .await
                         }
                         parser::CallType::Ancestor(group, name) => {
-                            let grouped_name = GroupedName::new(group.clone(), name.clone());
+                            let grouped_name = (group, name).into();
 
                             if self
                                 .inherits_from(
@@ -757,7 +781,7 @@ impl<'a> LintState<'a> {
                             match self
                                 .find_callable_function_in_class(
                                     &class_mut,
-                                    &function.name,
+                                    &function.name.content,
                                     &types,
                                     &tokens::AccessType::PROTECTED,
                                 )
@@ -765,7 +789,7 @@ impl<'a> LintState<'a> {
                             {
                                 Some(_) => {}
                                 None => {
-                                    if !function.dynamic {
+                                    if function.dynamic.is_none() {
                                         self.diagnostic_error(
                                             "Method not found".into(),
                                             function.range,
@@ -797,7 +821,7 @@ impl<'a> LintState<'a> {
     async fn lint_datatype_decl(&mut self, decl: &parser::DatatypeDecl) -> Arc<Mutex<Class>> {
         let within = match &decl.class.within {
             Some((group, name)) => {
-                let within_name = GroupedName::new(group.clone(), name.clone());
+                let within_name = (group, name).into();
                 if self.find_class(&within_name).await.is_none() {
                     self.diagnostic_error("Within Class not found".into(), decl.range);
                 }
@@ -808,14 +832,14 @@ impl<'a> LintState<'a> {
         };
 
         let (group, name) = decl.class.base.clone();
-        let base_name = GroupedName::new(group, name);
+        let base_name = (&group, &name).into();
         let base = self.find_class(&base_name).await;
 
         if base.is_none() {
             self.diagnostic_error("Base Class not found".into(), decl.range);
         }
         let new_class_mut = Arc::new(Mutex::new(Class::new(
-            decl.class.name.clone(),
+            decl.class.name.content.clone(),
             base_name,
             within,
             matches!(decl.class.scope, Some(tokens::ScopeModif::GLOBAL)),
@@ -826,7 +850,7 @@ impl<'a> LintState<'a> {
 
             for var in &decl.variables {
                 new_class.instance_variables.insert(
-                    (&var.variable.name).into(),
+                    (&var.variable.name.content).into(),
                     Mutex::new(Variable {
                         variable_type: VariableType::Instance((
                             Arc::downgrade(&new_class_mut),
@@ -841,7 +865,7 @@ impl<'a> LintState<'a> {
 
             for event in &decl.events {
                 new_class.events.insert(
-                    (&event.name).into(),
+                    (&event.name.content).into(),
                     Mutex::new(Event::new(event.clone(), Some(event.range), None)).into(),
                 );
             }
@@ -902,7 +926,7 @@ impl<'a> LintState<'a> {
                         &mut class.functions
                     };
 
-                    let iname = IString::from(&new_func.parsed.name);
+                    let iname = IString::from(&new_func.parsed.name.content);
                     match functions.get_mut(&iname) {
                         Some(funcs) => funcs.push(function_mut.clone()),
                         None => {
@@ -915,189 +939,263 @@ impl<'a> LintState<'a> {
 
         async move {
             let mut top_levels = ProgressedTopLevels::None(Vec::new());
-            swap(&mut self.unwrap_file().top_levels, &mut top_levels);
+            swap(&mut self.file.unwrap_mut().top_levels, &mut top_levels);
 
             let new_top_levels = match top_levels {
-                ProgressedTopLevels::None(prev_top_levels) => {
-                    ProgressedTopLevels::OnlyTypes(prev_top_levels.into_iter().map(|top_level| {
-                        (top_level.range, match top_level.top_level_type {
-                            parser::TopLevelType::ForwardDecl(types) => {
-                                {
-                                    let mut classes = HashMap::new();
+                ProgressedTopLevels::None(prev_top_levels) => ProgressedTopLevels::OnlyTypes(
+                    prev_top_levels
+                        .into_iter()
+                        .map(|top_level| {
+                            (
+                                top_level.range,
+                                match top_level.top_level_type {
+                                    parser::TopLevelType::ForwardDecl(types) => {
+                                        let mut classes = HashMap::new();
 
-                                    for datatype in &types {
-                                        let mut new_class = Class::new(
-                                            datatype.class.name.clone(),
-                                            datatype.class.base.clone().into(),
-                                            datatype.class.within.clone().map(Into::into),
-                                            matches!(datatype.class.scope, Some(tokens::ScopeModif::GLOBAL)),
-                                        );
-                                        new_class.usage.declaration = Some(datatype.range);
+                                        for datatype in &types {
+                                            let mut new_class = Class::new(
+                                                datatype.class.name.content.clone(),
+                                                (&datatype.class.base).into(),
+                                                datatype.class.within.as_ref().map(Into::into),
+                                                matches!(
+                                                    datatype.class.scope,
+                                                    Some(tokens::ScopeModif::GLOBAL)
+                                                ),
+                                            );
+                                            new_class.usage.declaration = Some(datatype.range);
 
-                                        classes.insert(
-                                            (&datatype.class.name).into(),
-                                            Mutex::new(new_class).into(),
-                                        );
+                                            classes.insert(
+                                                (&datatype.class.name.content).into(),
+                                                Mutex::new(new_class).into(),
+                                            );
+                                        }
+                                        self.file.unwrap_mut().classes.extend(classes.clone());
+                                        TopLevelType::ForwardDecl((types, classes))
                                     }
-                                    self.unwrap_file().classes.extend(classes.clone());
-                                    TopLevelType::ForwardDecl((types, classes))
-                                }
-                            }
-                        parser::TopLevelType::ScopedVariablesDecl(vec) => {
-                            let mut new_vars = HashMap::new();
-                            for var in &vec {
-                                let new_var = Arc::new(Mutex::new(Variable{
-                                    data_type: (&var.variable.data_type).into(),
-                                    variable_type: VariableType::Scoped(var.clone()),
-                                }));
-                                new_vars.insert((&var.variable.name).into(), new_var.clone());
-                            }
+                                    parser::TopLevelType::ScopedVariablesDecl(vec) => {
+                                        let mut new_vars = HashMap::new();
+                                        for var in &vec {
+                                            let new_var = Arc::new(Mutex::new(Variable {
+                                                data_type: (&var.variable.data_type).into(),
+                                                variable_type: VariableType::Scoped(var.clone()),
+                                            }));
+                                            new_vars.insert(
+                                                (&var.variable.name.content).into(),
+                                                new_var.clone(),
+                                            );
+                                        }
 
-                            self.unwrap_file().variables.extend(new_vars.clone());
-                            TopLevelType::ScopedVariablesDecl((vec, new_vars))
-                        }
-                        parser::TopLevelType::ScopedVariableDecl(var) => {
-                            let new_var = Arc::new(Mutex::new(Variable{
-                                data_type: (&var.variable.data_type).into(),
-                                variable_type: VariableType::Scoped(var.clone()),
-                            }));
-                            self.unwrap_file().variables.insert((&var.variable.name).into(), new_var.clone());
-                            TopLevelType::ScopedVariableDecl((var, new_var))
-                        }
-                            parser::TopLevelType::DatatypeDecl(datatype_decl) => TopLevelType::DatatypeDecl(datatype_decl),
-                            parser::TopLevelType::TypeVariablesDecl(vec) => TopLevelType::TypeVariablesDecl(vec),
-                            parser::TopLevelType::FunctionsForwardDecl(vec) => TopLevelType::FunctionsForwardDecl(vec),
-                            parser::TopLevelType::ExternalFunctions(vec) => TopLevelType::ExternalFunctions(vec),
-                            parser::TopLevelType::FunctionBody(function, vec) => TopLevelType::FunctionBody((function, vec)),
-                            parser::TopLevelType::EventBody(event, vec) => TopLevelType::EventBody((event, vec)),
-                            parser::TopLevelType::OnBody(on, vec) => TopLevelType::OnBody((on, vec)),
+                                        self.file.unwrap_mut().variables.extend(new_vars.clone());
+                                        TopLevelType::ScopedVariablesDecl((vec, new_vars))
+                                    }
+                                    parser::TopLevelType::ScopedVariableDecl(var) => {
+                                        let new_var = Arc::new(Mutex::new(Variable {
+                                            data_type: (&var.variable.data_type).into(),
+                                            variable_type: VariableType::Scoped(var.clone()),
+                                        }));
+                                        self.file.unwrap_mut().variables.insert(
+                                            (&var.variable.name.content).into(),
+                                            new_var.clone(),
+                                        );
+                                        TopLevelType::ScopedVariableDecl((var, new_var))
+                                    }
+                                    parser::TopLevelType::DatatypeDecl(datatype_decl) => {
+                                        TopLevelType::DatatypeDecl(datatype_decl)
+                                    }
+                                    parser::TopLevelType::TypeVariablesDecl(vec) => {
+                                        TopLevelType::TypeVariablesDecl(vec)
+                                    }
+                                    parser::TopLevelType::FunctionsForwardDecl(vec) => {
+                                        TopLevelType::FunctionsForwardDecl(vec)
+                                    }
+                                    parser::TopLevelType::ExternalFunctions(vec) => {
+                                        TopLevelType::ExternalFunctions(vec)
+                                    }
+                                    parser::TopLevelType::FunctionBody(function, vec) => {
+                                        TopLevelType::FunctionBody((function, vec))
+                                    }
+                                    parser::TopLevelType::EventBody(event, vec) => {
+                                        TopLevelType::EventBody((event, vec))
+                                    }
+                                    parser::TopLevelType::OnBody(on, vec) => {
+                                        TopLevelType::OnBody((on, vec))
+                                    }
+                                },
+                            )
                         })
-                    }).collect())
-                }
+                        .collect(),
+                ),
                 ProgressedTopLevels::OnlyTypes(prev_top_levels) => {
                     let mut new_vec = Vec::new();
                     for (range, top_level) in prev_top_levels {
-                        new_vec.push((range, match top_level {
-                            TopLevelType::DatatypeDecl(datatype)
-                                =>
-                            {
-                                let new_class_mut = self.lint_datatype_decl(&datatype).await;
+                        new_vec.push((
+                            range,
+                            match top_level {
+                                TopLevelType::DatatypeDecl(datatype) => {
+                                    let new_class_mut = self.lint_datatype_decl(&datatype).await;
 
-                                let class = match self
-                                    .unwrap_file()
-                                    .classes
-                                    .get(&(&datatype.class.name).into())
-                                    .cloned()
-                                {
-                                    Some(class_arc) => {
-                                        let new_class = Arc::try_unwrap(new_class_mut).unwrap().into_inner();
+                                    let class = match self
+                                        .file
+                                        .unwrap_mut()
+                                        .classes
+                                        .get(&(&datatype.class.name.content).into())
+                                        .cloned()
+                                    {
+                                        Some(class_arc) => {
+                                            let new_class = Arc::try_unwrap(new_class_mut)
+                                                .unwrap()
+                                                .into_inner();
 
-                                        self.class = Some(class_arc.clone());
-                                        let mut class = class_arc.lock().await;
-                                        match class.usage.definition {
-                                            Some(def) => {
-                                                self.diagnostic_error(
-                                                    "Type already defined".into(),
-                                                    datatype.range,
-                                                );
-                                                self.diagnostic_hint("Type already defined here".into(), def);
-                                            }
-                                            None => {
-                                                class.usage.definition = new_class.usage.definition;
-                                                // swap(&mut class.events, &mut new_class.events);
-                                                // swap(
-                                                //     &mut class.instance_variables,
-                                                //     &mut new_class.instance_variables,
-                                                // );
-                                                // swap(&mut class.base, &mut new_class.base);
-                                                // swap(&mut class.within, &mut new_class.within);
-                                            }
-                                        }
-
-                                        for (iname, var) in new_class.instance_variables {
-                                            if !class.instance_variables.contains_key(&iname) {
-                                                if let VariableType::Instance(inst) = &mut var.lock().await.variable_type {
-                                                    inst.0 = Arc::downgrade(&class_arc);
+                                            self.class = Some(class_arc.clone());
+                                            let mut class = class_arc.lock().await;
+                                            match class.usage.definition {
+                                                Some(def) => {
+                                                    self.diagnostic_error(
+                                                        "Type already defined".into(),
+                                                        datatype.range,
+                                                    );
+                                                    self.diagnostic_hint(
+                                                        "Type already defined here".into(),
+                                                        def,
+                                                    );
                                                 }
-                                                class.instance_variables.insert(iname, var);
+                                                None => {
+                                                    class.usage.definition =
+                                                        new_class.usage.definition;
+                                                    // swap(&mut class.events, &mut new_class.events);
+                                                    // swap(
+                                                    //     &mut class.instance_variables,
+                                                    //     &mut new_class.instance_variables,
+                                                    // );
+                                                    // swap(&mut class.base, &mut new_class.base);
+                                                    // swap(&mut class.within, &mut new_class.within);
+                                                }
                                             }
+
+                                            for (iname, var) in new_class.instance_variables {
+                                                if !class.instance_variables.contains_key(&iname) {
+                                                    if let VariableType::Instance(inst) =
+                                                        &mut var.lock().await.variable_type
+                                                    {
+                                                        inst.0 = Arc::downgrade(&class_arc);
+                                                    }
+                                                    class.instance_variables.insert(iname, var);
+                                                }
+                                            }
+                                            for (iname, event) in new_class.events {
+                                                if !class.events.contains_key(&iname) {
+                                                    class.events.insert(iname, event);
+                                                }
+                                            }
+
+                                            class_arc.clone()
                                         }
-                                        for (iname, event) in new_class.events {
-                                            if !class.events.contains_key(&iname) {
-                                                class.events.insert(iname, event);
+                                        None => {
+                                            {
+                                                let new_class = new_class_mut.lock().await;
+                                                let iname = (&new_class.name).into();
+                                                if new_class.is_global {
+                                                    self.diagnostic_warning(
+                                                        "Global Classes should be ".to_owned()
+                                                            + "Forward Declared, otherwise they "
+                                                            + "might not be seen by other Files",
+                                                        datatype.range,
+                                                    );
+                                                }
+                                                self.class = Some(new_class_mut.clone());
+                                                self.file
+                                                    .unwrap_mut()
+                                                    .classes
+                                                    .insert(iname, new_class_mut.clone());
                                             }
+
+                                            new_class_mut
+                                        }
+                                    };
+
+                                    TopLevelType::DatatypeDecl((datatype, class))
+                                }
+                                TopLevelType::TypeVariablesDecl(vars) => {
+                                    {
+                                        let mut new_vars = HashMap::new();
+                                        for var in &vars {
+                                            let data_type = (&var.variable.data_type).into();
+
+                                            new_vars.insert(
+                                                (&var.variable.name.content).into(),
+                                                Mutex::new(Variable {
+                                                    variable_type: VariableType::Instance((
+                                                        self.class
+                                                            .as_ref()
+                                                            .map_or(Weak::new(), |class| {
+                                                                Arc::downgrade(&class)
+                                                            }),
+                                                        var.clone(),
+                                                    )),
+                                                    data_type,
+                                                    // uses: Vec::new(),
+                                                })
+                                                .into(),
+                                            );
                                         }
 
-                                        class_arc.clone()
-                                    }
-                                    None => {
+                                        if let Some(class) =
+                                            self.require_class("Type Variables".into(), range)
                                         {
-                                            let new_class = new_class_mut.lock().await;
-                                            let iname = (&new_class.name).into();
-                                            if new_class.is_global {
-                                                self.diagnostic_warning("Global Classes should be Forward Declared, otherwise they might not be seen by other Files".into(), datatype.range);
-                                            }
-                                            self.class = Some(new_class_mut.clone());
-                                            self.unwrap_file().classes.insert(iname, new_class_mut.clone());
+                                            class
+                                                .lock()
+                                                .await
+                                                .instance_variables
+                                                .extend(new_vars.clone());
                                         }
 
-                                        new_class_mut
+                                        TopLevelType::TypeVariablesDecl((
+                                            vars,
+                                            (self.class.clone(), new_vars),
+                                        ))
                                     }
-                                };
-
-                                TopLevelType::DatatypeDecl((datatype, class))
-                            }
-                            TopLevelType::TypeVariablesDecl(vars) => {
-                                {
-                                    let mut new_vars = HashMap::new();
-                                    for var in &vars {
-                                        let data_type = (&var.variable.data_type).into();
-
-                                        new_vars.insert(
-                                            (&var.variable.name).into(),
-                                            Mutex::new(Variable {
-                                                variable_type: VariableType::Instance((
-                                                    self.class.as_ref().map_or(Weak::new(), |class| Arc::downgrade(&class)),
-                                                    var.clone(),
-                                                )),
-                                                data_type,
-                                                // uses: Vec::new(),
-                                            })
-                                            .into(),
+                                }
+                                TopLevelType::FunctionsForwardDecl(functions) => {
+                                    let mut new_functions = HashMap::new();
+                                    for function in &functions {
+                                        new_functions.insert(
+                                            (&function.name.content).into(),
+                                            Arc::new(Mutex::new(Function::new(
+                                                function.clone(),
+                                                Some(function.range),
+                                                None,
+                                                None,
+                                            ))),
                                         );
                                     }
 
-                                    if let Some(class) =
-                                        self.require_class("Type Variables".into(), range)
-                                    {
-                                        class.lock().await.instance_variables.extend(new_vars.clone());
-                                    }
-
-                                    TopLevelType::TypeVariablesDecl((vars, (self.class.clone(), new_vars)))
-                                }
-                            }
-                            TopLevelType::FunctionsForwardDecl(functions) => {
-                                    let mut new_functions = HashMap::new();
-                                    for function in &functions {
-                                        new_functions.insert((&function.name).into(), Arc::new(Mutex::new(Function::new(function.clone(), Some(function.range), None))));
-                                    }
-
-                                    if let Some(class_arc) = self
-                                        .require_class("Function Forward Declarations".into(), range)
-                                    {
+                                    if let Some(class_arc) = self.require_class(
+                                        "Function Forward Declarations".into(),
+                                        range,
+                                    ) {
                                         let mut class = class_arc.lock().await;
                                         for (_, function) in &new_functions {
                                             add_function(self, function, &mut class, false).await;
                                         }
                                     }
 
-                                    TopLevelType::FunctionsForwardDecl((functions, (self.class.clone(), new_functions)))
-                            }
-                            TopLevelType::ExternalFunctions(functions) => {
-                                {
+                                    TopLevelType::FunctionsForwardDecl((
+                                        functions,
+                                        (self.class.clone(), new_functions),
+                                    ))
+                                }
+                                TopLevelType::ExternalFunctions(functions) => {
                                     let mut new_functions = HashMap::new();
                                     for function in &functions {
-                                        new_functions.insert((&function.name).into(), Arc::new(Mutex::new(Function::new(function.clone(), Some(function.range), None))));
+                                        new_functions.insert(
+                                            (&function.name.content).into(),
+                                            Arc::new(Mutex::new(Function::new(
+                                                function.clone(),
+                                                Some(function.range),
+                                                None,
+                                                None,
+                                            ))),
+                                        );
                                     }
 
                                     if let Some(class_arc) =
@@ -1108,151 +1206,194 @@ impl<'a> LintState<'a> {
                                             add_function(self, &function, &mut class, true).await;
                                         }
                                     }
-                                    TopLevelType::ExternalFunctions((functions, (self.class.clone(), new_functions)))
+                                    TopLevelType::ExternalFunctions((
+                                        functions,
+                                        (self.class.clone(), new_functions),
+                                    ))
                                 }
-                            }
-                            TopLevelType::ForwardDecl(prev) => TopLevelType::ForwardDecl(prev),
-                            TopLevelType::ScopedVariableDecl(prev) => TopLevelType::ScopedVariableDecl(prev),
-                            TopLevelType::ScopedVariablesDecl(prev) => TopLevelType::ScopedVariablesDecl(prev),
-                            TopLevelType::FunctionBody(prev) => TopLevelType::FunctionBody(prev),
-                            TopLevelType::EventBody(prev) => TopLevelType::EventBody(prev),
-                            TopLevelType::OnBody(prev) => TopLevelType::OnBody(prev),
-                        }))
+                                TopLevelType::ForwardDecl(prev) => TopLevelType::ForwardDecl(prev),
+                                TopLevelType::ScopedVariableDecl(prev) => {
+                                    TopLevelType::ScopedVariableDecl(prev)
+                                }
+                                TopLevelType::ScopedVariablesDecl(prev) => {
+                                    TopLevelType::ScopedVariablesDecl(prev)
+                                }
+                                TopLevelType::FunctionBody(prev) => {
+                                    TopLevelType::FunctionBody(prev)
+                                }
+                                TopLevelType::EventBody(prev) => TopLevelType::EventBody(prev),
+                                TopLevelType::OnBody(prev) => TopLevelType::OnBody(prev),
+                            },
+                        ))
                     }
                     ProgressedTopLevels::Shallow(new_vec)
                 }
                 ProgressedTopLevels::Shallow(prev_top_levels) => {
                     let mut new_vec = Vec::new();
                     for (range, top_level) in prev_top_levels {
-                        new_vec.push((range, match top_level {
-                            TopLevelType::DatatypeDecl((class_decl, class)) => {
-                                self.class = Some(class.clone());
-                                TopLevelType::DatatypeDecl((class_decl, class))
-                            }
-                            TopLevelType::FunctionBody((function, statements)) => {
-                                let mut new_func =
-                                    Function::new(function.clone(), None, None);
-                                let mut definition = FunctionDefinition::new(&function.arguments, function.range);
+                        new_vec.push((
+                            range,
+                            match top_level {
+                                TopLevelType::DatatypeDecl((class_decl, class)) => {
+                                    self.class = Some(class.clone());
+                                    TopLevelType::DatatypeDecl((class_decl, class))
+                                }
+                                TopLevelType::FunctionBody((function, statements)) => {
+                                    let mut new_func =
+                                        Function::new(function.clone(), None, None, None);
+                                    let mut definition = FunctionDefinition::new(
+                                        &function.arguments,
+                                        function.range,
+                                    );
 
-                                swap(&mut self.variables, &mut definition.variables);
-                                self.return_type = new_func.returns.clone();
+                                    swap(&mut self.variables, &mut definition.variables);
+                                    self.return_type = new_func.returns.clone();
 
-                                self.lint_statements(&statements).await;
+                                    self.lint_statements(&statements).await;
 
-                                swap(&mut self.variables, &mut definition.variables);
-                                new_func.definition = Some(definition);
+                                    swap(&mut self.variables, &mut definition.variables);
+                                    new_func.definition = Some(definition);
 
-
-                                let new_function = match self.require_class("Function Bodies".into(), range) {
-                                    None => Mutex::new(new_func).into(),
-                                    Some(class_arc) => {
-                                        let mut class = class_arc.lock().await;
-                                        let new_func_mut = match class.find_conflicting_function(&new_func).await {
-                                            Some(existing_arc) => {
-                                                let mut existing = existing_arc.lock().await;
-                                                if let Some(definition) = &existing.definition {
+                                    let new_function = match self
+                                        .require_class("Function Bodies".into(), range)
+                                    {
+                                        None => Mutex::new(new_func).into(),
+                                        Some(class_arc) => {
+                                            let mut class = class_arc.lock().await;
+                                            let new_func_mut = match class
+                                                .find_conflicting_function(&new_func)
+                                                .await
+                                            {
+                                                Some(existing_arc) => {
+                                                    let mut existing = existing_arc.lock().await;
+                                                    if let Some(definition) = &existing.definition {
+                                                        self.diagnostic_error(
+                                                            "Function already defined".into(),
+                                                            function.range,
+                                                        );
+                                                        self.diagnostic_hint(
+                                                            "Already defined here".into(),
+                                                            definition.range,
+                                                        );
+                                                        new_func.declaration = existing.declaration;
+                                                        None
+                                                    } else {
+                                                        existing.definition =
+                                                            new_func.definition.take();
+                                                        Some(existing_arc.clone())
+                                                    }
+                                                }
+                                                None => {
                                                     self.diagnostic_error(
-                                                        "Function already defined".into(),
+                                                        "Function is missing a Forward Declaration"
+                                                            .into(),
                                                         function.range,
                                                     );
-                                                    self.diagnostic_hint(
-                                                        "Already defined here".into(),
-                                                        definition.range,
-                                                    );
-                                                    new_func.declaration = existing.declaration;
                                                     None
-                                                } else {
-                                                    existing.definition = new_func.definition.take();
-                                                    Some(existing_arc.clone())
                                                 }
-                                            }
-                                            None => {
-                                                self.diagnostic_error(
-                                                    "Function is missing a Forward Declaration".into(),
-                                                    function.range,
-                                                );
-                                                None
-                                            }
-                                        };
+                                            };
 
-                                        new_func_mut.unwrap_or_else(|| {
-                                            let iname = IString::from(&new_func.parsed.name);
-                                            let new_func_mut = Arc::new(Mutex::new(new_func));
-                                            match class.functions.get_mut(&iname) {
-                                                Some(funcs) => funcs.push(new_func_mut.clone()),
+                                            new_func_mut.unwrap_or_else(|| {
+                                                let iname =
+                                                    IString::from(&new_func.parsed.name.content);
+                                                let new_func_mut = Arc::new(Mutex::new(new_func));
+                                                match class.functions.get_mut(&iname) {
+                                                    Some(funcs) => funcs.push(new_func_mut.clone()),
+                                                    None => {
+                                                        class.functions.insert(
+                                                            iname,
+                                                            vec![new_func_mut.clone()],
+                                                        );
+                                                    }
+                                                }
+                                                new_func_mut
+                                            })
+                                        }
+                                    };
+                                    TopLevelType::FunctionBody((
+                                        (function, statements),
+                                        (self.class.clone(), new_function),
+                                    ))
+                                }
+                                TopLevelType::EventBody((event, statements)) => {
+                                    let mut new_event = Event::new(event.clone(), None, None);
+                                    let args = Vec::new();
+                                    let mut definition = FunctionDefinition::new(
+                                        event.get_arguments().unwrap_or(&args),
+                                        event.range,
+                                    );
+
+                                    swap(&mut self.variables, &mut definition.variables);
+                                    self.return_type = new_event.returns.clone();
+
+                                    self.lint_statements(&statements).await;
+
+                                    swap(&mut self.variables, &mut definition.variables);
+                                    new_event.definition = Some(definition);
+
+                                    let event_mut = match self
+                                        .require_class("Event Bodies".into(), range)
+                                    {
+                                        None => Arc::new(Mutex::new(new_event)),
+                                        Some(class_arc) => {
+                                            let mut class = class_arc.lock().await;
+                                            let new_event_mut = match class
+                                                .find_conflicting_event(&new_event)
+                                                .await
+                                            {
+                                                Some(existing_arc) => {
+                                                    let mut existing = existing_arc.lock().await;
+                                                    if let Some(definition) = &existing.definition {
+                                                        self.diagnostic_error(
+                                                            "Event already defined".into(),
+                                                            event.range,
+                                                        );
+                                                        self.diagnostic_hint(
+                                                            "Already defined here".into(),
+                                                            definition.range,
+                                                        );
+                                                        new_event.declaration =
+                                                            existing.declaration;
+                                                        None
+                                                    } else {
+                                                        existing.definition =
+                                                            new_event.definition.take();
+                                                        Some(existing_arc.clone())
+                                                    }
+                                                }
                                                 None => {
-                                                    class.functions.insert(iname, vec![new_func_mut.clone()]);
-                                                }
-                                            }
-                                            new_func_mut
-                                        })
-                                    }
-                                };
-                                TopLevelType::FunctionBody(((function, statements), (self.class.clone(), new_function)))
-                            }
-                            TopLevelType::EventBody((event, statements)) => {
-                                let mut new_event = Event::new(event.clone(), None, None);
-                                let args = Vec::new();
-                                let mut definition = FunctionDefinition::new(event.get_arguments().unwrap_or(&args), event.range);
-
-                                swap(&mut self.variables, &mut definition.variables);
-                                self.return_type = new_event.returns.clone();
-
-                                self.lint_statements(&statements).await;
-
-                                swap(&mut self.variables, &mut definition.variables);
-                                new_event.definition = Some(definition);
-
-                                let event_mut = match self.require_class("Event Bodies".into(), range) {
-                                    None => Arc::new(Mutex::new(new_event)),
-                                    Some(class_arc) =>{
-                                        let mut class = class_arc.lock().await;
-                                        let new_event_mut = match class.find_conflicting_event(&new_event).await {
-                                            Some(existing_arc) => {
-                                                let mut existing = existing_arc.lock().await;
-                                                if let Some(definition) = &existing.definition {
                                                     self.diagnostic_error(
-                                                        "Event already defined".into(),
+                                                        "Event is missing a Forward Declaration"
+                                                            .into(),
                                                         event.range,
                                                     );
-                                                    self.diagnostic_hint(
-                                                        "Already defined here".into(),
-                                                        definition.range,
-                                                    );
-                                                    new_event.declaration = existing.declaration;
                                                     None
-                                                } else {
-                                                    existing.definition = new_event.definition.take();
-                                                    Some(existing_arc.clone())
                                                 }
-                                            }
-                                            None => {
-                                                self.diagnostic_error(
-                                                    "Event is missing a Forward Declaration".into(),
-                                                    event.range,
-                                                );
-                                                None
-                                            }
-                                        };
+                                            };
 
-                                        new_event_mut.unwrap_or_else(|| {
-                                            let iname = IString::from(&new_event.parsed.name);
-                                            let new_event_mut = Arc::new(Mutex::new(new_event));
-                                            class.events.insert(
-                                                iname,
-                                                new_event_mut.clone(),
-                                            );
-                                            new_event_mut
-                                        })
-                                    }
-                                };
+                                            new_event_mut.unwrap_or_else(|| {
+                                                let iname =
+                                                    IString::from(&new_event.parsed.name.content);
+                                                let new_event_mut = Arc::new(Mutex::new(new_event));
+                                                class.events.insert(iname, new_event_mut.clone());
+                                                new_event_mut
+                                            })
+                                        }
+                                    };
 
-                                TopLevelType::EventBody(((event, statements), (self.class.clone(), event_mut)))
-                            }
-                            TopLevelType::OnBody((on, statements)) => {
-                                self.class = match self
-                                    .find_class(&GroupedName::new(None, on.class.clone()).clone())
-                                    .await {
+                                    TopLevelType::EventBody((
+                                        (event, statements),
+                                        (self.class.clone(), event_mut),
+                                    ))
+                                }
+                                TopLevelType::OnBody((on, statements)) => {
+                                    self.class = match self
+                                        .find_class(&GroupedName::new(
+                                            None,
+                                            on.class.content.clone(),
+                                        ))
+                                        .await
+                                    {
                                         Some(Complex::Class(class)) => Some(class),
                                         _ => {
                                             self.diagnostic_error(
@@ -1263,29 +1404,43 @@ impl<'a> LintState<'a> {
                                         }
                                     };
 
-                                self.variables = HashMap::new();
-                                self.return_type = DataType::Void;
+                                    self.variables = HashMap::new();
+                                    self.return_type = DataType::Void;
 
-                                self.lint_statements(&statements).await;
+                                    self.lint_statements(&statements).await;
 
-                                TopLevelType::OnBody(((on, statements), (self.class.clone(), )))
-                                // TODO do something with the on?
-                            }
-                            TopLevelType::ForwardDecl(prev) => TopLevelType::ForwardDecl(prev),
-                            TopLevelType::ScopedVariableDecl(prev) => TopLevelType::ScopedVariableDecl(prev),
-                            TopLevelType::ScopedVariablesDecl(prev) => TopLevelType::ScopedVariablesDecl(prev),
-                            TopLevelType::TypeVariablesDecl(prev) => TopLevelType::TypeVariablesDecl(prev),
-                            TopLevelType::FunctionsForwardDecl(prev) => TopLevelType::FunctionsForwardDecl(prev),
-                            TopLevelType::ExternalFunctions(prev) => TopLevelType::ExternalFunctions(prev),
-                        }));
+                                    TopLevelType::OnBody(((on, statements), (self.class.clone(),)))
+                                    // TODO do something with the on?
+                                }
+                                TopLevelType::ForwardDecl(prev) => TopLevelType::ForwardDecl(prev),
+                                TopLevelType::ScopedVariableDecl(prev) => {
+                                    TopLevelType::ScopedVariableDecl(prev)
+                                }
+                                TopLevelType::ScopedVariablesDecl(prev) => {
+                                    TopLevelType::ScopedVariablesDecl(prev)
+                                }
+                                TopLevelType::TypeVariablesDecl(prev) => {
+                                    TopLevelType::TypeVariablesDecl(prev)
+                                }
+                                TopLevelType::FunctionsForwardDecl(prev) => {
+                                    TopLevelType::FunctionsForwardDecl(prev)
+                                }
+                                TopLevelType::ExternalFunctions(prev) => {
+                                    TopLevelType::ExternalFunctions(prev)
+                                }
+                            },
+                        ));
                     }
                     ProgressedTopLevels::Complete(new_vec)
                 }
-                ProgressedTopLevels::Complete(prev_top_levels) => ProgressedTopLevels::Complete(prev_top_levels),
+                ProgressedTopLevels::Complete(prev_top_levels) => {
+                    ProgressedTopLevels::Complete(prev_top_levels)
+                }
             };
 
-            self.unwrap_file().top_levels = new_top_levels;
-        }.boxed()
+            self.file.unwrap_mut().top_levels = new_top_levels;
+        }
+        .boxed()
     }
 }
 
@@ -1325,7 +1480,12 @@ impl Project {
                             .ok_or(anyhow!("Unexpected EOF"))?
                             .value()
                             .ok_or(anyhow!("Invalid Type"))?,
-                        name: arg.name.clone().unwrap(),
+                        name: Token {
+                            token_type: TokenType::ID,
+                            content: arg.name.clone().unwrap(),
+                            range: Range::default(),
+                            error: None,
+                        },
                         initial_value: None,
                         range: Default::default(),
                     },
@@ -1391,6 +1551,7 @@ impl Project {
                     )));
                     {
                         let mut new_class = new_class_mut.lock().await;
+                        new_class.help = class.help;
 
                         for var in class.variable {
                             let iname = var.name.as_ref().unwrap().into();
@@ -1402,7 +1563,12 @@ impl Project {
                                     .ok_or(anyhow!("Unexpected EOF"))?
                                     .value()
                                     .ok_or(anyhow!("Invalid Type"))?,
-                                name: var.name.unwrap(),
+                                name: Token {
+                                    token_type: TokenType::ID,
+                                    content: var.name.unwrap(),
+                                    range: Range::default(),
+                                    error: None,
+                                },
                                 initial_value: None,
                                 range: Default::default(),
                             };
@@ -1435,13 +1601,24 @@ impl Project {
                                     returns,
                                     scope_modif: None,
                                     access: None,
-                                    name: func.name,
+                                    name: Token {
+                                        token_type: TokenType::ID,
+                                        content: func.name,
+                                        range: Range::default(),
+                                        error: None,
+                                    },
                                     arguments,
-                                    has_vararg,
+                                    vararg: has_vararg.then(|| Token {
+                                        token_type: TokenType::Symbol(tokens::Symbol::DOTDOTDOT),
+                                        content: "...".into(),
+                                        range: Range::default(),
+                                        error: None,
+                                    }),
                                     range: Default::default(),
                                 },
                                 None,
                                 None,
+                                func.help,
                             ))
                             .into();
 
@@ -1463,7 +1640,12 @@ impl Project {
                                 (&event.name).into(),
                                 Mutex::new(Event::new(
                                     parser::Event {
-                                        name: event.name,
+                                        name: Token {
+                                            token_type: TokenType::ID,
+                                            content: event.name,
+                                            range: Range::default(),
+                                            error: None,
+                                        },
                                         range: Default::default(),
                                         event_type: parser::EventType::User(returns, arguments),
                                     },
@@ -1496,13 +1678,24 @@ impl Project {
                     returns,
                     scope_modif: None,
                     access: None,
-                    name: func.name,
+                    name: Token {
+                        token_type: TokenType::ID,
+                        content: func.name,
+                        range: Range::default(),
+                        error: None,
+                    },
                     arguments,
-                    has_vararg,
+                    vararg: has_vararg.then(|| Token {
+                        token_type: TokenType::Symbol(tokens::Symbol::DOTDOTDOT),
+                        content: "...".into(),
+                        range: Range::default(),
+                        error: None,
+                    }),
                     range: Default::default(),
                 },
                 None,
                 None,
+                func.help,
             ))
             .into();
 

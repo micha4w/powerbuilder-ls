@@ -58,6 +58,15 @@ impl fmt::Display for Range {
     }
 }
 
+impl Into<tower_lsp::lsp_types::Range> for Range {
+    fn into(self) -> tower_lsp::lsp_types::Range {
+        tower_lsp::lsp_types::Range {
+            start: self.start.into(),
+            end: self.end.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum Literal {
     NUMBER,

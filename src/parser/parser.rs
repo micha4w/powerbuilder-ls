@@ -123,12 +123,20 @@ impl Parser {
         }
     }
 
+    fn hint(&mut self, error: &String, range: Range) {
+        self.syntax_errors.push(Diagnostic {
+            severity: Severity::Hint,
+            message: format!("[Parser] {}\n{}", error, Backtrace::capture()),
+            range,
+        });
+    }
+
     fn error(&mut self, error: &String, range: Range) {
         self.syntax_errors.push(Diagnostic {
             severity: Severity::Error,
             // message: format!("[Parser] {}", error),
             message: format!("[Parser] {}\n{}", error, Backtrace::capture()),
-            range: range,
+            range,
         });
         // panic!("[Parser] {} {:?}\n", error, range);
     }
@@ -309,6 +317,25 @@ impl Parser {
                 let mut expressions = Vec::new();
 
                 loop {
+                    match self.peek()?.token_type {
+                        TokenType::Symbol(tokens::Symbol::COMMA) => {
+                            while self.peek()?.token_type
+                                == TokenType::Symbol(tokens::Symbol::COMMA)
+                            {
+                                end = self.next()?.range.end;
+                                expressions.push(Expression {
+                                    expression_type: ExpressionType::Error,
+                                    range: Range { start: end, end },
+                                })
+                            }
+                        }
+                        TokenType::Symbol(tokens::Symbol::RCURLY) => {
+                            end = self.next()?.range.end;
+                            break;
+                        }
+                        _ => {}
+                    }
+
                     let expression;
                     (expression, err) = self.parse_expression()?.split();
                     if let Some(expression) = expression {
@@ -323,10 +350,7 @@ impl Parser {
                         TokenType::Symbol(tokens::Symbol::COMMA) => {
                             end = self.next()?.range.end;
                         }
-                        TokenType::Symbol(tokens::Symbol::RCURLY) => {
-                            end = self.next()?.range.end;
-                            break;
-                        }
+                        TokenType::Symbol(tokens::Symbol::RCURLY) => {}
                         _ => {
                             let range = self.peek()?.range;
                             err = self
@@ -388,8 +412,25 @@ impl Parser {
                 }
             }
             TokenType::Literal(literal) => {
-                end = self.next()?.range.end;
-                ExpressionType::Literal(literal)
+                let token = self.next()?;
+                end = token.range.end;
+                ExpressionType::Literal(Literal {
+                    literal_type: literal,
+                    content: token.content,
+                    range: token.range,
+                })
+            }
+            TokenType::Symbol(
+                tokens::Symbol::RBRACE
+                | tokens::Symbol::COMMA
+                | tokens::Symbol::DOT
+                | tokens::Symbol::PLUSPLUS
+                | tokens::Symbol::MINUSMINUS,
+            ) => {
+                let range = self.peek()?.range;
+                self.error(&"Unexpected Token for Expression".into(), range);
+                end = range.end;
+                ExpressionType::Error
             }
             _ => {
                 let range = self.peek()?.range;
@@ -585,61 +626,60 @@ impl Parser {
                     _,
                 )
                 | (_, TokenType::Symbol(tokens::Symbol::LPAREN)) => {
-                    let mut dynamics = 0;
-                    let mut events = 0;
-                    let mut posts = 0;
-                    let mut statics = 0;
+                    let mut dynamics = Vec::new();
+                    let mut events = Vec::new();
+                    let mut posts = Vec::new();
+                    let mut statics = Vec::new();
                     loop {
                         match self.peek()?.token_type {
                             TokenType::Keyword(tokens::Keyword::STATIC) => {
-                                self.next()?;
-                                statics += 1;
+                                statics.push(self.next()?)
                             }
                             TokenType::Keyword(tokens::Keyword::DYNAMIC) => {
-                                self.next()?;
-                                dynamics += 1;
+                                dynamics.push(self.next()?)
                             }
-                            TokenType::Keyword(tokens::Keyword::EVENT) => {
-                                self.next()?;
-                                events += 1;
-                            }
-                            TokenType::Keyword(tokens::Keyword::POST) => {
-                                self.next()?;
-                                posts += 1;
-                            }
+                            TokenType::Keyword(tokens::Keyword::EVENT) => events.push(self.next()?),
+                            TokenType::Keyword(tokens::Keyword::POST) => posts.push(self.next()?),
                             _ => break,
                         }
                     }
 
                     let name = quick_exit_simple!(self.expect(TokenType::ID)?);
 
-                    if dynamics > 0 && statics > 0 {
+                    if !dynamics.is_empty() && !statics.is_empty() {
                         self.error(
                             &"Mixing DYNAMIC and STATIC is not allowed".into(),
                             name.range,
                         );
                     }
-                    if dynamics > 1 {
-                        self.error(&"Cannot have multiple DYNAMIC keywords".into(), name.range);
+                    for dynamic in dynamics.iter().skip(1) {
+                        self.error(
+                            &"Cannot have multiple DYNAMIC keywords".into(),
+                            dynamic.range,
+                        );
                     }
-                    if statics > 1 {
-                        self.error(&"Cannot have multiple STATIC keywords".into(), name.range);
+                    for r#static in statics.iter().skip(1) {
+                        self.error(
+                            &"Cannot have multiple STATIC keywords".into(),
+                            r#static.range,
+                        );
                     }
+                    for post in posts.iter().skip(1) {
+                        self.error(&"Cannot have multiple POST keywords".into(), post.range);
+                    }
+                    for event in events.iter().skip(1) {
+                        self.error(&"Cannot have multiple EVENT keywords".into(), event.range);
+                    }
+
                     if let Some(LValueType::Super) =
                         previous.as_ref().map(|lvalue| &lvalue.lvalue_type)
                     {
-                        if dynamics > 0 {
+                        if let Some(dynamic) = dynamics.get(0) {
                             self.error(
                                 &"'SUPER::' calls do not support DYNAMIC".into(),
-                                name.range,
+                                dynamic.range,
                             );
                         }
-                    }
-                    if posts > 1 {
-                        self.error(&"Cannot have multiple POST keywords".into(), name.range);
-                    }
-                    if events > 1 {
-                        self.error(&"Cannot have multiple EVENT keywords".into(), name.range);
                     }
 
                     let mut arguments = Vec::new();
@@ -692,12 +732,15 @@ impl Parser {
                     }
 
                     let func = FunctionCall {
-                        name: name.content,
+                        range: Range {
+                            start: name.range.start,
+                            end,
+                        },
+                        name,
                         arguments,
-                        range: name.range,
-                        dynamic: dynamics > 0,
-                        event: events > 0,
-                        post: posts > 0,
+                        dynamic: dynamics.into_iter().next(),
+                        event: events.into_iter().next(),
+                        post: posts.into_iter().next(),
                     };
 
                     previous = match previous {
@@ -709,10 +752,7 @@ impl Parser {
                             lvalue_type: LValueType::Method(Box::new(prev), func),
                         }),
                         None => Some(LValue {
-                            range: Range {
-                                start: name.range.start,
-                                end,
-                            },
+                            range: func.range,
                             lvalue_type: LValueType::Function(func),
                         }),
                     };
@@ -722,23 +762,18 @@ impl Parser {
                     }
                 }
                 (TokenType::ID, _) => {
-                    let name = self.next()?;
-
-                    let var = VariableAccess {
-                        name: name.content,
-                        range: name.range,
-                    };
+                    let var = VariableAccess { name: self.next()? };
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
                             range: Range {
                                 start: prev.range.start,
-                                end: name.range.end,
+                                end: var.name.range.end,
                             },
                             lvalue_type: LValueType::Member(Box::new(prev), var),
                         }),
                         None => Some(LValue {
-                            range: name.range,
+                            range: var.name.range,
                             lvalue_type: LValueType::Variable(var),
                         }),
                     };
@@ -763,7 +798,7 @@ impl Parser {
 
     fn parse_argument_list_declaration(
         &mut self,
-    ) -> EOFOrParserResult<(Range, Vec<Argument>, bool)> {
+    ) -> EOFOrParserResult<(Range, Vec<Argument>, Option<Token>)> {
         let start = quick_exit_simple!(self.expect(TokenType::Symbol(tokens::Symbol::LPAREN))?)
             .range
             .start;
@@ -772,7 +807,7 @@ impl Parser {
             line: start.line,
             column: start.column + 1,
         };
-        let mut is_variadic = false;
+        let mut vararg = None;
         let mut err = None;
 
         let mut arguments = Vec::new();
@@ -783,8 +818,9 @@ impl Parser {
                     break;
                 }
                 TokenType::Symbol(tokens::Symbol::DOTDOTDOT) => {
-                    is_variadic = true;
+                    let token = self.next()?;
                     end = self.next()?.range.end;
+                    vararg = Some(token);
 
                     match self.expect(TokenType::Symbol(tokens::Symbol::RPAREN))? {
                         Ok(token) => end = token.range.end,
@@ -815,7 +851,7 @@ impl Parser {
             let name = match self.expect(TokenType::ID)? {
                 Ok(token) => {
                     end = token.range.end;
-                    token.content
+                    token
                 }
                 Err(res_err) => {
                     err = Some(res_err);
@@ -854,7 +890,7 @@ impl Parser {
             }
         }
 
-        let list = (Range { start, end }, arguments, is_variadic);
+        let list = (Range { start, end }, arguments, vararg);
         ret(list, err)
     }
 
@@ -897,11 +933,11 @@ impl Parser {
                 EventType::User(
                     returns,
                     match list {
-                        Some((range, arguments, is_variadic)) => {
-                            if is_variadic {
+                        Some((range, arguments, vararg)) => {
+                            if let Some(vararg) = vararg {
                                 self.error(
                                     &"Events cannot have variadic Arguments".into(),
-                                    name.range,
+                                    vararg.range,
                                 );
                             }
 
@@ -932,7 +968,7 @@ impl Parser {
         }
 
         let event = Event {
-            name: name.content,
+            name,
             event_type,
             range: Range { start, end },
         };
@@ -977,17 +1013,16 @@ impl Parser {
             }
         };
 
-        let token = quick_exit_simple!(self.expect(TokenType::ID)?);
-        let mut end = token.range.end;
-        let name = token.content;
+        let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+        let mut end = name.range.end;
 
         let (list, mut err) = self.parse_argument_list_declaration()?.split();
-        let (arguments, has_vararg) = match list {
-            Some((range, arguments, has_vararg)) => {
+        let (arguments, vararg) = match list {
+            Some((range, arguments, vararg)) => {
                 end = range.end;
-                (arguments, has_vararg)
+                (arguments, vararg)
             }
-            None => (Vec::new(), false),
+            None => (Vec::new(), None),
         };
 
         if err.is_none() {
@@ -1050,7 +1085,7 @@ impl Parser {
                 access,
                 name,
                 arguments,
-                has_vararg,
+                vararg,
 
                 range: Range { start, end },
             },
@@ -1237,11 +1272,11 @@ impl Parser {
                 statement_type: StatementType::Declaration(InstanceVariable {
                     access,
                     variable: Variable {
+                        range: name.range,
                         data_type,
-                        name: name.content,
+                        name,
                         constant,
                         initial_value: expression,
-                        range: name.range,
                     },
                 }),
                 range: Range { start, end },
@@ -1250,7 +1285,7 @@ impl Parser {
         )
     }
 
-    fn parse_class_id(&mut self) -> EOFOrParserResult<(Option<String>, String)> {
+    fn parse_class_id(&mut self) -> EOFOrParserResult<(Option<Token>, Token)> {
         let name = self.next()?;
         Some(
             if self
@@ -1258,11 +1293,11 @@ impl Parser {
                 .is_some()
             {
                 match self.expect(TokenType::ID)? {
-                    Ok(class_name) => Ok((Some(name.content), class_name.content)),
-                    Err(err) => Err((err, Some((None, name.content)))),
+                    Ok(class_name) => Ok((Some(name), class_name)),
+                    Err(err) => Err((err, Some((None, name)))),
                 }
             } else {
-                Ok((None, name.content))
+                Ok((None, name))
             },
         )
     }
@@ -1472,7 +1507,8 @@ impl Parser {
                                                         .into(),
                                                     range,
                                                     true,
-                                                )?.ok();
+                                                )?
+                                                .ok();
                                             }
                                         }
                                     }
@@ -1629,10 +1665,7 @@ impl Parser {
                         start,
                         stop,
                         step,
-                        variable: VariableAccess {
-                            name: name.content,
-                            range: name.range,
-                        },
+                        variable: VariableAccess { name },
                     }),
                 }))
             }
@@ -1807,19 +1840,33 @@ impl Parser {
                         };
 
                         match var {
-                            Some((data_type, name)) => catches.push((
-                                Variable {
-                                    range: Range {
-                                        start: data_type.range.start,
-                                        end: name.range.end,
+                            Some((data_type, name)) => {
+                                let range = Range {
+                                    start: data_type.range.start,
+                                    end: name.range.end,
+                                };
+                                catches.push((
+                                    Statement {
+                                        statement_type: StatementType::Declaration(
+                                            InstanceVariable {
+                                                access: Access {
+                                                    read: None,
+                                                    write: None,
+                                                },
+                                                variable: Variable {
+                                                    range,
+                                                    constant: false,
+                                                    data_type,
+                                                    name,
+                                                    initial_value: None,
+                                                },
+                                            },
+                                        ),
+                                        range,
                                     },
-                                    constant: false,
-                                    data_type,
-                                    name: name.content,
-                                    initial_value: None,
-                                },
-                                statements,
-                            )),
+                                    statements,
+                                ))
+                            }
                             None => match catches.get_mut(0) {
                                 Some((_, existing_statements)) => existing_statements,
                                 None => &mut try_statements,
@@ -1946,7 +1993,8 @@ impl Parser {
                                             &"Expected a Comparison Operator (>=, >, <=, <)".into(),
                                             range,
                                             true,
-                                        )?.ok();
+                                        )?
+                                        .ok();
                                         break;
                                     }
                                 };
@@ -1962,7 +2010,11 @@ impl Parser {
                                 CaseSpecifier {
                                     specifier_type: CaseSpecifierType::Is(
                                         operator,
-                                        tokens::Literal::NUMBER,
+                                        Literal {
+                                            literal_type: tokens::Literal::NUMBER,
+                                            content: literal.content,
+                                            range: literal.range,
+                                        },
                                     ),
                                     range: Range {
                                         start: is.range.start,
@@ -1972,10 +2024,11 @@ impl Parser {
                             }
                             TokenType::Literal(literal) => {
                                 let token = self.next()?;
-                                let spec = if let tokens::Literal::NUMBER = literal {
-                                    if self
-                                        .optional(TokenType::Keyword(tokens::Keyword::TO))?
-                                        .is_some()
+                                match literal {
+                                    tokens::Literal::NUMBER
+                                        if self
+                                            .optional(TokenType::Keyword(tokens::Keyword::TO))?
+                                            .is_some() =>
                                     {
                                         let Some(up_to_token) = self
                                             .expect(TokenType::Literal(tokens::Literal::NUMBER))?
@@ -1984,27 +2037,31 @@ impl Parser {
                                             break;
                                         };
 
-                                        Some(CaseSpecifier {
+                                        CaseSpecifier {
                                             specifier_type: CaseSpecifierType::To(
-                                                literal,
-                                                tokens::Literal::NUMBER,
+                                                Literal {
+                                                    literal_type: literal,
+                                                    content: token.content,
+                                                    range: token.range,
+                                                },
+                                                Literal {
+                                                    literal_type: tokens::Literal::NUMBER,
+                                                    content: up_to_token.content,
+                                                    range: up_to_token.range,
+                                                },
                                             ),
                                             range: Range {
                                                 start: token.range.start,
                                                 end: up_to_token.range.end,
                                             },
-                                        })
-                                    } else {
-                                        None
+                                        }
                                     }
-                                } else {
-                                    None
-                                };
-
-                                match spec {
-                                    Some(spec) => spec,
-                                    None => CaseSpecifier {
-                                        specifier_type: CaseSpecifierType::Literals(literal),
+                                    _ => CaseSpecifier {
+                                        specifier_type: CaseSpecifierType::Literals(Literal {
+                                            literal_type: literal,
+                                            content: token.content,
+                                            range: token.range,
+                                        }),
                                         range: token.range,
                                     },
                                 }
@@ -2022,7 +2079,8 @@ impl Parser {
                                     &"Expected one of (LITERAL, IS, ELSE)".into(),
                                     range,
                                     true,
-                                )?.ok();
+                                )?
+                                .ok();
                                 break;
                             }
                         };
@@ -2043,7 +2101,8 @@ impl Parser {
                                     &"Expected either ',' or a Newline".into(),
                                     range,
                                     true,
-                                )?.ok();
+                                )?
+                                .ok();
                                 break;
                             }
                         }
@@ -2127,13 +2186,13 @@ impl Parser {
 
                 let function = match lvalue.lvalue_type {
                     LValueType::Function(function) => function,
-                    LValueType::Variable(function) => FunctionCall {
-                        name: function.name,
+                    LValueType::Variable(function_name) => FunctionCall {
+                        range: function_name.name.range,
+                        name: function_name.name,
                         arguments: vec![],
-                        range: function.range,
-                        dynamic: false,
-                        event: false,
-                        post: false,
+                        dynamic: None,
+                        event: None,
+                        post: None,
                     },
                     _ => {
                         return Some(
@@ -2238,7 +2297,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END EVENT".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 _ => {
@@ -2302,7 +2362,8 @@ impl Parser {
                             .into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 _ => {
@@ -2326,7 +2387,7 @@ impl Parser {
         let start = quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokens::Keyword::ON))?)
             .range
             .start;
-        let class = quick_exit_simple_opt!(self.expect(TokenType::ID)?).content;
+        let class = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
         quick_exit_simple_opt!(self.expect(TokenType::Symbol(tokens::Symbol::DOT))?);
 
         let name = match self.peek()?.token_type {
@@ -2364,7 +2425,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END ON".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 _ => {
@@ -2376,13 +2438,7 @@ impl Parser {
         }
 
         Some(Some(TopLevel {
-            top_level_type: TopLevelType::OnBody(
-                On {
-                    class,
-                    name: name.content,
-                },
-                statements,
-            ),
+            top_level_type: TopLevelType::OnBody(On { class, name: name }, statements),
             range: Range { start, end },
         }))
     }
@@ -2398,15 +2454,23 @@ impl Parser {
         };
 
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokens::Keyword::TYPE))?);
-        let name = quick_exit_simple_opt!(self.expect(TokenType::ID)?).content;
+        let name = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
 
         let (base, mut err) = match self.expect(TokenType::Keyword(tokens::Keyword::FROM))? {
-            Ok(_) => match self.parse_class_id()?.split() {
-                (Some(name), err) => (name, err),
-                (_, err) => ((None, "nonvisualobject".into()), err),
-            },
-            Err(err) => ((None, "nonvisualobject".into()), Some(err)),
+            Ok(_) => self.parse_class_id()?.split(),
+            Err(err) => (None, Some(err)),
         };
+        let base = base.unwrap_or_else(|| {
+            (
+                None,
+                Token {
+                    token_type: TokenType::ID,
+                    content: "powerobject".into(),
+                    range: Range::default(),
+                    error: None,
+                },
+            )
+        });
 
         let within = if err.is_none()
             && self
@@ -2558,7 +2622,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END VARIABLES".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                         break;
                     }
                 },
@@ -2609,7 +2674,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END VARIABLES".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 TokenType::AccessType(new_access)
@@ -2680,7 +2746,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END PROTOTYPES".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 _ => {
@@ -2723,7 +2790,8 @@ impl Parser {
                             &"Dangling END keyword, did you mean END PROTOTYPES".into(),
                             range,
                             true,
-                        )?.ok();
+                        )?
+                        .ok();
                     }
                 },
                 _ => {

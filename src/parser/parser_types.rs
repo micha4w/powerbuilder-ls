@@ -1,6 +1,17 @@
 use anyhow::anyhow;
+use futures::future::{lazy, Either};
 
-use super::tokenizer_types::{self as tokens, Range};
+use crate::ls::powerbuilder_proto::variable;
+
+use super::{
+    tokenizer::Token,
+    tokenizer_types::{self as tokens, Position, Range},
+};
+
+pub enum EitherOr<Left, Right> {
+    Left(Left),
+    Right(Right),
+}
 
 pub enum ParseError {
     UnexpectedToken,
@@ -77,7 +88,7 @@ pub struct Access {
 pub struct Variable {
     pub constant: bool,
     pub data_type: DataType,
-    pub name: String,
+    pub name: Token,
     pub initial_value: Option<Expression>,
 
     pub range: Range,
@@ -103,8 +114,7 @@ pub struct Argument {
 
 #[derive(Debug, Clone)]
 pub struct VariableAccess {
-    pub name: String,
-    pub range: Range,
+    pub name: Token,
 }
 
 #[derive(Debug, Clone)]
@@ -112,9 +122,9 @@ pub struct Function {
     pub returns: Option<DataType>,
     pub scope_modif: Option<tokens::ScopeModif>,
     pub access: Option<tokens::AccessType>,
-    pub name: String,
+    pub name: Token,
     pub arguments: Vec<Argument>,
-    pub has_vararg: bool,
+    pub vararg: Option<Token>,
 
     pub range: Range,
 }
@@ -128,7 +138,7 @@ pub enum EventType {
 
 #[derive(Debug, Clone)]
 pub struct Event {
-    pub name: String,
+    pub name: Token,
     pub event_type: EventType,
 
     pub range: Range,
@@ -146,8 +156,8 @@ impl Event {
 
 #[derive(Debug)]
 pub struct On {
-    pub class: String,
-    pub name: String,
+    pub class: Token,
+    pub name: Token,
 }
 
 // impl Function {
@@ -169,20 +179,21 @@ pub struct On {
 
 #[derive(Debug, Clone)]
 pub struct FunctionCall {
-    pub name: String,
+    pub name: Token,
     pub arguments: Vec<Expression>,
+    pub dynamic: Option<Token>,
+    pub event: Option<Token>,
+    pub post: Option<Token>,
+
     pub range: Range,
-    pub dynamic: bool,
-    pub event: bool,
-    pub post: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Class {
     pub scope: Option<tokens::ScopeModif>,
-    pub name: String,
-    pub base: (Option<String>, String),
-    pub within: Option<(Option<String>, String)>,
+    pub name: Token,
+    pub base: (Option<Token>, Token),
+    pub within: Option<(Option<Token>, Token)>,
 }
 
 #[derive(Debug)]
@@ -211,26 +222,70 @@ pub struct LValue {
     pub lvalue_type: LValueType,
     pub range: Range,
 }
-
 impl LValue {
-    // pub fn get_type(&self) -> DataType {
-    //     match &self.lvalue_type {
-    //         LValueType::Super => DataType::Unknown,
-    //         LValueType::Variable(var) => var.data_type.clone(),
-    //         LValueType::Function(func, _) => func.returns.clone(),
-    //         LValueType::Method(_, func, _) => func.returns.clone(),
-    //         LValueType::Member(_, var) => var.data_type.clone(),
-    //         LValueType::Index(var, _) => match var.get_type() {
-    //             DataType::Array(data_type) => *data_type,
-    //             _ => DataType::Unknown,
-    //         },
-    //     }
-    // }
+    fn get_expression_at(&self, pos: &Position) -> Option<EitherOr<&Expression, &LValue>> {
+        if !self.range.contains(pos) {
+            return None;
+        }
+
+        macro_rules! ret_if_contains {
+            ( $val:expr ) => {
+                if let Some(val) = $val.get_expression_at(pos) {
+                    return Some(val);
+                }
+            };
+        }
+        macro_rules! ret_if_one_contains {
+            ( $vec:expr ) => {
+                for val in $vec {
+                    ret_if_contains!(val);
+                }
+            };
+        }
+
+        match &self.lvalue_type {
+            LValueType::This | LValueType::Super | LValueType::Parent | LValueType::Variable(_) => {
+            }
+
+            LValueType::Function(call) => ret_if_one_contains!(&call.arguments),
+            LValueType::Method(lvalue, call) => {
+                ret_if_contains!(lvalue);
+                ret_if_one_contains!(&call.arguments);
+            }
+            LValueType::Member(lvalue, _) => {
+                ret_if_contains!(lvalue);
+            }
+            LValueType::Index(lvalue, expression) => {
+                ret_if_contains!(lvalue);
+                ret_if_contains!(expression);
+            }
+        }
+
+        Some(EitherOr::Right(self))
+    }
+
+    fn get_variable_at(&self, pos: &Position) -> Option<&VariableAccess> {
+        match &self.lvalue_type {
+            LValueType::This | LValueType::Super | LValueType::Parent => {}
+            LValueType::Function(..)
+            | LValueType::Method(..)
+            | LValueType::Member(..)
+            | LValueType::Index(..) => {}
+
+            LValueType::Variable(access) => {
+                if self.range.contains(pos) {
+                    return Some(access);
+                };
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum ExpressionType {
-    Literal(tokens::Literal),
+    Literal(Literal),
     ArrayLiteral(Vec<Expression>),
     Operation(Box<Expression>, tokens::Operator, Box<Expression>),
     UnaryOperation(tokens::Operator, Box<Expression>),
@@ -250,6 +305,56 @@ pub struct Expression {
 }
 
 impl Expression {
+    pub fn get_expression_at(&self, pos: &Position) -> Option<EitherOr<&Expression, &LValue>> {
+        if !self.range.contains(pos) {
+            return None;
+        }
+
+        macro_rules! ret_if_contains {
+            ( $val:expr ) => {
+                if let Some(val) = $val.get_expression_at(pos) {
+                    return Some(val);
+                }
+            };
+        }
+        macro_rules! ret_if_one_contains {
+            ( $vec:expr ) => {
+                for val in $vec {
+                    ret_if_contains!(val);
+                }
+            };
+        }
+
+        match &self.expression_type {
+            ExpressionType::Create(..) | ExpressionType::Literal(..) => {}
+            ExpressionType::ArrayLiteral(expressions) => ret_if_one_contains!(expressions),
+            ExpressionType::Operation(left, _operator, right) => {
+                ret_if_contains!(left);
+                ret_if_contains!(right);
+            }
+            ExpressionType::UnaryOperation(_, expression)
+            | ExpressionType::IncrementDecrement(expression, _)
+            | ExpressionType::BooleanNot(expression)
+            | ExpressionType::Parenthesized(expression)
+            | ExpressionType::CreateUsing(expression) => ret_if_contains!(expression),
+
+            ExpressionType::LValue(lvalue) => ret_if_contains!(lvalue),
+            ExpressionType::Error => {}
+        };
+
+        Some(EitherOr::Left(self))
+    }
+
+    fn get_variable_at(&self, pos: &Position) -> Option<&VariableAccess> {
+        if let Some(EitherOr::Right(lvalue)) = self.get_expression_at(pos) {
+            lvalue.get_variable_at(pos)
+        } else {
+            None
+        }
+    }
+
+    // pub fn is_consteval()
+
     // TODO cache type??
     // pub fn get_type(&self) -> DataType {
     //     match &self.expression_type {
@@ -310,7 +415,7 @@ pub struct IfStatement {
 #[derive(Debug)]
 pub struct TryCatchStatement {
     pub statements: Vec<Statement>,
-    pub catches: Vec<(Variable, Vec<Statement>)>,
+    pub catches: Vec<(Statement, Vec<Statement>)>,
     pub finally: Option<Vec<Statement>>,
 }
 
@@ -331,11 +436,18 @@ pub struct WhileLoopStatement {
     pub statements: Vec<Statement>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Literal {
+    pub literal_type: tokens::Literal,
+    pub content: String,
+    pub range: Range,
+}
+
 #[derive(Debug)]
 pub enum CaseSpecifierType {
-    Literals(tokens::Literal),
-    To(tokens::Literal, tokens::Literal),
-    Is(tokens::Operator, tokens::Literal),
+    Literals(Literal),
+    To(Literal, Literal),
+    Is(tokens::Operator, Literal),
     Else,
 }
 
@@ -354,7 +466,7 @@ pub struct ChooseCaseStatement {
 #[derive(Debug)]
 pub enum CallType {
     Super,
-    Ancestor(Option<String>, String),
+    Ancestor(Option<Token>, Token),
 }
 
 #[derive(Debug)]
@@ -387,6 +499,173 @@ pub enum StatementType {
 pub struct Statement {
     pub statement_type: StatementType,
     pub range: Range,
+}
+
+impl Statement {
+    pub fn get_statement_at(&self, pos: &Position) -> Option<&Statement> {
+        if !self.range.contains(pos) {
+            return None;
+        }
+
+        macro_rules! ret_if_contains {
+            ( $val:expr ) => {
+                if let Some(val) = $val.get_statement_at(pos) {
+                    return Some(val);
+                }
+            };
+        }
+        macro_rules! ret_if_one_contains {
+            ( $vec:expr ) => {
+                for val in $vec {
+                    ret_if_contains!(val);
+                }
+            };
+        }
+
+        match &self.statement_type {
+            StatementType::Expression(..)
+            | StatementType::Throw(..)
+            | StatementType::Destroy(..)
+            | StatementType::Assignment(..)
+            | StatementType::Declaration(..)
+            | StatementType::Return(..)
+            | StatementType::Call(..)
+            | StatementType::Exit
+            | StatementType::Continue
+            | StatementType::SQL
+            | StatementType::Error => {}
+
+            StatementType::If(if_statement) => {
+                ret_if_one_contains!(&if_statement.statements);
+                ret_if_one_contains!(&if_statement.else_statements);
+
+                for (_expression, statements) in &if_statement.elseif_statements {
+                    ret_if_one_contains!(statements);
+                }
+            }
+            StatementType::TryCatch(try_catch_statement) => {
+                ret_if_one_contains!(&try_catch_statement.statements);
+                if let Some(statements) = &try_catch_statement.finally {
+                    ret_if_one_contains!(statements);
+                };
+
+                for (variable, statements) in &try_catch_statement.catches {
+                    ret_if_contains!(variable);
+                    ret_if_one_contains!(statements);
+                }
+            }
+            StatementType::Choose(choose_case_statement) => {
+                for (_, statements) in &choose_case_statement.cases {
+                    ret_if_one_contains!(statements);
+                }
+            }
+            StatementType::ForLoop(for_loop) => {
+                ret_if_one_contains!(&for_loop.statements)
+            }
+            StatementType::WhileLoop(while_loop) => {
+                ret_if_one_contains!(&while_loop.statements)
+            }
+        };
+
+        Some(self)
+    }
+
+    pub fn get_expression_at(&self, pos: &Position) -> Option<EitherOr<&Expression, &LValue>> {
+        macro_rules! ret_if_contains {
+            ( $val:expr ) => {
+                if let Some(expression) = $val.get_expression_at(pos) {
+                    return Some(expression);
+                }
+            };
+        }
+
+        let statement = self.get_statement_at(pos)?;
+
+        match &statement.statement_type {
+            StatementType::Expression(expression) |
+            StatementType::Throw(expression) |
+            StatementType::Destroy(expression) |
+            StatementType::Return(Some(expression)) => {
+                ret_if_contains!(expression);
+            }
+            StatementType::Assignment(lvalue, expression) => {
+                ret_if_contains!(lvalue);
+                ret_if_contains!(expression);
+            }
+            StatementType::Declaration(var) => {
+                if let Some(expression) = &var.variable.initial_value {
+                    ret_if_contains!(expression);
+                }
+            }
+            StatementType::TryCatch(..) |
+            StatementType::Return(None) |
+            StatementType::Call(..) | // TODO
+            StatementType::Exit |
+            StatementType::Continue |
+            StatementType::SQL |
+            StatementType::Error => {},
+
+            StatementType::If(if_statement) => {
+                ret_if_contains!(&if_statement.condition);
+                for (expression, _) in &if_statement.elseif_statements {
+                    ret_if_contains!(expression);
+                }
+            },
+            StatementType::ForLoop(for_loop) => {
+                ret_if_contains!(&for_loop.start);
+                ret_if_contains!(&for_loop.stop);
+                if let Some(step) = &for_loop.step {
+                    ret_if_contains!(step);
+                };
+            },
+            StatementType::WhileLoop(while_loop) => {
+                ret_if_contains!(&while_loop.condition);
+            },
+            StatementType::Choose(choose_case) => {
+                ret_if_contains!(&choose_case.choose);
+            },
+        };
+
+        None
+    }
+
+    pub fn get_variable_at(
+        &self,
+        pos: &Position,
+    ) -> Option<EitherOr<&InstanceVariable, &VariableAccess>> {
+        let statement = self.get_statement_at(pos)?;
+        if let Some(EitherOr::Right(lvalue)) = statement.get_expression_at(pos) {
+            return lvalue.get_variable_at(pos).map(EitherOr::Right);
+        }
+
+        match &statement.statement_type {
+            StatementType::Declaration(var) => {
+                if var.variable.name.range.contains(pos) {
+                    return Some(EitherOr::Left(var));
+                }
+            }
+            StatementType::Expression(expression) => {}
+            StatementType::Throw(expression) => {}
+            StatementType::Destroy(expression) => {}
+            StatementType::Assignment(lvalue, expression) => {}
+            StatementType::If(if_statement) => {}
+            StatementType::TryCatch(try_catch) => {}
+            StatementType::ForLoop(for_loop) => {
+                if for_loop.variable.name.range.contains(pos) {
+                    return Some(EitherOr::Right(&for_loop.variable));
+                }
+            }
+            StatementType::WhileLoop(while_loop) => todo!(),
+            StatementType::Choose(choose_case) => todo!(),
+            StatementType::Return(expression) => todo!(),
+            StatementType::Call(call) => todo!(),
+            StatementType::Exit => todo!(),
+            StatementType::Continue => todo!(),
+            StatementType::SQL => todo!(),
+            StatementType::Error => todo!(),
+        };
+        None
+    }
 }
 
 #[derive(Debug)]
