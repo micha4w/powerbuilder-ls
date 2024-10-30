@@ -67,7 +67,7 @@ impl Into<tower_lsp::lsp_types::Range> for Range {
     }
 }
 
-#[derive(Clone, Copy, EnumString, Debug, PartialEq)]
+#[derive(Clone, Copy, EnumString, Debug, PartialEq, Display)]
 pub enum Literal {
     NUMBER,
     DATE,

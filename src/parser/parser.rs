@@ -762,7 +762,10 @@ impl Parser {
                     }
                 }
                 (TokenType::ID, _) => {
-                    let var = VariableAccess { name: self.next()? };
+                    let var = VariableAccess {
+                        name: self.next()?,
+                        is_write: false,
+                    };
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
@@ -1318,64 +1321,80 @@ impl Parser {
                         (Some(expression), mut err) => {
                             match (expression, self.peek()?.token_type) {
                                 (
-                                    Expression {
+                                    expression @ Expression {
                                         expression_type:
-                                            ExpressionType::Operation(left, tokens::Operator::EQ, right),
+                                            ExpressionType::Operation(_, tokens::Operator::EQ, _),
                                         ..
                                     },
-                                    _,
-                                ) if matches!(left.expression_type, ExpressionType::LValue(_),) => {
-                                    if let ExpressionType::LValue(lvalue) = left.expression_type {
-                                        if err.is_none() {
-                                            self.expect(TokenType::NEWLINE)?.ok();
+                                    assigner,
+                                )
+                                | (expression, assigner @ TokenType::SpecialAssignment(_)) => {
+                                    let (left, right) = match expression.expression_type {
+                                        ExpressionType::Operation(
+                                            left,
+                                            tokens::Operator::EQ,
+                                            right,
+                                        ) => (*left, *right),
+                                        _ => {
+                                            self.next()?;
+                                            (
+                                                expression,
+                                                match self.parse_expression()? {
+                                                    Ok(right) => right,
+                                                    Err((res_err, Some(right))) => {
+                                                        err = Some(res_err);
+                                                        right
+                                                    }
+                                                    Err((_, None)) => return Some(None),
+                                                },
+                                            )
                                         }
-                                        Some(Some(Statement {
-                                            range: Range {
-                                                start: left.range.start,
-                                                end: right.range.end,
-                                            },
-                                            statement_type: StatementType::Assignment(
-                                                lvalue, *right,
-                                            ),
-                                        }))
-                                    } else {
-                                        unreachable!()
-                                    }
-                                }
-                                (expression, TokenType::SpecialAssignment(_)) => {
-                                    self.next()?;
-                                    if err.is_none() {
-                                        let exp;
-                                        (exp, err) = self.parse_expression()?.split();
+                                    };
 
-                                        if let Some(value) = exp {
-                                            if let ExpressionType::LValue(lvalue) =
-                                                value.expression_type
-                                            {
+                                    let operator = match assigner {
+                                        TokenType::SpecialAssignment(operator) => Some(operator),
+                                        _ => None,
+                                    };
+
+                                    match left.expression_type {
+                                        ExpressionType::LValue(mut lvalue) => {
+                                            match lvalue.lvalue_type {
+                                            LValueType::Variable(ref mut access)
+                                            | LValueType::Member(_, ref mut access) => {
+                                                access.is_write = true;
+
                                                 if err.is_none() {
                                                     self.expect(TokenType::NEWLINE)?.ok();
                                                 }
+
                                                 Some(Some(Statement {
-                                                    range: expression.range,
+                                                    range: Range {
+                                                        start: left.range.start,
+                                                        end: right.range.end,
+                                                    },
                                                     statement_type: StatementType::Assignment(
-                                                        lvalue, expression,
+                                                        lvalue, operator, right
                                                     ),
                                                 }))
-                                            } else {
-                                                Some(
-                                                    self.fatal(
-                                                        &"Cannot assign to non-LValue".into(),
-                                                        value.range,
-                                                        true,
-                                                    )?
-                                                    .ok(),
-                                                )
                                             }
-                                        } else {
-                                            Some(None)
+                                            _ => Some(
+                                                self.fatal(
+                                                    &"Can only assign to LValue of type Variable or Member".into(),
+                                                    left.range,
+                                                    true,
+                                                )?
+                                                .ok(),
+                                            ),
                                         }
-                                    } else {
-                                        Some(None)
+                                        }
+                                        _ => Some(
+                                            self.fatal(
+                                                &"Cannot assign to non-LValue".into(),
+                                                left.range,
+                                                true,
+                                            )?
+                                            .ok(),
+                                        ),
                                     }
                                 }
                                 (expression, _) => {
@@ -1627,17 +1646,13 @@ impl Parser {
 
                 let end = stop.range.end;
 
-                let step = match self.optional(TokenType::Keyword(tokens::Keyword::STEP))? {
-                    Some(_) => {
-                        let (step, err) = self.parse_expression()?.split();
-                        if err.is_none() {
-                            self.expect(TokenType::NEWLINE)?.ok();
-                        }
-
-                        step
-                    }
-                    _ => None,
+                let (step, err) = match self.optional(TokenType::Keyword(tokens::Keyword::STEP))? {
+                    Some(_) => self.parse_expression()?.split(),
+                    _ => (None, None),
                 };
+                if err.is_none() {
+                    self.expect(TokenType::NEWLINE)?.ok();
+                }
 
                 let mut statements = Vec::new();
                 loop {
@@ -1665,7 +1680,10 @@ impl Parser {
                         start,
                         stop,
                         step,
-                        variable: VariableAccess { name },
+                        variable: VariableAccess {
+                            name,
+                            is_write: false,
+                        },
                     }),
                 }))
             }

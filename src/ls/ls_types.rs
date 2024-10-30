@@ -2,18 +2,21 @@ use core::panic;
 use std::{
     backtrace::Backtrace,
     collections::HashMap,
+    env::var_os,
     mem,
     ops::Deref,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Weak},
 };
 
 use dashmap::mapref::one::Ref;
 use futures::{
     future::{self, BoxFuture, Either},
-    FutureExt,
+    stream::{self, FuturesOrdered},
+    FutureExt, Stream, StreamExt,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::{
     ls::add_file,
@@ -556,59 +559,6 @@ impl Class {
         }
     }
 
-    pub async fn get_accessible_variables(
-        &self,
-        state: &LintState<'_>,
-        access: &tokens::AccessType,
-        write: bool,
-    ) -> (
-        Vec<(IString, Arc<Mutex<Variable>>)>,
-        Vec<(IString, Arc<Mutex<Variable>>, &'static str)>,
-    ) {
-        let mut variables = Vec::new();
-        let mut err_variables = Vec::new();
-
-        let mut class_arc_holder;
-        let mut class_holder = None;
-        let mut class = self;
-        let mut strictness = access.strictness();
-        loop {
-            for (name, var) in &class.instance_variables {
-                let access = var.lock().await.unwrap_instance().1.access.clone();
-                if write
-                    .then_some(&access.write)
-                    .unwrap_or(&access.read)
-                    .map_or(0, |acc| acc.strictness())
-                    <= strictness
-                {
-                    variables.push((name.clone(), var.clone()));
-                } else {
-                    err_variables.push((
-                        name.clone(),
-                        var.clone(),
-                        "Cannot access Private Variable",
-                    ));
-                }
-            }
-
-            match state.find_class(&class.base).await {
-                Some(Complex::Class(cls)) => {
-                    drop(class_holder);
-                    class_arc_holder = cls.clone();
-                    class_holder = Some(class_arc_holder.lock().await);
-                    class = class_holder.as_ref().unwrap();
-                }
-                Some(Complex::Enum(_)) | None => break,
-            }
-
-            if strictness < tokens::AccessType::PRIVATE.strictness() {
-                strictness = tokens::AccessType::PROTECTED.strictness();
-            }
-        }
-
-        (variables, err_variables)
-    }
-
     pub async fn find_variable(
         &self,
         state: &LintState<'_>,
@@ -865,65 +815,105 @@ impl<'a> LintState<'a> {
         (data_types, err_data_types)
     }
 
-    pub async fn get_accessible_variables(
-        &self,
-        local_before: &Position,
+    async fn get_variables_helper<'b>(
+        &'b self,
+        local_before: &'b Position,
         write: bool,
-    ) -> (
-        Vec<(IString, Arc<Mutex<Variable>>)>,
-        Vec<(IString, Arc<Mutex<Variable>>, &'static str)>,
-    ) {
-        let mut variables = Vec::new();
-        let mut err_variables = Vec::new();
+        accessible: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, Option<String>)> + Send + 'b {
+        let wants_accessible = accessible;
+        let variables = stream::iter(&self.variables).filter_map(move |(name, var)| async move {
+            let is_accessible = &var.lock().await.parsed().range.end < local_before;
 
-        for (name, var) in &self.variables {
-            if &var.lock().await.parsed().range.end < local_before {
-                variables.push((name.clone(), var.clone()));
+            if is_accessible == wants_accessible {
+                let err = (!accessible).then(|| "Variable has not been defined yet".to_string());
+                Some((name.clone(), var.clone(), err))
             } else {
-                err_variables.push((
-                    name.clone(),
-                    var.clone(),
-                    "Variable has not been defined yet",
-                ));
+                None
             }
-        }
+        });
 
-        if let Some(current_class) = &self.class {
-            let (vars, err_vars) = current_class
-                .lock()
-                .await
-                .get_accessible_variables(self, &tokens::AccessType::PRIVATE, write)
-                .await;
+        let variables: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if let Some(current_class) = &self.class {
+                Box::pin(
+                    variables.chain(
+                        self.get_variables_in_class_helper(
+                            current_class.clone(),
+                            &tokens::AccessType::PRIVATE,
+                            write,
+                            accessible,
+                        )
+                        .await,
+                    ),
+                )
+            } else {
+                Box::pin(variables)
+            };
 
-            variables.extend(vars);
-            err_variables.extend(err_vars);
-        }
+        let variables = variables.chain(
+            stream::iter(&self.file.as_ref().variables)
+                .map(|(name, var)| (name.clone(), var.clone(), None)),
+        );
 
-        for (name, var) in &self.file.as_ref().variables {
-            variables.push((name.clone(), var.clone()));
-        }
+        let current_path = self.file.as_ref().path.clone();
+        let proj = self.proj.clone();
+        let variables = variables.chain(
+            stream::once(async move {
+                let mut variables: Pin<Box<dyn Stream<Item = _> + Send>> =
+                    Box::pin(stream::empty());
 
-        let proj = self.proj.read().await;
-        for (path, _file_lock) in &proj.files {
-            if self.file.as_ref().path == *path {
-                continue;
-            }
+                for (path, file) in &proj.read().await.files {
+                    if &current_path == path {
+                        continue;
+                    }
 
-            let file = _file_lock.read().await;
+                    let accessible = accessible;
+                    variables = Box::pin(variables.chain(
+                        stream::iter(file.read().await.variables.clone()).filter_map(
+                            move |(name, var)| async move {
+                                let is_accessible = match var.lock().await.unwrap_scoped().scope {
+                                    tokens::ScopeModif::GLOBAL => true,
+                                    tokens::ScopeModif::SHARED => false,
+                                };
 
-            for (name, var) in &file.variables {
-                match var.lock().await.unwrap_scoped().scope {
-                    tokens::ScopeModif::GLOBAL => variables.push((name.clone(), var.clone())),
-                    tokens::ScopeModif::SHARED => err_variables.push((
-                        name.clone(),
-                        var.clone(),
-                        "Variable is not defined as Global",
-                    )),
+                                if is_accessible == accessible {
+                                    let err = (!accessible)
+                                        .then(|| "Variable is not defined as Global".to_string());
+                                    Some((name.clone(), var.clone(), err))
+                                } else {
+                                    None
+                                }
+                            },
+                        ),
+                    ));
                 }
-            }
-        }
 
-        (variables, err_variables)
+                variables
+            })
+            .flatten(),
+        );
+
+        variables
+    }
+
+    pub async fn get_variables<'b>(
+        &'b self,
+        local_before: &'b Position,
+        write: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>)> + Send + 'b {
+        self.get_variables_helper(local_before, write, true)
+            .await
+            .map(|(name, var, _)| (name, var))
+    }
+
+    pub async fn get_inaccessible_variables<'b>(
+        &'b self,
+        local_before: &'b Position,
+        write: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, String)> + Send + 'b {
+        self.get_variables_helper(local_before, write, true)
+            .await
+            .map(|(name, var, err)| (name, var, err.unwrap()))
     }
 
     pub async fn find_variable(
@@ -1148,6 +1138,80 @@ impl<'a> LintState<'a> {
             .await
             .iter()
             .all(|x| *x)
+    }
+
+    async fn get_variables_in_class_helper<'b>(
+        &'b self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &'b tokens::AccessType,
+        write: bool,
+        accessible: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, Option<String>)> + Send + 'b {
+        let var_iter = class_mut
+            .lock()
+            .await
+            .instance_variables
+            .clone()
+            .into_iter();
+
+        stream::unfold(
+            (class_mut, var_iter, access.strictness()),
+            move |(mut class_mut, mut var_iter, mut strictness)| async move {
+                loop {
+                    while let Some((name, var)) = var_iter.next() {
+                        let access = var.lock().await.unwrap_instance().1.access.clone();
+                        let is_accessible = write
+                            .then_some(&access.write)
+                            .unwrap_or(&access.read)
+                            .map_or(0, |acc| acc.strictness())
+                            <= strictness;
+
+                        if is_accessible == accessible {
+                            let err =
+                                (!accessible).then(|| "Cannot access Private Variable".to_string());
+                            return Some(((name, var, err), (class_mut, var_iter, strictness)));
+                        }
+                    }
+
+                    let complex = self.find_class(&class_mut.lock().await.base).await;
+                    match complex {
+                        Some(Complex::Class(cls)) => {
+                            var_iter = cls.lock().await.instance_variables.clone().into_iter();
+                            class_mut = cls.clone();
+                        }
+                        Some(Complex::Enum(_)) | None => break,
+                    }
+
+                    if strictness < tokens::AccessType::PRIVATE.strictness() {
+                        strictness = tokens::AccessType::PROTECTED.strictness();
+                    }
+                }
+
+                None
+            },
+        )
+    }
+
+    pub async fn get_variables_in_class<'b>(
+        &'b self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &'b tokens::AccessType,
+        write: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>)> + Send + 'b {
+        self.get_variables_in_class_helper(class_mut, access, write, true)
+            .await
+            .map(|(name, var, _)| (name, var))
+    }
+
+    pub async fn get_inaccessible_variables_in_class<'b>(
+        &'b self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &'b tokens::AccessType,
+        write: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, String)> + Send + 'b {
+        self.get_variables_in_class_helper(class_mut, access, write, true)
+            .await
+            .map(|(name, var, err)| (name, var, err.unwrap()))
     }
 
     pub fn find_callable_function_in_class<'b>(

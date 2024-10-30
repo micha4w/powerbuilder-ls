@@ -4,8 +4,10 @@ mod parser;
 use std::collections::HashMap;
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use futures::{pin_mut, StreamExt};
 use ls::ls_types::{self, LintState, MaybeMut};
 use ls::ls_types::{LintProgress, Project};
 use tokio::sync::RwLock;
@@ -325,19 +327,25 @@ impl LanguageServer for PowerBuilderLS {
 
         match top_level_type.get_expression_at(pos) {
             Some(EitherOr::Left(expression)) => match &expression.expression_type {
-                parser_types::ExpressionType::Literal(literal) => todo!(),
-                parser_types::ExpressionType::ArrayLiteral(vec) => todo!(),
-                parser_types::ExpressionType::Operation(expression, operator, expression1) => {
-                    todo!()
+                parser_types::ExpressionType::Literal(literal) => {
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Scalar(MarkedString::String(format!(
+                            "{} (literal): {}",
+                            literal.content, literal.literal_type
+                        ))),
+                        range: Some(literal.range.into()),
+                    }));
                 }
-                parser_types::ExpressionType::UnaryOperation(operator, expression) => todo!(),
-                parser_types::ExpressionType::IncrementDecrement(expression, symbol) => todo!(),
-                parser_types::ExpressionType::BooleanNot(expression) => todo!(),
-                parser_types::ExpressionType::Parenthesized(expression) => todo!(),
-                parser_types::ExpressionType::Create(data_type) => todo!(),
-                parser_types::ExpressionType::CreateUsing(expression) => todo!(),
-                parser_types::ExpressionType::LValue(lvalue) => todo!(),
-                parser_types::ExpressionType::Error => todo!(),
+                parser_types::ExpressionType::ArrayLiteral(vec) => {}
+                parser_types::ExpressionType::Operation(expression, operator, expression1) => {}
+                parser_types::ExpressionType::UnaryOperation(operator, expression) => {}
+                parser_types::ExpressionType::IncrementDecrement(expression, symbol) => {}
+                parser_types::ExpressionType::BooleanNot(expression) => {}
+                parser_types::ExpressionType::Parenthesized(expression) => {}
+                parser_types::ExpressionType::Create(data_type) => {}
+                parser_types::ExpressionType::CreateUsing(expression) => {}
+                parser_types::ExpressionType::LValue(lvalue) => unreachable!(),
+                parser_types::ExpressionType::Error => {}
             },
             Some(EitherOr::Right(lvalue)) => match &lvalue.lvalue_type {
                 parser_types::LValueType::This => {
@@ -376,10 +384,13 @@ impl LanguageServer for PowerBuilderLS {
                     }));
                 }
                 parser_types::LValueType::Variable(access) => {
-                    let (vars, _) = state
-                        .get_accessible_variables(&lvalue.range.end, false)
-                        .await;
-                    for (name, var) in vars {
+                    let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
+                        state
+                            .get_variables(&lvalue.range.end, access.is_write)
+                            .await,
+                    );
+
+                    while let Some((name, var)) = vars.next().await {
                         if name == (&access.name.content).into() {
                             let contents = name.to_string()
                                 + " (variable):"
@@ -399,17 +410,17 @@ impl LanguageServer for PowerBuilderLS {
                             if let Some(ls_types::Complex::Class(class_mut)) =
                                 state.find_class(&grouped_name).await
                             {
-                                let class = class_mut.lock().await;
+                                let mut vars = Box::pin(
+                                    state
+                                        .get_variables_in_class(
+                                            class_mut,
+                                            &parser::tokenizer_types::AccessType::PRIVATE,
+                                            access.is_write,
+                                        )
+                                        .await,
+                                );
 
-                                let (vars, _) = class
-                                    .get_accessible_variables(
-                                        &state,
-                                        &parser::tokenizer_types::AccessType::PRIVATE,
-                                        false,
-                                    )
-                                    .await;
-
-                                for (name, var) in vars {
+                                while let Some((name, var)) = vars.next().await {
                                     if name == (&access.name.content).into() {
                                         let contents = name.to_string()
                                             + " (variable):"
@@ -428,7 +439,7 @@ impl LanguageServer for PowerBuilderLS {
                         typ => {}
                     }
                 }
-                parser_types::LValueType::Function(call) => todo!(),
+                parser_types::LValueType::Function(call) => {}
                 parser_types::LValueType::Method(lvalue, call) => todo!(),
                 parser_types::LValueType::Index(lvalue, expression) => todo!(),
             },
@@ -497,185 +508,185 @@ impl LanguageServer for PowerBuilderLS {
             return Err(jsonrpc::Error::internal_error());
         }
 
-        let proj = self.m.proj.read().await;
-        let Some(file_lock) = proj.files.get(&path) else {
-            return Ok(None);
-        };
-        let mut file = file_lock.write().await;
-        let top_levels = match &file.top_levels {
-            ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
-            _ => return Ok(None),
-        };
+        // let proj = self.m.proj.read().await;
+        // let Some(file_lock) = proj.files.get(&path) else {
+        //     return Ok(None);
+        // };
+        // let mut file = file_lock.write().await;
+        // let top_levels = match &file.top_levels {
+        //     ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
+        //     _ => return Ok(None),
+        // };
 
-        let pos = &params.text_document_position.position.into();
-        if let Some((_, top_level_type)) = top_levels.iter().find(|(range, _)| range.contains(pos))
-        {
-            match top_level_type {
-                ls_types::TopLevelType::ForwardDecl(_) => todo!(),
-                ls_types::TopLevelType::ScopedVariableDecl(_) => todo!(),
-                ls_types::TopLevelType::ScopedVariablesDecl(_) => todo!(),
-                ls_types::TopLevelType::DatatypeDecl(_) => todo!(),
-                ls_types::TopLevelType::TypeVariablesDecl(_) => todo!(),
-                ls_types::TopLevelType::FunctionsForwardDecl(_) => todo!(),
-                ls_types::TopLevelType::ExternalFunctions(_) => todo!(),
-                ls_types::TopLevelType::FunctionBody((
-                    (_parsed, _statements),
-                    (class_mut, function),
-                )) => {
-                    async fn add_variable(
-                        items: &mut Vec<CompletionItem>,
-                        var: &ls_types::Variable,
-                        err: Option<String>,
-                    ) {
-                        let name = var.parsed().name.clone();
-                        let data_type = var.data_type.to_string();
-                        let variable_type = match &var.variable_type {
-                            ls_types::VariableType::Local(_) => "Local Variable".into(),
-                            ls_types::VariableType::Scoped(scoped_variable) => {
-                                match scoped_variable.scope {
-                                    parser::tokenizer_types::ScopeModif::GLOBAL => {
-                                        "Global Variable".into()
-                                    }
-                                    parser::tokenizer_types::ScopeModif::SHARED => {
-                                        "Shared Variable".into()
-                                    }
-                                }
-                            }
-                            ls_types::VariableType::Argument(_) => "Argument".into(),
-                            ls_types::VariableType::Instance((class_weak, _)) => {
-                                match class_weak.upgrade() {
-                                    Some(class) => {
-                                        format!("Instance variable of {}", class.lock().await.name)
-                                    }
-                                    None => "Instance Variable".into(),
-                                }
-                            }
-                        };
+        // let pos = &params.text_document_position.position.into();
+        // if let Some((_, top_level_type)) = top_levels.iter().find(|(range, _)| range.contains(pos))
+        // {
+        //     match top_level_type {
+        //         ls_types::TopLevelType::ForwardDecl(_) => todo!(),
+        //         ls_types::TopLevelType::ScopedVariableDecl(_) => todo!(),
+        //         ls_types::TopLevelType::ScopedVariablesDecl(_) => todo!(),
+        //         ls_types::TopLevelType::DatatypeDecl(_) => todo!(),
+        //         ls_types::TopLevelType::TypeVariablesDecl(_) => todo!(),
+        //         ls_types::TopLevelType::FunctionsForwardDecl(_) => todo!(),
+        //         ls_types::TopLevelType::ExternalFunctions(_) => todo!(),
+        //         ls_types::TopLevelType::FunctionBody((
+        //             (_parsed, _statements),
+        //             (class_mut, function),
+        //         )) => {
+        //             async fn add_variable(
+        //                 items: &mut Vec<CompletionItem>,
+        //                 var: &ls_types::Variable,
+        //                 err: Option<String>,
+        //             ) {
+        //                 let name = var.parsed().name.clone();
+        //                 let data_type = var.data_type.to_string();
+        //                 let variable_type = match &var.variable_type {
+        //                     ls_types::VariableType::Local(_) => "Local Variable".into(),
+        //                     ls_types::VariableType::Scoped(scoped_variable) => {
+        //                         match scoped_variable.scope {
+        //                             parser::tokenizer_types::ScopeModif::GLOBAL => {
+        //                                 "Global Variable".into()
+        //                             }
+        //                             parser::tokenizer_types::ScopeModif::SHARED => {
+        //                                 "Shared Variable".into()
+        //                             }
+        //                         }
+        //                     }
+        //                     ls_types::VariableType::Argument(_) => "Argument".into(),
+        //                     ls_types::VariableType::Instance((class_weak, _)) => {
+        //                         match class_weak.upgrade() {
+        //                             Some(class) => {
+        //                                 format!("Instance variable of {}", class.lock().await.name)
+        //                             }
+        //                             None => "Instance Variable".into(),
+        //                         }
+        //                     }
+        //                 };
 
-                        let unavailable = err.as_ref().map(|_| true);
+        //                 let unavailable = err.as_ref().map(|_| true);
 
-                        let detail = format!("{} {} : {}", name.content, data_type, variable_type);
+        //                 let detail = format!("{} {} : {}", name.content, data_type, variable_type);
 
-                        items.push(CompletionItem {
-                            label: name.content,
-                            label_details: Some(CompletionItemLabelDetails {
-                                detail: None,
-                                description: Some(data_type),
-                            }),
-                            detail: Some(detail),
-                            deprecated: unavailable,
-                            documentation: err.map(Documentation::String),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            ..Default::default()
-                        });
-                    }
+        //                 items.push(CompletionItem {
+        //                     label: name.content,
+        //                     label_details: Some(CompletionItemLabelDetails {
+        //                         detail: None,
+        //                         description: Some(data_type),
+        //                     }),
+        //                     detail: Some(detail),
+        //                     deprecated: unavailable,
+        //                     documentation: err.map(Documentation::String),
+        //                     kind: Some(CompletionItemKind::VARIABLE),
+        //                     ..Default::default()
+        //                 });
+        //             }
 
-                    async fn add_data_type(
-                        items: &mut Vec<CompletionItem>,
-                        data_type: &ls_types::DataType,
-                        err: Option<String>,
-                    ) {
-                        let name = data_type.to_string();
+        //             async fn add_data_type(
+        //                 items: &mut Vec<CompletionItem>,
+        //                 data_type: &ls_types::DataType,
+        //                 err: Option<String>,
+        //             ) {
+        //                 let name = data_type.to_string();
 
-                        let unavailable = err.as_ref().map(|_| true);
+        //                 let unavailable = err.as_ref().map(|_| true);
 
-                        items.push(CompletionItem {
-                            label: name,
-                            // label_details: Some(CompletionItemLabelDetails {
-                            // detail: None,
-                            // description: Some(data_type),
-                            // }),
-                            // detail: Some(detail),
-                            deprecated: unavailable,
-                            documentation: err.map(Documentation::String),
-                            kind: Some(CompletionItemKind::CLASS),
-                            ..Default::default()
-                        });
-                    }
+        //                 items.push(CompletionItem {
+        //                     label: name,
+        //                     // label_details: Some(CompletionItemLabelDetails {
+        //                     // detail: None,
+        //                     // description: Some(data_type),
+        //                     // }),
+        //                     // detail: Some(detail),
+        //                     deprecated: unavailable,
+        //                     documentation: err.map(Documentation::String),
+        //                     kind: Some(CompletionItemKind::CLASS),
+        //                     ..Default::default()
+        //                 });
+        //             }
 
-                    let mut state = LintState {
-                        proj: self.m.proj.clone(),
-                        class: class_mut.clone(),
-                        variables: function
-                            .lock()
-                            .await
-                            .definition
-                            .as_ref()
-                            .map_or(HashMap::new(), |def| def.variables.clone()),
-                        return_type: ls_types::DataType::Void,
-                        file: MaybeMut::No(&file),
-                    };
+        //             let mut state = LintState {
+        //                 proj: self.m.proj.clone(),
+        //                 class: class_mut.clone(),
+        //                 variables: function
+        //                     .lock()
+        //                     .await
+        //                     .definition
+        //                     .as_ref()
+        //                     .map_or(HashMap::new(), |def| def.variables.clone()),
+        //                 return_type: ls_types::DataType::Void,
+        //                 file: MaybeMut::No(&file),
+        //             };
 
-                    let (variables, err_variables) =
-                        state.get_accessible_variables(pos, false).await;
+        //             let (variables, err_variables) =
+        //                 state.get_accessible_variables(pos, false).await;
 
-                    for (_, var) in variables {
-                        add_variable(&mut items, &&var.lock().await, None).await;
-                    }
-                    for (_, var, err) in err_variables {
-                        add_variable(&mut items, &&var.lock().await, Some(err.into())).await;
-                    }
+        //             for (_, var) in variables {
+        //                 add_variable(&mut items, &&var.lock().await, None).await;
+        //             }
+        //             for (_, var, err) in err_variables {
+        //                 add_variable(&mut items, &&var.lock().await, Some(err.into())).await;
+        //             }
 
-                    let (data_types, err_data_types) = state.get_accessible_data_types().await;
-                    for data_type in data_types {
-                        add_data_type(&mut items, &data_type, None).await;
-                    }
-                    for (data_type, err) in err_data_types {
-                        add_data_type(&mut items, &data_type, Some(err.into())).await;
-                    }
+        //             let (data_types, err_data_types) = state.get_accessible_data_types().await;
+        //             for data_type in data_types {
+        //                 add_data_type(&mut items, &data_type, None).await;
+        //             }
+        //             for (data_type, err) in err_data_types {
+        //                 add_data_type(&mut items, &data_type, Some(err.into())).await;
+        //             }
 
-                    let proj = self.m.proj.read().await;
-                    for class_mut in proj.builtin_classes.values() {
-                        let class = class_mut.lock().await;
-                        items.push(CompletionItem {
-                            label: class.name.clone(),
-                            label_details: Some(CompletionItemLabelDetails {
-                                detail: None,
-                                description: Some("builtin class".into()),
-                            }),
-                            detail: Some(class.name.clone() + " from " + class.base.name.as_str()),
-                            documentation: class.help.clone().map(|help| {
-                                Documentation::MarkupContent(MarkupContent {
-                                    kind: MarkupKind::PlainText,
-                                    value: help,
-                                })
-                            }),
-                            kind: Some(CompletionItemKind::CLASS),
-                            ..Default::default()
-                        });
-                    }
+        //             let proj = self.m.proj.read().await;
+        //             for class_mut in proj.builtin_classes.values() {
+        //                 let class = class_mut.lock().await;
+        //                 items.push(CompletionItem {
+        //                     label: class.name.clone(),
+        //                     label_details: Some(CompletionItemLabelDetails {
+        //                         detail: None,
+        //                         description: Some("builtin class".into()),
+        //                     }),
+        //                     detail: Some(class.name.clone() + " from " + class.base.name.as_str()),
+        //                     documentation: class.help.clone().map(|help| {
+        //                         Documentation::MarkupContent(MarkupContent {
+        //                             kind: MarkupKind::PlainText,
+        //                             value: help,
+        //                         })
+        //                     }),
+        //                     kind: Some(CompletionItemKind::CLASS),
+        //                     ..Default::default()
+        //                 });
+        //             }
 
-                    for enumerated_mut in proj.builtin_enums.values() {
-                        let enumerated = enumerated_mut.lock().await;
-                        items.push(CompletionItem {
-                            label: enumerated.name.clone(),
-                            label_details: Some(CompletionItemLabelDetails {
-                                detail: None,
-                                description: Some("enum".into()),
-                            }),
-                            documentation: enumerated.help.clone().map(Documentation::String),
-                            kind: Some(CompletionItemKind::ENUM),
-                            ..Default::default()
-                        });
+        //             for enumerated_mut in proj.builtin_enums.values() {
+        //                 let enumerated = enumerated_mut.lock().await;
+        //                 items.push(CompletionItem {
+        //                     label: enumerated.name.clone(),
+        //                     label_details: Some(CompletionItemLabelDetails {
+        //                         detail: None,
+        //                         description: Some("enum".into()),
+        //                     }),
+        //                     documentation: enumerated.help.clone().map(Documentation::String),
+        //                     kind: Some(CompletionItemKind::ENUM),
+        //                     ..Default::default()
+        //                 });
 
-                        for member in &enumerated.values {
-                            items.push(CompletionItem {
-                                label: member.clone() + "!",
-                                label_details: Some(CompletionItemLabelDetails {
-                                    detail: None,
-                                    description: Some(enumerated.name.clone()),
-                                }),
-                                documentation: enumerated.help.clone().map(Documentation::String),
-                                kind: Some(CompletionItemKind::ENUM_MEMBER),
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                ls_types::TopLevelType::EventBody(_) => todo!(),
-                ls_types::TopLevelType::OnBody(_) => todo!(),
-            };
-        };
+        //                 for member in &enumerated.values {
+        //                     items.push(CompletionItem {
+        //                         label: member.clone() + "!",
+        //                         label_details: Some(CompletionItemLabelDetails {
+        //                             detail: None,
+        //                             description: Some(enumerated.name.clone()),
+        //                         }),
+        //                         documentation: enumerated.help.clone().map(Documentation::String),
+        //                         kind: Some(CompletionItemKind::ENUM_MEMBER),
+        //                         ..Default::default()
+        //                     });
+        //                 }
+        //             }
+        //         }
+        //         ls_types::TopLevelType::EventBody(_) => todo!(),
+        //         ls_types::TopLevelType::OnBody(_) => todo!(),
+        //     };
+        // };
 
         Ok(Some(CompletionResponse::Array(items)))
     }

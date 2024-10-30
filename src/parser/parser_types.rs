@@ -5,7 +5,7 @@ use crate::ls::powerbuilder_proto::variable;
 
 use super::{
     tokenizer::Token,
-    tokenizer_types::{self as tokens, Position, Range},
+    tokenizer_types::{self as tokens, Position, Range, SpecialAssignment},
 };
 
 pub enum EitherOr<Left, Right> {
@@ -112,9 +112,18 @@ pub struct Argument {
     pub variable: Variable,
 }
 
+// #[derive(Debug, Clone)]
+// pub enum AccessType {
+//     Read,
+//     Write,
+//     ReadWrite,
+// }
+
 #[derive(Debug, Clone)]
 pub struct VariableAccess {
     pub name: Token,
+    pub is_write: bool,
+    // pub access_type: AccessType,
 }
 
 #[derive(Debug, Clone)]
@@ -481,7 +490,7 @@ pub enum StatementType {
     If(IfStatement),
     Throw(Expression),
     Destroy(Expression),
-    Assignment(LValue, Expression),
+    Assignment(LValue, Option<SpecialAssignment>, Expression),
     TryCatch(TryCatchStatement),
     Declaration(InstanceVariable),
     ForLoop(ForLoopStatement),
@@ -588,7 +597,7 @@ impl Statement {
             StatementType::Return(Some(expression)) => {
                 ret_if_contains!(expression);
             }
-            StatementType::Assignment(lvalue, expression) => {
+            StatementType::Assignment(lvalue, _, expression) => {
                 ret_if_contains!(lvalue);
                 ret_if_contains!(expression);
             }
@@ -644,25 +653,25 @@ impl Statement {
                     return Some(EitherOr::Left(var));
                 }
             }
-            StatementType::Expression(expression) => {}
-            StatementType::Throw(expression) => {}
-            StatementType::Destroy(expression) => {}
-            StatementType::Assignment(lvalue, expression) => {}
-            StatementType::If(if_statement) => {}
-            StatementType::TryCatch(try_catch) => {}
+            StatementType::Expression(_expression) => {}
+            StatementType::Throw(_expression) => {}
+            StatementType::Destroy(_expression) => {}
+            StatementType::Assignment(_lvalue, _assignment, _expression) => {}
+            StatementType::If(_if_statement) => {}
+            StatementType::TryCatch(_try_catch) => {}
             StatementType::ForLoop(for_loop) => {
                 if for_loop.variable.name.range.contains(pos) {
                     return Some(EitherOr::Right(&for_loop.variable));
                 }
             }
-            StatementType::WhileLoop(while_loop) => todo!(),
-            StatementType::Choose(choose_case) => todo!(),
-            StatementType::Return(expression) => todo!(),
-            StatementType::Call(call) => todo!(),
-            StatementType::Exit => todo!(),
-            StatementType::Continue => todo!(),
-            StatementType::SQL => todo!(),
-            StatementType::Error => todo!(),
+            StatementType::WhileLoop(_while_loop) => {}
+            StatementType::Choose(_choose_case) => {}
+            StatementType::Return(_expression) => {}
+            StatementType::Call(_call) => todo!(),
+            StatementType::Exit => {}
+            StatementType::Continue => {}
+            StatementType::SQL => {}
+            StatementType::Error => {}
         };
         None
     }

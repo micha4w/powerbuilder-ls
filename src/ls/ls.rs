@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::parser::parser_types::EOFPossibleResultT as _;
 use crate::parser::tokenizer::{Token, TokenType};
+use crate::parser::tokenizer_types::SpecialAssignment;
 use crate::parser::{
     // parser::*,
     parser_types as parser,
@@ -616,15 +617,48 @@ impl<'a> LintState<'a> {
                         .into(),
                     );
                 }
-                parser::StatementType::Assignment(lvalue, expression) => {
+                parser::StatementType::Assignment(lvalue, operator, expression) => {
                     let lvalue_type = self.lint_lvalue(lvalue).await;
                     let expression_type = self.lint_expression(expression).await;
 
-                    if !self.is_convertible(&expression_type, &lvalue_type).await {
-                        self.diagnostic_error(
-                            "Type's are not convertible".into(),
-                            expression.range,
-                        );
+                    match operator {
+                        Some(SpecialAssignment::PLUSEQ)
+                            if self.is_convertible(&lvalue_type, &DataType::String).await =>
+                        {
+                            if !self
+                                .is_convertible(&expression_type, &DataType::String)
+                                .await
+                            {
+                                if !expression_type.is_numeric() {
+                                    self.diagnostic_error(
+                                        "Needs to be a String".into(),
+                                        expression.range,
+                                    );
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            if !lvalue_type.is_numeric() {
+                                self.diagnostic_error(
+                                    "Cannot do a Special Assignment on a Non-Numeric Type".into(),
+                                    lvalue.range,
+                                );
+                            }
+                            if !expression_type.is_numeric() {
+                                self.diagnostic_error(
+                                    "Needs to be a Numeric Type".into(),
+                                    expression.range,
+                                );
+                            }
+                        }
+                        None => {
+                            if !self.is_convertible(&expression_type, &lvalue_type).await {
+                                self.diagnostic_error(
+                                    "Type's are not convertible".into(),
+                                    expression.range,
+                                );
+                            }
+                        }
                     }
                 }
                 parser::StatementType::TryCatch(parser::TryCatchStatement {
