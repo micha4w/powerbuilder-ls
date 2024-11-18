@@ -310,7 +310,7 @@ impl<'a> LintState<'a> {
         .boxed()
     }
 
-    fn lint_expression<'b>(
+    pub fn lint_expression<'b>(
         &'b mut self,
         expression: &'b parser::Expression,
     ) -> BoxFuture<'b, DataType> {
@@ -501,7 +501,7 @@ impl<'a> LintState<'a> {
         .boxed()
     }
 
-    async fn lint_expressions(&mut self, expressions: &Vec<parser::Expression>) -> Vec<DataType> {
+    pub async fn lint_expressions(&mut self, expressions: &Vec<parser::Expression>) -> Vec<DataType> {
         let mut types = Vec::new();
         for expression in expressions {
             types.push(self.lint_expression(expression).await);

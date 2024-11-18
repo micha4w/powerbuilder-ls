@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::{pin_mut, StreamExt};
+use futures::StreamExt;
 use ls::ls_types::{self, LintState, MaybeMut};
 use ls::ls_types::{LintProgress, Project};
 use tokio::sync::RwLock;
 
-use parser::parser_types::{self, Access, EitherOr, TopLevel};
+use parser::parser_types::{self, EitherOr};
 
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::*;
@@ -302,7 +302,7 @@ impl LanguageServer for PowerBuilderLS {
         let Some(file_lock) = proj.files.get(&path) else {
             return Ok(None);
         };
-        let mut file = file_lock.read().await;
+        let file = file_lock.read().await;
         let top_levels = match &file.top_levels {
             ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
             _ => return Ok(None),
@@ -436,12 +436,77 @@ impl LanguageServer for PowerBuilderLS {
                                 }
                             }
                         }
-                        typ => {}
+                        _ => {}
                     }
                 }
-                parser_types::LValueType::Function(call) => {}
-                parser_types::LValueType::Method(lvalue, call) => todo!(),
-                parser_types::LValueType::Index(lvalue, expression) => todo!(),
+                parser_types::LValueType::Function(call) => {
+                    let arg_types = state.lint_expressions(&call.arguments).await;
+                    let mut funcs = Box::pin(state.get_functions().await);
+
+                    while let Some((name, func)) = funcs.next().await {
+                        let lock = func.lock().await;
+                        if name == (&call.name.content).into()
+                            && state
+                                .is_function_callable(
+                                    &lock,
+                                    &arg_types,
+                                    &parser::tokenizer_types::AccessType::PRIVATE,
+                                )
+                                .await
+                        {
+                            let contents = lock.to_string();
+
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Scalar(MarkedString::String(contents)),
+                                range: Some(call.name.range.into()),
+                            }));
+                        }
+                    }
+                }
+                parser_types::LValueType::Method(lvalue, call) => {
+                    let arg_types = state.lint_expressions(&call.arguments).await;
+                    let lvalue_type = state.lint_lvalue(&lvalue).await;
+
+                    let ls_types::DataType::Complex(grouped_name) = lvalue_type else {
+                        return Ok(None);
+                    };
+
+                    let Some(ls_types::Complex::Class(class_mut)) =
+                        state.find_class(&grouped_name).await
+                    else {
+                        return Ok(None);
+                    };
+
+                    let mut funcs = Box::pin(
+                        state
+                            .get_functions_in_class(
+                                class_mut,
+                                &parser::tokenizer_types::AccessType::PRIVATE,
+                            )
+                            .await,
+                    );
+
+                    while let Some((name, func)) = funcs.next().await {
+                        let lock = func.lock().await;
+                        if name == (&call.name.content).into()
+                            && state
+                                .is_function_callable(
+                                    &lock,
+                                    &arg_types,
+                                    &parser::tokenizer_types::AccessType::PRIVATE,
+                                )
+                                .await
+                        {
+                            let contents = lock.to_string();
+
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Scalar(MarkedString::String(contents)),
+                                range: Some(call.name.range.into()),
+                            }));
+                        }
+                    }
+                }
+                parser_types::LValueType::Index(lvalue, expression) => return Ok(None),
             },
             None => {}
         }

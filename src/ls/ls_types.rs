@@ -3,6 +3,7 @@ use std::{
     backtrace::Backtrace,
     collections::HashMap,
     env::var_os,
+    fmt::{self, Display},
     mem,
     ops::Deref,
     path::{Path, PathBuf},
@@ -224,9 +225,9 @@ impl From<&parser::DataTypeType> for DataType {
 //     }
 // }
 
-impl ToString for DataType {
-    fn to_string(&self) -> String {
-        match self {
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
             DataType::Byte => "byte".into(),
             DataType::Char => "char".into(),
             DataType::String => "string".into(),
@@ -258,7 +259,9 @@ impl ToString for DataType {
             DataType::Any => "any".into(),
             DataType::Unknown => "<Error>".into(),
             DataType::Void => "void".into(),
-        }
+        };
+
+        f.write_str(name.as_str())
     }
 }
 
@@ -501,6 +504,24 @@ impl Function {
                         self_arg.variable.data_type == other_arg.variable.data_type
                     })
             }
+    }
+}
+
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {}({})",
+            &self.returns,
+            &self.parsed.name.content,
+            &self
+                .parsed
+                .arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
@@ -1035,6 +1056,194 @@ impl<'a> LintState<'a> {
         }
 
         None
+    }
+
+    pub async fn get_functions_in_class_helper(
+        &self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &tokens::AccessType,
+        accessible: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, Option<String>)> + Send + '_ {
+        let funcs_iter = class_mut.lock().await.functions.clone().into_iter();
+
+        stream::unfold(
+            (class_mut, funcs_iter, None, false, access.strictness()),
+            move |(
+                mut class_mut,
+                mut funcs_iter,
+                mut func_iter,
+                mut is_external,
+                mut strictness,
+            )| async move {
+                loop {
+                    loop {
+                        let (name, mut iter) = match func_iter {
+                            Some(func_iter) => func_iter,
+                            None => {
+                                if let Some((name, functions)) = funcs_iter.next() {
+                                    func_iter = Some((name, functions.into_iter()));
+                                    func_iter.unwrap()
+                                } else {
+                                    break;
+                                }
+                            }
+                        };
+
+                        while let Some(func_mut) = iter.next() {
+                            let is_accessible = func_mut
+                                .lock()
+                                .await
+                                .parsed
+                                .access
+                                .map_or(0, |acc| acc.strictness())
+                                <= strictness;
+
+                            if is_accessible == accessible {
+                                let err = (!accessible)
+                                    .then(|| "Cannot access Private Function".to_string());
+                                return Some((
+                                    (name.clone(), func_mut, err),
+                                    (
+                                        class_mut,
+                                        funcs_iter,
+                                        Some((name, iter)),
+                                        is_external,
+                                        strictness,
+                                    ),
+                                ));
+                            }
+                        }
+                        func_iter = None;
+                    }
+
+                    func_iter = None;
+                    is_external = !is_external;
+
+                    if is_external {
+                        funcs_iter = class_mut
+                            .lock()
+                            .await
+                            .external_functions
+                            .clone()
+                            .into_iter();
+                        continue;
+                    }
+
+                    let complex = self.find_class(&class_mut.lock().await.base).await;
+                    class_mut = match complex {
+                        Some(Complex::Class(cls)) => cls.clone(),
+                        Some(Complex::Enum(_)) | None => break,
+                    };
+                    funcs_iter = class_mut.lock().await.functions.clone().into_iter();
+
+                    if strictness < tokens::AccessType::PRIVATE.strictness() {
+                        strictness = tokens::AccessType::PROTECTED.strictness();
+                    }
+                }
+
+                None
+            },
+        )
+    }
+
+    pub async fn get_functions_in_class(
+        &self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &tokens::AccessType,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>)> + Send + '_ {
+        self.get_functions_in_class_helper(class_mut, access, true)
+            .await
+            .map(|(name, var, _)| (name, var))
+    }
+
+    pub async fn get_inaccessible_functions_in_class(
+        &self,
+        class_mut: Arc<Mutex<Class>>,
+        access: &tokens::AccessType,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, String)> + Send + '_ {
+        self.get_functions_in_class_helper(class_mut, access, false)
+            .await
+            .map(|(name, var, err)| (name, var, err.unwrap()))
+    }
+
+    pub async fn get_functions_helper(
+        &self,
+        accessible: bool,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, Option<String>)> + Send + '_ {
+        let functions: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if let Some(current_class) = &self.class {
+                Box::pin(
+                    self.get_functions_in_class_helper(
+                        current_class.clone(),
+                        &tokens::AccessType::PRIVATE,
+                        accessible,
+                    )
+                    .await,
+                )
+            } else {
+                Box::pin(stream::empty())
+            };
+
+        let current_path = self.file.as_ref().path.clone();
+        let proj = self.proj.clone();
+        let functions = functions.chain(
+            stream::once(async move {
+                let mut functions: Pin<Box<dyn Stream<Item = _> + Send>> =
+                    Box::pin(stream::empty());
+
+                for (path, file) in &proj.read().await.files {
+                    if &current_path == path {
+                        continue;
+                    }
+
+                    functions = Box::pin(
+                        functions.chain(
+                            stream::iter(file.read().await.classes.clone())
+                                .filter_map(move |(name, class_mut)| async move {
+                                    let class = class_mut.lock().await;
+                                    if class.base.combine().to_lowercase() == "function_object" {
+                                        if let Some(funcs) = class.functions.get(&name) {
+                                            return Some(
+                                                stream::iter(funcs.clone())
+                                                    .map(move |func| (name.clone(), func, None)),
+                                            );
+                                        }
+                                    }
+                                    None
+                                })
+                                .flatten(),
+                        ),
+                    );
+                }
+
+                functions.chain(
+                    stream::iter(proj.read().await.builtin_functions.clone()).flat_map(
+                        |(name, functions)| {
+                            stream::iter(functions).map(move |func| (name.clone(), func, None))
+                        },
+                    ),
+                )
+            })
+            .flatten(),
+        );
+
+        functions
+    }
+
+    pub async fn get_functions(
+        &self,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>)> + Send + '_ {
+        self.get_functions_helper(true)
+            .await
+            .map(|(name, var, _)| (name, var))
+    }
+
+    pub async fn get_inaccessible_functions(
+        &self,
+    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, String)> + Send + '_ {
+        self.get_functions_helper(false)
+            .await
+            .map(|(name, var, err)| (name, var, err.unwrap()))
     }
 
     pub async fn find_class(&self, grouped_name: &GroupedName) -> Option<Complex> {

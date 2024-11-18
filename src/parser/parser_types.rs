@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::anyhow;
 use futures::future::{lazy, Either};
 
@@ -72,6 +74,18 @@ pub enum DataTypeType {
     ID(String),
 }
 
+impl fmt::Display for DataTypeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataTypeType::Decimal(Some(prec)) => write!(f, "decimal {{{}}}", prec),
+            DataTypeType::Decimal(None) => write!(f, "decimal"),
+            DataTypeType::Array(data_type) => write!(f, "{}[]", data_type.data_type_type),
+            DataTypeType::Complex(group, class) => write!(f, "{}`{}", group, class),
+            DataTypeType::ID(id) => f.write_str(id.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataType {
     pub data_type_type: DataTypeType,
@@ -110,6 +124,22 @@ pub struct ScopedVariable {
 pub struct Argument {
     pub is_ref: bool,
     pub variable: Variable,
+}
+
+impl fmt::Display for Argument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.variable.constant {
+            write!(f, "readonly ")?;
+        }
+        if self.is_ref {
+            write!(f, "ref ")?;
+        }
+        write!(
+            f,
+            "{} {}",
+            self.variable.data_type.data_type_type, self.variable.name.content
+        )
+    }
 }
 
 // #[derive(Debug, Clone)]

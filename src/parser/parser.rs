@@ -1644,8 +1644,6 @@ impl Parser {
                     quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokens::Keyword::TO))?);
                 let stop = quick_exit_opt!(self.parse_expression()?);
 
-                let end = stop.range.end;
-
                 let (step, err) = match self.optional(TokenType::Keyword(tokens::Keyword::STEP))? {
                     Some(_) => self.parse_expression()?.split(),
                     _ => (None, None),
@@ -1654,11 +1652,12 @@ impl Parser {
                     self.expect(TokenType::NEWLINE)?.ok();
                 }
 
+                let end;
                 let mut statements = Vec::new();
                 loop {
                     match self.peek()?.token_type {
                         TokenType::Keyword(tokens::Keyword::NEXT) => {
-                            self.next();
+                            end = self.next()?.range.end;
                             self.expect(TokenType::NEWLINE)?.ok();
                             break;
                         }
