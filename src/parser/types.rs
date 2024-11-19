@@ -1,19 +1,11 @@
 use std::fmt;
 
 use anyhow::anyhow;
-use futures::future::{lazy, Either};
 
-use crate::ls::powerbuilder_proto::variable;
-
-use super::{
-    tokenizer::Token,
-    tokenizer_types::{self as tokens, Position, Range, SpecialAssignment},
+use crate::{
+    tokenizer::{self, Token},
+    types::*,
 };
-
-pub enum EitherOr<Left, Right> {
-    Left(Left),
-    Right(Right),
-}
 
 pub enum ParseError {
     UnexpectedToken,
@@ -28,16 +20,25 @@ impl From<ParseError> for anyhow::Error {
     }
 }
 
-pub type ParseResult<T> = Result<T, ParseError>;
+pub type ParseResult<T> = Result<T, (ParseError, Option<T>)>;
 pub type EOFOr<T> = Option<T>;
-pub type EOFOrParserResult<T> = EOFOr<Result<T, (ParseError, Option<T>)>>;
+pub type EOFOrParserResult<T> = EOFOr<ParseResult<T>>;
 
-pub trait EOFPossibleResultT<T> {
+pub trait ParseResultT<T> {
+    fn new(t: T, err: Option<ParseError>) -> Self;
+
     fn value(self) -> Option<T>;
     fn split(self) -> (Option<T>, Option<ParseError>);
 }
 
-impl<T> EOFPossibleResultT<T> for Result<T, (ParseError, Option<T>)> {
+impl<T> ParseResultT<T> for ParseResult<T> {
+    fn new(t: T, err: Option<ParseError>) -> Self {
+        match err {
+            Some(err) => Err((err, Some(t))),
+            None => Ok(t),
+        }
+    }
+
     fn value(self) -> Option<T> {
         match self {
             Ok(t) => Some(t),
@@ -67,21 +68,151 @@ impl<T> EOFPossibleResultT<T> for Result<T, (ParseError, Option<T>)> {
 // }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GroupedName {
+    pub group: Option<String>,
+    pub name: String,
+}
+
+impl From<(Option<String>, String)> for GroupedName {
+    fn from((group, name): (Option<String>, String)) -> Self {
+        Self { group, name }
+    }
+}
+
+impl From<&(Option<Token>, Token)> for GroupedName {
+    fn from((group, name): &(Option<Token>, Token)) -> Self {
+        (group, name).into()
+    }
+}
+
+impl From<(&Option<Token>, &Token)> for GroupedName {
+    fn from((group, name): (&Option<Token>, &Token)) -> Self {
+        Self::new(
+            group.as_ref().map(|g| g.content.clone()),
+            name.content.clone(),
+        )
+    }
+}
+
+impl GroupedName {
+    pub fn new(group: Option<String>, name: String) -> Self {
+        Self { group, name }
+    }
+
+    pub fn combine(&self) -> String {
+        match &self.group {
+            Some(g) => g.clone() + "`" + &self.name,
+            None => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataTypeType {
-    Decimal(Option<String>),
-    Array(Box<DataType>),
-    Complex(String, String),
-    ID(String),
+    Blob,
+    Boolean,
+    Byte,
+    Char,
+    Date,
+    Datetime,
+    Double,
+    Int,
+    Long,
+    Longlong,
+    Longptr,
+    Real,
+    String,
+    Time,
+    Uint,
+    Ulong,
+    Decimal(Option<usize>),
+    Complex(GroupedName),
+    Array(Box<Self>),
+
+    Any,
+    Unknown,
+    Void,
+}
+
+impl DataTypeType {
+    pub fn is_numeric(&self) -> bool {
+        self.numeric_precedence().is_some()
+    }
+
+    pub fn numeric_precedence(&self) -> Option<u8> {
+        match self {
+            Self::Int => Some(0),
+            Self::Uint => Some(1),
+            Self::Long => Some(2),
+            Self::Ulong => Some(3),
+            Self::Longlong => Some(4),
+            Self::Longptr => Some(5),
+            Self::Real => Some(6),
+            Self::Double => Some(7),
+            Self::Decimal(_) => Some(8),
+            Self::Any => Some(9),
+            Self::Unknown => Some(10),
+
+            Self::Blob
+            | Self::Boolean
+            | Self::Byte
+            | Self::Char
+            | Self::Date
+            | Self::Datetime
+            | Self::String
+            | Self::Time
+            | Self::Complex(_)
+            | Self::Array(_)
+            | Self::Void => None,
+        }
+    }
 }
 
 impl fmt::Display for DataTypeType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DataTypeType::Decimal(Some(prec)) => write!(f, "decimal {{{}}}", prec),
-            DataTypeType::Decimal(None) => write!(f, "decimal"),
-            DataTypeType::Array(data_type) => write!(f, "{}[]", data_type.data_type_type),
-            DataTypeType::Complex(group, class) => write!(f, "{}`{}", group, class),
-            DataTypeType::ID(id) => f.write_str(id.as_str()),
+        let name = match self {
+            Self::Byte => "byte".into(),
+            Self::Char => "char".into(),
+            Self::String => "string".into(),
+            Self::Blob => "blob".into(),
+
+            Self::Date => "date".into(),
+            Self::Time => "time".into(),
+            Self::Datetime => "datetime".into(),
+
+            Self::Boolean => "boolean".into(),
+            Self::Int => "int".into(),
+            Self::Uint => "unsigned int".into(),
+            Self::Long => "long".into(),
+            Self::Ulong => "unsigned long".into(),
+            Self::Longlong => "longlong".into(),
+            Self::Longptr => "longptr".into(),
+            Self::Real => "real".into(),
+            Self::Double => "double".into(),
+            Self::Decimal(precision) => {
+                if let Some(prec) = precision {
+                    format!("decimal {{{}}}", prec)
+                } else {
+                    "decimal".into()
+                }
+            }
+            Self::Complex(grouped_name) => grouped_name.combine(),
+            Self::Array(data_type) => data_type.to_string() + "[]",
+
+            Self::Any => "any".into(),
+            Self::Unknown => "<Error>".into(),
+            Self::Void => "void".into(),
+        };
+
+        f.write_str(name.as_str())
+    }
+}
+
+impl From<&Option<DataType>> for DataTypeType {
+    fn from(value: &Option<DataType>) -> Self {
+        match value {
+            Some(val) => val.data_type_type.clone(),
+            None => Self::Void,
         }
     }
 }
@@ -94,8 +225,8 @@ pub struct DataType {
 
 #[derive(Debug, Clone)]
 pub struct Access {
-    pub read: Option<tokens::AccessType>,
-    pub write: Option<tokens::AccessType>,
+    pub read: Option<tokenizer::AccessType>,
+    pub write: Option<tokenizer::AccessType>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +247,7 @@ pub struct InstanceVariable {
 
 #[derive(Debug, Clone)]
 pub struct ScopedVariable {
-    pub scope: tokens::ScopeModif,
+    pub scope: tokenizer::ScopeModif,
     pub variable: Variable,
 }
 
@@ -159,8 +290,8 @@ pub struct VariableAccess {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub returns: Option<DataType>,
-    pub scope_modif: Option<tokens::ScopeModif>,
-    pub access: Option<tokens::AccessType>,
+    pub scope_modif: Option<tokenizer::ScopeModif>,
+    pub access: Option<tokenizer::AccessType>,
     pub name: Token,
     pub arguments: Vec<Argument>,
     pub vararg: Option<Token>,
@@ -229,7 +360,7 @@ pub struct FunctionCall {
 
 #[derive(Debug, Clone)]
 pub struct Class {
-    pub scope: Option<tokens::ScopeModif>,
+    pub scope: Option<tokenizer::ScopeModif>,
     pub name: Token,
     pub base: (Option<Token>, Token),
     pub within: Option<(Option<Token>, Token)>,
@@ -326,9 +457,9 @@ impl LValue {
 pub enum ExpressionType {
     Literal(Literal),
     ArrayLiteral(Vec<Expression>),
-    Operation(Box<Expression>, tokens::Operator, Box<Expression>),
-    UnaryOperation(tokens::Operator, Box<Expression>),
-    IncrementDecrement(Box<Expression>, tokens::Symbol),
+    Operation(Box<Expression>, tokenizer::Operator, Box<Expression>),
+    UnaryOperation(tokenizer::Operator, Box<Expression>),
+    IncrementDecrement(Box<Expression>, tokenizer::Symbol),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
     Create(DataType),
@@ -405,38 +536,38 @@ impl Expression {
     //             }
     //         }
     //         ExpressionType::Operation(first, operator, _) => match operator {
-    //             tokens::Operator::EQ
-    //             | tokens::Operator::GT
-    //             | tokens::Operator::GTE
-    //             | tokens::Operator::LT
-    //             | tokens::Operator::LTE
-    //             | tokens::Operator::GTLT
-    //             | tokens::Operator::OR
-    //             | tokens::Operator::AND => DataType::Primitive(tokens::Type::BOOLEAN),
-    //             tokens::Operator::PLUS
-    //                 if first.get_type() == DataType::Primitive(tokens::Type::STRING) =>
+    //             tokenizer::Operator::EQ
+    //             | tokenizer::Operator::GT
+    //             | tokenizer::Operator::GTE
+    //             | tokenizer::Operator::LT
+    //             | tokenizer::Operator::LTE
+    //             | tokenizer::Operator::GTLT
+    //             | tokenizer::Operator::OR
+    //             | tokenizer::Operator::AND => DataType::Primitive(tokenizer::Type::BOOLEAN),
+    //             tokenizer::Operator::PLUS
+    //                 if first.get_type() == DataType::Primitive(tokenizer::Type::STRING) =>
     //             {
-    //                 DataType::Primitive(tokens::Type::STRING)
+    //                 DataType::Primitive(tokenizer::Type::STRING)
     //             }
     //             _ => first.get_type(),
     //         },
     //         ExpressionType::Create(class) => DataType::Complex(None, class.clone()),
     //         ExpressionType::CreateUsing(expr) => match expr.expression_type {
-    //             ExpressionType::Literal(tokens::Literal::STRING) => {
+    //             ExpressionType::Literal(tokenizer::Literal::STRING) => {
     //                 todo!("Read out the variable")
     //             }
     //             _ => DataType::Complex(None, "powerobject".to_owned()),
     //         },
-    //         ExpressionType::BooleanNot(_) => DataType::Primitive(tokens::Type::BOOLEAN),
+    //         ExpressionType::BooleanNot(_) => DataType::Primitive(tokenizer::Type::BOOLEAN),
     //         ExpressionType::Parenthesized(paren) => paren.get_type(),
     //         ExpressionType::LValue(val) => val.get_type(),
     //         ExpressionType::Literal(literal) => match literal {
-    //             tokens::Literal::NUMBER => DataType::Primitive(tokens::Type::DECIMAL),
-    //             tokens::Literal::DATE => DataType::Primitive(tokens::Type::DATE),
-    //             tokens::Literal::TIME => DataType::Primitive(tokens::Type::TIME),
-    //             tokens::Literal::STRING => DataType::Primitive(tokens::Type::STRING),
-    //             tokens::Literal::BOOLEAN => DataType::Primitive(tokens::Type::BOOLEAN),
-    //             tokens::Literal::ENUM => todo!(),
+    //             tokenizer::Literal::NUMBER => DataType::Primitive(tokenizer::Type::DECIMAL),
+    //             tokenizer::Literal::DATE => DataType::Primitive(tokenizer::Type::DATE),
+    //             tokenizer::Literal::TIME => DataType::Primitive(tokenizer::Type::TIME),
+    //             tokenizer::Literal::STRING => DataType::Primitive(tokenizer::Type::STRING),
+    //             tokenizer::Literal::BOOLEAN => DataType::Primitive(tokenizer::Type::BOOLEAN),
+    //             tokenizer::Literal::ENUM => todo!(),
     //         },
     //         ExpressionType::IncrementDecrement(lvalue, _) => lvalue.get_type(),
     //     }
@@ -477,7 +608,7 @@ pub struct WhileLoopStatement {
 
 #[derive(Clone, Debug)]
 pub struct Literal {
-    pub literal_type: tokens::Literal,
+    pub literal_type: tokenizer::Literal,
     pub content: String,
     pub range: Range,
 }
@@ -486,7 +617,7 @@ pub struct Literal {
 pub enum CaseSpecifierType {
     Literals(Literal),
     To(Literal, Literal),
-    Is(tokens::Operator, Literal),
+    Is(tokenizer::Operator, Literal),
     Else,
 }
 
@@ -520,7 +651,7 @@ pub enum StatementType {
     If(IfStatement),
     Throw(Expression),
     Destroy(Expression),
-    Assignment(LValue, Option<SpecialAssignment>, Expression),
+    Assignment(LValue, Option<tokenizer::SpecialAssignment>, Expression),
     TryCatch(TryCatchStatement),
     Declaration(InstanceVariable),
     ForLoop(ForLoopStatement),

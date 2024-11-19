@@ -1,22 +1,16 @@
-mod ls;
+mod linter;
 mod parser;
+mod tokenizer;
+mod types;
 
-use std::collections::HashMap;
-use std::panic::PanicHookInfo;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{collections::HashMap, panic::PanicHookInfo, path::PathBuf, pin::Pin, sync::Arc};
 
 use futures::StreamExt;
-use ls::ls_types::{self, LintState, MaybeMut};
-use ls::ls_types::{LintProgress, Project};
+use linter::{LintProgress, Linter, Project};
 use tokio::sync::RwLock;
 
-use parser::parser_types::{self, EitherOr};
-
-use tower_lsp::jsonrpc;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tower_lsp::{jsonrpc, lsp_types::*, Client, LanguageServer, LspService, Server};
+use types::{EitherOr, MaybeMut};
 
 #[derive(Debug)]
 struct PowerBuilderLSCreator {
@@ -73,7 +67,14 @@ impl PowerBuilderLS {
 
     async fn get_file_diagnostics(&self, path: PathBuf) -> jsonrpc::Result<Vec<Diagnostic>> {
         self.m.proj.write().await.files.remove(&path);
-        if let Err(err) = ls::add_file(self.m.proj.clone(), &path, LintProgress::Complete).await {
+        if let Err(err) = self
+            .m
+            .proj
+            .write()
+            .await
+            .add_file(&path, LintProgress::Complete)
+            .await
+        {
             self.client
                 .log_message(
                     MessageType::ERROR,
@@ -96,10 +97,10 @@ impl PowerBuilderLS {
                         Position::new(d.range.end.line, d.range.end.column),
                     ),
                     severity: Some(match d.severity {
-                        parser_types::Severity::Error => DiagnosticSeverity::ERROR,
-                        parser_types::Severity::Warning => DiagnosticSeverity::WARNING,
-                        parser_types::Severity::Info => DiagnosticSeverity::INFORMATION,
-                        parser_types::Severity::Hint => DiagnosticSeverity::HINT,
+                        parser::Severity::Error => DiagnosticSeverity::ERROR,
+                        parser::Severity::Warning => DiagnosticSeverity::WARNING,
+                        parser::Severity::Info => DiagnosticSeverity::INFORMATION,
+                        parser::Severity::Hint => DiagnosticSeverity::HINT,
                     }),
                     message: d.message.clone(),
                     ..Default::default()
@@ -288,7 +289,14 @@ impl LanguageServer for PowerBuilderLS {
             }
         };
 
-        if let Err(err) = ls::add_file(self.m.proj.clone(), &path, LintProgress::Complete).await {
+        if let Err(err) = self
+            .m
+            .proj
+            .write()
+            .await
+            .add_file(&path, LintProgress::Complete)
+            .await
+        {
             self.client
                 .log_message(
                     MessageType::ERROR,
@@ -304,7 +312,7 @@ impl LanguageServer for PowerBuilderLS {
         };
         let file = file_lock.read().await;
         let top_levels = match &file.top_levels {
-            ls_types::ProgressedTopLevels::Complete(top_levels) => top_levels,
+            linter::ProgressedTopLevels::Complete(top_levels) => top_levels,
             _ => return Ok(None),
         };
 
@@ -314,20 +322,20 @@ impl LanguageServer for PowerBuilderLS {
             return Ok(None);
         };
 
-        let mut state = LintState {
-            proj: self.m.proj.clone(),
+        let mut linter = Linter {
+            proj: &proj,
             class: top_level_type.get_class().cloned(),
             variables: top_level_type
                 .get_variables()
                 .await
                 .unwrap_or_else(HashMap::new),
-            return_type: ls_types::DataType::Void,
+            return_type: parser::DataTypeType::Void,
             file: MaybeMut::No(&file),
         };
 
         match top_level_type.get_expression_at(pos) {
             Some(EitherOr::Left(expression)) => match &expression.expression_type {
-                parser_types::ExpressionType::Literal(literal) => {
+                parser::ExpressionType::Literal(literal) => {
                     return Ok(Some(Hover {
                         contents: HoverContents::Scalar(MarkedString::String(format!(
                             "{} (literal): {}",
@@ -336,19 +344,19 @@ impl LanguageServer for PowerBuilderLS {
                         range: Some(literal.range.into()),
                     }));
                 }
-                parser_types::ExpressionType::ArrayLiteral(vec) => {}
-                parser_types::ExpressionType::Operation(expression, operator, expression1) => {}
-                parser_types::ExpressionType::UnaryOperation(operator, expression) => {}
-                parser_types::ExpressionType::IncrementDecrement(expression, symbol) => {}
-                parser_types::ExpressionType::BooleanNot(expression) => {}
-                parser_types::ExpressionType::Parenthesized(expression) => {}
-                parser_types::ExpressionType::Create(data_type) => {}
-                parser_types::ExpressionType::CreateUsing(expression) => {}
-                parser_types::ExpressionType::LValue(lvalue) => unreachable!(),
-                parser_types::ExpressionType::Error => {}
+                parser::ExpressionType::ArrayLiteral(vec) => {}
+                parser::ExpressionType::Operation(expression, operator, expression1) => {}
+                parser::ExpressionType::UnaryOperation(operator, expression) => {}
+                parser::ExpressionType::IncrementDecrement(expression, symbol) => {}
+                parser::ExpressionType::BooleanNot(expression) => {}
+                parser::ExpressionType::Parenthesized(expression) => {}
+                parser::ExpressionType::Create(data_type) => {}
+                parser::ExpressionType::CreateUsing(expression) => {}
+                parser::ExpressionType::LValue(lvalue) => unreachable!(),
+                parser::ExpressionType::Error => {}
             },
             Some(EitherOr::Right(lvalue)) => match &lvalue.lvalue_type {
-                parser_types::LValueType::This => {
+                parser::LValueType::This => {
                     let mut contents = "this (Reserved Keyword)".to_owned();
                     if let Some(class) = top_level_type.get_class() {
                         contents += ": ";
@@ -359,7 +367,7 @@ impl LanguageServer for PowerBuilderLS {
                         range: Some(lvalue.range.into()),
                     }));
                 }
-                parser_types::LValueType::Super => {
+                parser::LValueType::Super => {
                     let mut contents = "super (Reserved Keyword)".to_owned();
                     if let Some(class) = top_level_type.get_class() {
                         contents += ": ";
@@ -370,7 +378,7 @@ impl LanguageServer for PowerBuilderLS {
                         range: Some(lvalue.range.into()),
                     }));
                 }
-                parser_types::LValueType::Parent => {
+                parser::LValueType::Parent => {
                     let mut contents = "parent (Reserved Keyword)".to_owned();
                     if let Some(class) = top_level_type.get_class() {
                         if let Some(within) = &class.lock().await.within {
@@ -383,9 +391,9 @@ impl LanguageServer for PowerBuilderLS {
                         range: Some(lvalue.range.into()),
                     }));
                 }
-                parser_types::LValueType::Variable(access) => {
+                parser::LValueType::Variable(access) => {
                     let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
-                        state
+                        linter
                             .get_variables(&lvalue.range.end, access.is_write)
                             .await,
                     );
@@ -403,18 +411,18 @@ impl LanguageServer for PowerBuilderLS {
                         }
                     }
                 }
-                parser_types::LValueType::Member(lvalue, access) => {
-                    let data_type = state.lint_lvalue(&*lvalue).await;
+                parser::LValueType::Member(lvalue, access) => {
+                    let data_type = linter.lint_lvalue(&*lvalue).await;
                     match data_type {
-                        ls_types::DataType::Complex(grouped_name) => {
-                            if let Some(ls_types::Complex::Class(class_mut)) =
-                                state.find_class(&grouped_name).await
+                        parser::DataTypeType::Complex(grouped_name) => {
+                            if let Some(linter::Complex::Class(class_mut)) =
+                                linter.find_class(&grouped_name).await
                             {
                                 let mut vars = Box::pin(
-                                    state
+                                    linter
                                         .get_variables_in_class(
                                             class_mut,
-                                            &parser::tokenizer_types::AccessType::PRIVATE,
+                                            &tokenizer::AccessType::PRIVATE,
                                             access.is_write,
                                         )
                                         .await,
@@ -439,18 +447,18 @@ impl LanguageServer for PowerBuilderLS {
                         _ => {}
                     }
                 }
-                parser_types::LValueType::Function(call) => {
-                    let arg_types = state.lint_expressions(&call.arguments).await;
-                    let mut funcs = Box::pin(state.get_functions().await);
+                parser::LValueType::Function(call) => {
+                    let arg_types = linter.lint_expressions(&call.arguments).await;
+                    let mut funcs = Box::pin(linter.get_functions().await);
 
                     while let Some((name, func)) = funcs.next().await {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
-                            && state
+                            && linter
                                 .is_function_callable(
                                     &lock,
                                     &arg_types,
-                                    &parser::tokenizer_types::AccessType::PRIVATE,
+                                    &tokenizer::AccessType::PRIVATE,
                                 )
                                 .await
                         {
@@ -463,37 +471,34 @@ impl LanguageServer for PowerBuilderLS {
                         }
                     }
                 }
-                parser_types::LValueType::Method(lvalue, call) => {
-                    let arg_types = state.lint_expressions(&call.arguments).await;
-                    let lvalue_type = state.lint_lvalue(&lvalue).await;
+                parser::LValueType::Method(lvalue, call) => {
+                    let arg_types = linter.lint_expressions(&call.arguments).await;
+                    let lvalue_type = linter.lint_lvalue(&lvalue).await;
 
-                    let ls_types::DataType::Complex(grouped_name) = lvalue_type else {
+                    let parser::DataTypeType::Complex(grouped_name) = lvalue_type else {
                         return Ok(None);
                     };
 
-                    let Some(ls_types::Complex::Class(class_mut)) =
-                        state.find_class(&grouped_name).await
+                    let Some(linter::Complex::Class(class_mut)) =
+                        linter.find_class(&grouped_name).await
                     else {
                         return Ok(None);
                     };
 
                     let mut funcs = Box::pin(
-                        state
-                            .get_functions_in_class(
-                                class_mut,
-                                &parser::tokenizer_types::AccessType::PRIVATE,
-                            )
+                        linter
+                            .get_functions_in_class(class_mut, &tokenizer::AccessType::PRIVATE)
                             .await,
                     );
 
                     while let Some((name, func)) = funcs.next().await {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
-                            && state
+                            && linter
                                 .is_function_callable(
                                     &lock,
                                     &arg_types,
-                                    &parser::tokenizer_types::AccessType::PRIVATE,
+                                    &tokenizer::AccessType::PRIVATE,
                                 )
                                 .await
                         {
@@ -506,7 +511,7 @@ impl LanguageServer for PowerBuilderLS {
                         }
                     }
                 }
-                parser_types::LValueType::Index(lvalue, expression) => return Ok(None),
+                parser::LValueType::Index(lvalue, expression) => return Ok(None),
             },
             None => {}
         }
@@ -514,7 +519,7 @@ impl LanguageServer for PowerBuilderLS {
         if let Some(statement) = top_level_type.get_statement_at(pos) {
             match statement.get_variable_at(pos) {
                 Some(EitherOr::Left(var)) => {
-                    if let Some(var_mut) = state.variables.get(&(&var.variable.name.content).into())
+                    if let Some(var_mut) = linter.variables.get(&(&var.variable.name.content).into())
                     {
                         let contents = var.variable.name.content.clone()
                             + " (variable):"
@@ -527,7 +532,7 @@ impl LanguageServer for PowerBuilderLS {
                     }
                 }
                 Some(EitherOr::Right(var)) => {
-                    if let Some(var_mut) = state.variables.get(&(&var.name.content).into()) {
+                    if let Some(var_mut) = linter.variables.get(&(&var.name.content).into()) {
                         let contents = var.name.content.clone()
                             + " (variable):"
                             + &var_mut.lock().await.data_type.to_string();
@@ -563,7 +568,14 @@ impl LanguageServer for PowerBuilderLS {
             }
         };
 
-        if let Err(err) = ls::add_file(self.m.proj.clone(), &path, LintProgress::Complete).await {
+        if let Err(err) = self
+            .m
+            .proj
+            .write()
+            .await
+            .add_file(&path, LintProgress::Complete)
+            .await
+        {
             self.client
                 .log_message(
                     MessageType::ERROR,
@@ -609,10 +621,10 @@ impl LanguageServer for PowerBuilderLS {
         //                     ls_types::VariableType::Local(_) => "Local Variable".into(),
         //                     ls_types::VariableType::Scoped(scoped_variable) => {
         //                         match scoped_variable.scope {
-        //                             parser::tokenizer_types::ScopeModif::GLOBAL => {
+        //                             parser::tokenizer::ScopeModif::GLOBAL => {
         //                                 "Global Variable".into()
         //                             }
-        //                             parser::tokenizer_types::ScopeModif::SHARED => {
+        //                             parser::tokenizer::ScopeModif::SHARED => {
         //                                 "Shared Variable".into()
         //                             }
         //                         }
@@ -669,7 +681,7 @@ impl LanguageServer for PowerBuilderLS {
         //                 });
         //             }
 
-        //             let mut state = LintState {
+        //             let mut linter = LintState {
         //                 proj: self.m.proj.clone(),
         //                 class: class_mut.clone(),
         //                 variables: function
@@ -683,7 +695,7 @@ impl LanguageServer for PowerBuilderLS {
         //             };
 
         //             let (variables, err_variables) =
-        //                 state.get_accessible_variables(pos, false).await;
+        //                 linter.get_accessible_variables(pos, false).await;
 
         //             for (_, var) in variables {
         //                 add_variable(&mut items, &&var.lock().await, None).await;
@@ -692,7 +704,7 @@ impl LanguageServer for PowerBuilderLS {
         //                 add_variable(&mut items, &&var.lock().await, Some(err.into())).await;
         //             }
 
-        //             let (data_types, err_data_types) = state.get_accessible_data_types().await;
+        //             let (data_types, err_data_types) = linter.get_accessible_data_types().await;
         //             for data_type in data_types {
         //                 add_data_type(&mut items, &data_type, None).await;
         //             }

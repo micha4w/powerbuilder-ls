@@ -5,7 +5,8 @@ use encoding_rs_io::DecodeReaderBytesBuilder;
 use multipeek::{multipeek, MultiPeek};
 use strum::Display;
 
-use super::tokenizer_types::*;
+use super::types::*;
+use crate::types::*;
 
 #[derive(Clone, Copy, Debug, Display, PartialEq)]
 pub enum TokenType {
@@ -29,7 +30,7 @@ pub struct Token {
     pub token_type: TokenType,
     pub content: String,
     pub range: Range,
-    // TODO: change this to a Vec<Diagnostic>?
+    // TODO: change this to a Option<Diagnostic>?
     pub error: Option<String>,
 }
 
