@@ -6,7 +6,7 @@ use crate::{
 
 impl Parser {
     pub fn parse_throw(&mut self) -> EOFOr<Option<Statement>> {
-        let throw = self.next()?;
+        let throw = self.tokens.next()?;
         let mut err = None;
         let expression = quick_exit_opt!(self.parse_expression(false)?, err);
 
@@ -24,7 +24,7 @@ impl Parser {
     }
 
     pub fn parse_return(&mut self) -> EOFOr<Option<Statement>> {
-        let ret = self.next()?;
+        let ret = self.tokens.next()?;
         let value = match self.optional_newline()? {
             Some(_) => None,
             None => {
@@ -46,7 +46,7 @@ impl Parser {
     }
 
     pub fn parse_destroy(&mut self) -> EOFOr<Option<Statement>> {
-        let destroy = self.next()?;
+        let destroy = self.tokens.next()?;
         let mut err = None;
         let expression = quick_exit_opt!(self.parse_expression(false)?, err);
         if err.is_none() {
@@ -63,15 +63,15 @@ impl Parser {
     }
 
     pub fn parse_variable_declaration(&mut self) -> EOFOrParserResult<Statement> {
-        let start = self.peek()?.range.start;
+        let start = self.tokens.peek()?.range.start;
 
-        let base = match self.peek()?.token_type {
+        let base = match self.tokens.peek()?.token_type {
             TokenType::AccessType(
                 access_type @ (tokenizer::AccessType::PUBLIC
                 | tokenizer::AccessType::PRIVATE
                 | tokenizer::AccessType::PROTECTED),
             ) => {
-                self.next()?;
+                self.tokens.next()?;
                 Some(access_type)
             }
             _ => None,
@@ -83,8 +83,8 @@ impl Parser {
         };
 
         loop {
-            if let TokenType::AccessType(access_type) = self.peek()?.token_type {
-                let token = self.next()?;
+            if let TokenType::AccessType(access_type) = self.tokens.peek()?.token_type {
+                let token = self.tokens.next()?;
                 match access_type {
                     tokenizer::AccessType::PUBLIC
                     | tokenizer::AccessType::PRIVATE
@@ -160,17 +160,17 @@ impl Parser {
         {
             let mut first = true;
             loop {
-                match self.peek()?.token_type {
+                match self.tokens.peek()?.token_type {
                     TokenType::Symbol(tokenizer::Symbol::RBRACE) => {
-                        end = self.next()?.range.end;
+                        end = self.tokens.next()?.range.end;
                         break;
                     }
                     TokenType::Symbol(tokenizer::Symbol::COMMA) if !first => {
-                        end = self.next()?.range.end;
+                        end = self.tokens.next()?.range.end;
                     }
                     TokenType::Literal(tokenizer::Literal::NUMBER) if first => {}
                     _ => {
-                        let range = self.peek()?.range;
+                        let range = self.tokens.peek()?.range;
                         err = self
                             .fatal::<()>(
                                 &if first {
@@ -256,7 +256,7 @@ impl Parser {
 
     pub fn parse_expression_or_assignment(&mut self) -> EOFOr<Option<Statement>> {
         match self.parse_expression(false)?.split() {
-            (Some(expression), _err) => match (expression, self.peek()?.token_type) {
+            (Some(expression), _err) => match (expression, self.tokens.peek()?.token_type) {
                 (
                     expression @ Expression {
                         expression_type: ExpressionType::Operation(_, tokenizer::Operator::EQ, _),
@@ -270,7 +270,7 @@ impl Parser {
                             (*right, *left)
                         }
                         _ => {
-                            self.next()?;
+                            self.tokens.next()?;
                             (
                                 match self.parse_expression(false)?.value() {
                                     Some(right) => right,
@@ -343,7 +343,7 @@ impl Parser {
     }
 
     pub fn parse_if_statement(&mut self) -> EOFOr<Option<Statement>> {
-        let if_token = self.next()?;
+        let if_token = self.tokens.next()?;
         let mut end;
         let (condition, err) = match self.parse_expression(false)?.split() {
             (Some(condition), mut err) => {
@@ -368,11 +368,11 @@ impl Parser {
             }
         };
 
-        match (self.peek()?.token_type, &err) {
+        match (self.tokens.peek()?.token_type, &err) {
             (TokenType::NEWLINE, _) | (_, Some(_)) => {
                 if err.is_none() {
                     // Newline
-                    self.next()?;
+                    self.tokens.next()?;
                 }
 
                 let mut ifs = IfStatement {
@@ -386,17 +386,17 @@ impl Parser {
                 let mut end;
                 'outer: loop {
                     loop {
-                        match self.peek()?.token_type {
+                        match self.tokens.peek()?.token_type {
                             TokenType::Keyword(tokenizer::Keyword::END) => {
-                                match self.peek_nth(1)?.token_type {
+                                match self.tokens.peek_nth(1)?.token_type {
                                     TokenType::Keyword(tokenizer::Keyword::IF) => {
-                                        self.next()?;
-                                        end = self.next()?.range.end;
+                                        self.tokens.next()?;
+                                        end = self.tokens.next()?.range.end;
                                         self.expect(TokenType::NEWLINE)?.ok();
                                         break 'outer;
                                     }
                                     _ => {
-                                        let range = self.peek()?.range;
+                                        let range = self.tokens.peek()?.range;
                                         self.fatal::<()>(
                                             &"Dangling END keyword, did you mean END IF".into(),
                                             range,
@@ -409,13 +409,13 @@ impl Parser {
 
                             TokenType::Keyword(tokenizer::Keyword::ELSE) => {
                                 part = tokenizer::Keyword::ELSE;
-                                self.next()?;
+                                self.tokens.next()?;
                                 self.expect(TokenType::NEWLINE)?.ok();
                                 break;
                             }
                             TokenType::Keyword(tokenizer::Keyword::ELSEIF) => {
                                 part = tokenizer::Keyword::ELSEIF;
-                                end = self.next()?.range.end;
+                                end = self.tokens.next()?.range.end;
 
                                 let condition = match self.parse_expression(false)?.split() {
                                     (Some(condition), err) => {
@@ -487,7 +487,7 @@ impl Parser {
     }
 
     pub fn parse_for_loop(&mut self) -> EOFOr<Option<Statement>> {
-        let for_token = self.next()?;
+        let for_token = self.tokens.next()?;
 
         let name = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
         let _eq =
@@ -507,9 +507,9 @@ impl Parser {
         let end;
         let mut statements = Vec::new();
         loop {
-            match self.peek()?.token_type {
+            match self.tokens.peek()?.token_type {
                 TokenType::Keyword(tokenizer::Keyword::NEXT) => {
-                    end = self.next()?.range.end;
+                    end = self.tokens.next()?.range.end;
                     self.expect_newline()?.ok();
                     break;
                 }
@@ -540,11 +540,11 @@ impl Parser {
     }
 
     pub fn parse_while_loop(&mut self) -> EOFOr<Option<Statement>> {
-        let do_token = self.next()?;
+        let do_token = self.tokens.next()?;
         let is_inversed;
         let mut is_until = false;
 
-        let (mut condition, mut err) = match self.peek()?.token_type {
+        let (mut condition, mut err) = match self.tokens.peek()?.token_type {
             TokenType::Keyword(
                 keyword @ (tokenizer::Keyword::WHILE | tokenizer::Keyword::UNTIL),
             ) => {
@@ -569,7 +569,7 @@ impl Parser {
         err = None;
         let mut statements = Vec::new();
         loop {
-            match self.peek()?.token_type {
+            match self.tokens.peek()?.token_type {
                 TokenType::Keyword(tokenizer::Keyword::LOOP) => {
                     break;
                 }
@@ -581,9 +581,9 @@ impl Parser {
             }
         }
 
-        let mut end = self.next()?.range.end;
+        let mut end = self.tokens.next()?.range.end;
         if is_inversed {
-            (condition, err) = match self.peek()?.token_type {
+            (condition, err) = match self.tokens.peek()?.token_type {
                 TokenType::Keyword(
                     keyword @ (tokenizer::Keyword::WHILE | tokenizer::Keyword::UNTIL),
                 ) => {
@@ -591,7 +591,7 @@ impl Parser {
                     self.parse_expression(false)?
                 }
                 _ => {
-                    let range = self.peek()?.range;
+                    let range = self.tokens.peek()?.range;
                     self.fatal_res(&"Expected either WHILE or UNTIL".into(), range, true, None)?
                 }
             }
@@ -628,12 +628,12 @@ impl Parser {
     }
 
     pub fn parse_try_catch(&mut self) -> EOFOr<Option<Statement>> {
-        let try_token = self.next()?;
+        let try_token = self.tokens.next()?;
         self.expect_newline()?.ok();
 
         let mut try_statements = Vec::new();
         loop {
-            match self.peek()?.token_type {
+            match self.tokens.peek()?.token_type {
                 TokenType::Keyword(
                     tokenizer::Keyword::CATCH
                     | tokenizer::Keyword::FINALLY
@@ -649,9 +649,9 @@ impl Parser {
 
         let mut catches = Vec::new();
 
-        if let TokenType::Keyword(tokenizer::Keyword::CATCH) = self.peek()?.token_type {
+        if let TokenType::Keyword(tokenizer::Keyword::CATCH) = self.tokens.peek()?.token_type {
             loop {
-                self.next()?;
+                self.tokens.next()?;
                 let var = loop {
                     if self
                         .expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?
@@ -680,12 +680,12 @@ impl Parser {
 
                 let mut statements = Vec::new();
                 let exit = loop {
-                    match self.peek()?.token_type.clone() {
+                    match self.tokens.peek()?.token_type.clone() {
                         TokenType::Keyword(tokenizer::Keyword::END) => {
-                            match self.peek_nth(1)?.token_type {
+                            match self.tokens.peek_nth(1)?.token_type {
                                 TokenType::Keyword(tokenizer::Keyword::TRY) => break true,
                                 _ => {
-                                    let range = self.peek()?.range;
+                                    let range = self.tokens.peek()?.range;
                                     self.fatal::<()>(
                                         &"Dangling END keyword, did you mean END TRY".into(),
                                         range,
@@ -752,12 +752,12 @@ impl Parser {
             let mut statements = Vec::new();
 
             loop {
-                match self.peek()?.token_type.clone() {
+                match self.tokens.peek()?.token_type.clone() {
                     TokenType::Keyword(tokenizer::Keyword::END) => {
-                        match self.peek_nth(1)?.token_type {
+                        match self.tokens.peek_nth(1)?.token_type {
                             TokenType::Keyword(tokenizer::Keyword::TRY) => break,
                             _ => {
-                                let range = self.peek()?.range;
+                                let range = self.tokens.peek()?.range;
                                 self.fatal::<()>(
                                     &"Dangling END keyword, did you mean END TRY".into(),
                                     range,
@@ -779,8 +779,8 @@ impl Parser {
             None
         };
 
-        self.next()?; // end
-        let end = self.next()?.range.end; // try
+        self.tokens.next()?; // end
+        let end = self.tokens.next()?.range.end; // try
         self.expect_newline()?.ok();
 
         Some(Some(Statement {
@@ -797,7 +797,7 @@ impl Parser {
     }
 
     pub fn parse_choose_case(&mut self) -> EOFOr<Option<Statement>> {
-        let choose_token = self.next()?;
+        let choose_token = self.tokens.next()?;
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::CASE))?);
 
         let mut err = None;
@@ -810,18 +810,18 @@ impl Parser {
         let mut end;
 
         'outer: loop {
-            end = self.peek()?.range.end;
-            match self.peek()?.token_type {
+            end = self.tokens.peek()?.range.end;
+            match self.tokens.peek()?.token_type {
                 TokenType::Keyword(tokenizer::Keyword::END) => {
-                    match self.peek_nth(1)?.token_type {
+                    match self.tokens.peek_nth(1)?.token_type {
                         TokenType::Keyword(tokenizer::Keyword::CHOOSE) => {
-                            self.next()?;
-                            end = self.next()?.range.end;
+                            self.tokens.next()?;
+                            end = self.tokens.next()?.range.end;
                             self.expect_newline()?.ok();
                             break;
                         }
                         _ => {
-                            let range = self.peek()?.range;
+                            let range = self.tokens.peek()?.range;
                             self.fatal::<()>(
                                 &"Dangling END keyword, did you mean END CHOOSE".into(),
                                 range,
@@ -841,10 +841,10 @@ impl Parser {
 
             let mut specifiers = Vec::new();
             loop {
-                let specifier = match self.peek()?.token_type {
+                let specifier = match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::IS) => {
-                        let is = self.next()?;
-                        let operator = match self.peek()?.token_type {
+                        let is = self.tokens.next()?;
+                        let operator = match self.tokens.peek()?.token_type {
                             TokenType::Operator(
                                 operator @ (tokenizer::Operator::GTE
                                 | tokenizer::Operator::GT
@@ -852,7 +852,7 @@ impl Parser {
                                 | tokenizer::Operator::LT),
                             ) => operator,
                             _ => {
-                                let range = self.peek()?.range;
+                                let range = self.tokens.peek()?.range;
                                 self.fatal::<()>(
                                     &"Expected a Comparison Operator (>=, >, <=, <)".into(),
                                     range,
@@ -862,7 +862,7 @@ impl Parser {
                                 break;
                             }
                         };
-                        self.next()?;
+                        self.tokens.next()?;
 
                         let Some(literal) = self
                             .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
@@ -887,7 +887,7 @@ impl Parser {
                         }
                     }
                     TokenType::Literal(literal) => {
-                        let token = self.next()?;
+                        let token = self.tokens.next()?;
                         match literal {
                             tokenizer::Literal::NUMBER
                                 if self
@@ -931,14 +931,14 @@ impl Parser {
                         }
                     }
                     TokenType::Keyword(tokenizer::Keyword::ELSE) => {
-                        let token = self.next()?;
+                        let token = self.tokens.next()?;
                         CaseSpecifier {
                             specifier_type: CaseSpecifierType::Else,
                             range: token.range,
                         }
                     }
                     _ => {
-                        let range = self.peek()?.range;
+                        let range = self.tokens.peek()?.range;
                         self.fatal::<()>(
                             &"Expected one of (LITERAL, IS, ELSE)".into(),
                             range,
@@ -951,16 +951,16 @@ impl Parser {
 
                 specifiers.push(specifier);
 
-                match self.peek()?.token_type {
+                match self.tokens.peek()?.token_type {
                     TokenType::Symbol(tokenizer::Symbol::COMMA) => {
-                        self.next()?;
+                        self.tokens.next()?;
                     }
                     TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
-                        self.next()?;
+                        self.tokens.next()?;
                         break;
                     }
                     _ => {
-                        let range = self.peek()?.range;
+                        let range = self.tokens.peek()?.range;
                         self.fatal::<()>(&"Expected either ',' or a Newline".into(), range, true)?
                             .ok();
                         break;
@@ -971,18 +971,18 @@ impl Parser {
             let mut statements = Vec::new();
 
             loop {
-                match self.peek()?.token_type {
+                match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::END) => {
-                        match self.peek_nth(1)?.token_type {
+                        match self.tokens.peek_nth(1)?.token_type {
                             TokenType::Keyword(tokenizer::Keyword::CHOOSE) => {
-                                self.next()?;
-                                end = self.next()?.range.end;
+                                self.tokens.next()?;
+                                end = self.tokens.next()?.range.end;
                                 self.expect_newline()?.ok();
                                 cases.push((specifiers, statements));
                                 break 'outer;
                             }
                             _ => {
-                                let range = self.peek()?.range;
+                                let range = self.tokens.peek()?.range;
                                 self.fatal::<()>(
                                     &"Dangling END keyword, did you mean END CHOOSE".into(),
                                     range,
@@ -1014,11 +1014,11 @@ impl Parser {
     }
 
     pub fn parse_call_statement(&mut self) -> EOFOr<Option<Statement>> {
-        let call_token = self.next()?;
+        let call_token = self.tokens.next()?;
 
-        let call_type = match self.peek()?.token_type {
+        let call_type = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::SUPER) => {
-                self.next()?;
+                self.tokens.next()?;
                 CallType::Super
             }
             TokenType::ID => {
@@ -1076,14 +1076,14 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> EOFOr<Option<Statement>> {
-        match self.peek()?.token_type {
+        match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CONSTANT) => {
                 Some(self.parse_variable_declaration()?.value())
             }
             TokenType::ID
             | TokenType::Keyword(
                 tokenizer::Keyword::THIS | tokenizer::Keyword::SUPER | tokenizer::Keyword::PARENT,
-            ) => match self.peek_nth(1)?.token_type {
+            ) => match self.tokens.peek_nth(1)?.token_type {
                 TokenType::ID => Some(self.parse_variable_declaration()?.value()),
                 _ => self.parse_expression_or_assignment(),
             },
@@ -1097,11 +1097,11 @@ impl Parser {
             TokenType::Keyword(tokenizer::Keyword::CHOOSE) => self.parse_choose_case(),
             TokenType::Keyword(tokenizer::Keyword::CALL) => self.parse_call_statement(),
             TokenType::Keyword(tokenizer::Keyword::EXIT) => Some(Some(Statement {
-                range: self.next()?.range,
+                range: self.tokens.next()?.range,
                 statement_type: StatementType::Exit,
             })),
             TokenType::Keyword(tokenizer::Keyword::CONTINUE) => Some(Some(Statement {
-                range: self.next()?.range,
+                range: self.tokens.next()?.range,
                 statement_type: StatementType::Continue,
             })),
             TokenType::Keyword(
@@ -1121,13 +1121,17 @@ impl Parser {
                 | tokenizer::Keyword::UPDATE
                 | tokenizer::Keyword::UPDATEBLOB,
             ) => self.parse_sql_statement(),
+            TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
+                self.tokens.next()?;
+                Some(None)
+            },
             _ => {
                 let Token {
                     token_type, range, ..
-                } = *self.peek()?;
+                } = self.tokens.peek()?;
                 return Some(
                     self.fatal(
-                        &format!("Unexpected TokenType for Statement {:?}", token_type),
+                        &format!("Unexpected TokenType for Statement: {:?}", token_type),
                         range,
                         true,
                     )?

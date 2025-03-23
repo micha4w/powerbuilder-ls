@@ -1,8 +1,6 @@
-use std::{backtrace::Backtrace, iter::Filter, path::Path};
+use std::{backtrace::Backtrace, path::Path};
 
-use multipeek::{multipeek, MultiPeek};
-
-use super::types::*;
+use super::{token_iter::TokenIter, types::*};
 use crate::{
     tokenizer::{self, tokenize, tokenize_file, FileTokenizer, Token, TokenType},
     types::*,
@@ -69,23 +67,15 @@ pub(crate) use quick_exit_simple;
 pub(crate) use quick_exit_simple_opt;
 
 pub struct Parser {
-    last_token: Option<Token>,
-    tokenizer: MultiPeek<Filter<FileTokenizer, fn(&Token) -> bool>>,
-    pub(crate) tokenizer_ignore_newlines: bool,
+    pub(crate) tokens: TokenIter<FileTokenizer>,
 
     syntax_errors: Vec<Diagnostic>,
 }
 
 impl Parser {
     pub fn new(tokenizer: FileTokenizer) -> Parser {
-        fn filter(token: &Token) -> bool {
-            token.token_type != TokenType::COMMENT
-        }
-
         Parser {
-            last_token: None,
-            tokenizer: multipeek(tokenizer.filter::<fn(&Token) -> bool>(filter)),
-            tokenizer_ignore_newlines: false,
+            tokens: TokenIter::new(tokenizer),
             syntax_errors: Vec::new(),
         }
     }
@@ -93,46 +83,12 @@ impl Parser {
         Ok(Parser::new(tokenize_file(file)?))
     }
     pub fn new_from_string(buf: &String) -> anyhow::Result<Parser> {
-        Ok(Parser::new(tokenize(buf)?))
-    }
-
-    pub(crate) fn next(&mut self) -> EOFOr<Token> {
-        self.last_token = loop {
-            let token = self.tokenizer.next()?;
-            if !(self.tokenizer_ignore_newlines
-                && matches!(token.token_type, TokenType::NEWLINE))
-            {
-                break Some(token);
-            };
-        };
-        self.last_token.clone()
-    }
-
-    pub(crate) fn peek(&mut self) -> EOFOr<&Token> {
-        let mut i = 0;
-        loop {
-            let token = self.tokenizer.peek_nth(i)?;
-            if !(self.tokenizer_ignore_newlines
-                && matches!(token.token_type, TokenType::NEWLINE))
-            {
-                break;
-            };
-            i += 1;
-        }
-        self.tokenizer.peek_nth(i)
-    }
-
-    pub(crate) fn peek_nth(&mut self, n: usize) -> EOFOr<&Token> {
-        assert!(
-            !self.tokenizer_ignore_newlines,
-            "peek_nth is not supported when using tokenizer_ignore_whitespaces"
-        );
-        self.tokenizer.peek_nth(n)
+        Ok(Parser::new(tokenize(buf)))
     }
 
     pub(crate) fn consume_line(&mut self) -> EOFOr<()> {
         loop {
-            match self.next()?.token_type {
+            match self.tokens.next()?.token_type {
                 TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
                     break Some(())
                 }
@@ -184,15 +140,15 @@ impl Parser {
     }
 
     pub(crate) fn optional(&mut self, token_type: TokenType) -> EOFOr<Option<Token>> {
-        if self.peek()?.token_type == token_type {
-            Some(Some(self.next()?))
+        if self.tokens.peek()?.token_type == token_type {
+            Some(Some(self.tokens.next()?))
         } else {
             Some(None)
         }
     }
 
     pub(crate) fn expect(&mut self, token_type: TokenType) -> EOFOr<Result<Token, ParseError>> {
-        let token = self.next()?;
+        let token = self.tokens.next()?;
         if token.token_type == token_type {
             Some(Ok(token))
         } else {
@@ -209,16 +165,16 @@ impl Parser {
 
     pub(crate) fn optional_newline(&mut self) -> EOFOr<Option<Token>> {
         if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
-            self.peek()?.token_type
+            self.tokens.peek()?.token_type
         {
-            Some(Some(self.next()?))
+            Some(Some(self.tokens.next()?))
         } else {
             Some(None)
         }
     }
 
     pub(crate) fn expect_newline(&mut self) -> EOFOr<Result<Token, ParseError>> {
-        let token = self.next()?;
+        let token = self.tokens.next()?;
         if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
             token.token_type
         {

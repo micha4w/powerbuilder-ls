@@ -17,7 +17,7 @@ impl Parser {
         }
 
         Some(Token {
-            range: Range::new(*end, self.peek()?.range.start),
+            range: Range::new(*end, self.tokens.peek()?.range.start),
             token_type: TokenType::INVALID,
             content: String::new(),
             error: None,
@@ -134,7 +134,7 @@ impl Parser {
     }
 
     fn parse_sql_open(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let err = None;
         let cursor = self.id_or_invalid(&err, &mut end)?;
 
@@ -148,7 +148,7 @@ impl Parser {
     }
 
     fn parse_sql_close(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let err = None;
         let cursor = self.id_or_invalid(&err, &mut end)?;
 
@@ -162,7 +162,7 @@ impl Parser {
     }
 
     fn parse_sql_connect(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
         Some(ParseResult::new(
             Statement {
@@ -176,7 +176,7 @@ impl Parser {
     }
 
     fn parse_sql_disconnect(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
         Some(ParseResult::new(
             Statement {
@@ -190,7 +190,7 @@ impl Parser {
     }
 
     fn parse_sql_commit(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
         Some(ParseResult::new(
             Statement {
@@ -204,14 +204,14 @@ impl Parser {
     }
 
     fn parse_sql_declare(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         let name = self.id_or_invalid(&err, &mut end)?;
 
-        match self.peek()?.token_type {
+        match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CURSOR) => {
-                self.next()?;
+                self.tokens.next()?;
                 quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
 
                 let stmt = quick_exit!(self.parse_sql_select()?, err);
@@ -231,7 +231,7 @@ impl Parser {
                 ))
             }
             TokenType::Keyword(tokenizer::Keyword::PROCEDURE) => {
-                self.next()?;
+                self.tokens.next()?;
                 quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
                 let stored_procedure_name = self.id_or_invalid(&err, &mut end)?;
 
@@ -284,7 +284,7 @@ impl Parser {
                 ))
             }
             _ => {
-                let range = self.peek()?.range;
+                let range = self.tokens.peek()?.range;
                 return self.fatal_res(
                     &"Expected either CURSOR or PROCEDURE".into(),
                     range,
@@ -296,7 +296,7 @@ impl Parser {
     }
 
     fn parse_sql_execute(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let err = None;
         let procedure = self.id_or_invalid(&err, &mut end)?;
 
@@ -310,7 +310,7 @@ impl Parser {
     }
 
     fn parse_sql_fetch(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         let cursor_or_procedure = self.id_or_invalid(&err, &mut end)?;
@@ -329,7 +329,7 @@ impl Parser {
     }
 
     fn parse_sql_rollback(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
         Some(ParseResult::new(
             Statement {
@@ -343,7 +343,7 @@ impl Parser {
     }
 
     fn parse_sql_delete(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?);
@@ -388,12 +388,12 @@ impl Parser {
     }
 
     fn parse_sql_select(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let is_blob = match self.peek()?.token_type {
+        let is_blob = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::SELECT) => false,
             TokenType::Keyword(tokenizer::Keyword::SELECTBLOB) => true,
             _ => unreachable!(),
         };
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         let lparen = self.optional(TokenType::Symbol(tokenizer::Symbol::LPAREN))?;
@@ -457,7 +457,7 @@ impl Parser {
     }
 
     fn parse_sql_insert(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
@@ -524,12 +524,12 @@ impl Parser {
     }
 
     fn parse_sql_update(&mut self) -> EOFOr<ParseResult<Statement>> {
-        let is_blob = match self.peek()?.token_type {
+        let is_blob = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::UPDATE) => false,
             TokenType::Keyword(tokenizer::Keyword::UPDATEBLOB) => true,
             _ => unreachable!(),
         };
-        let Range { start, mut end } = self.next()?.range;
+        let Range { start, mut end } = self.tokens.next()?.range;
         let mut err = None;
 
         let table = self.id_or_invalid(&err, &mut end)?;
@@ -578,9 +578,9 @@ impl Parser {
     }
 
     pub fn parse_sql_statement(&mut self) -> EOFOr<Option<Statement>> {
-        self.tokenizer_ignore_newlines = true;
+        self.tokens.ignore_newlines = true;
 
-        let ret = match self.peek()?.token_type {
+        let ret = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::OPEN) => self.parse_sql_open(),
             TokenType::Keyword(tokenizer::Keyword::CLOSE) => self.parse_sql_close(),
 
@@ -612,7 +612,7 @@ impl Parser {
             }
         }
 
-        self.tokenizer_ignore_newlines = false;
+        self.tokens.ignore_newlines = false;
         Some(Some(token))
     }
 }

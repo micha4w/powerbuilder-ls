@@ -7,7 +7,7 @@ use crate::{
 impl Parser {
     // TODO why is this function included inside parse_type
     pub fn parse_class_id(&mut self) -> EOFOrParserResult<(Option<Token>, Token)> {
-        let name = self.next()?;
+        let name = self.tokens.next()?;
         Some(
             if self
                 .optional(TokenType::Symbol(tokenizer::Symbol::TICK))?
@@ -63,14 +63,14 @@ impl Parser {
                             match self.optional(TokenType::Symbol(tokenizer::Symbol::RCURLY))? {
                                 Some(rcurly) => rcurly.range.end,
                                 None => {
-                                    let range = self.peek()?.range;
+                                    let range = self.tokens.peek()?.range;
                                     self.error(&"Expected '{'".into(), range);
                                     prec.range.end
                                 }
                             }
                         }
                         None => {
-                            let range = self.peek()?.range;
+                            let range = self.tokens.peek()?.range;
                             self.error(&"Expected a Number Literal".into(), range);
                             lcurly.range.end
                         }
@@ -127,10 +127,10 @@ impl Parser {
         let mut err = None;
 
         loop {
-            match self.peek()?.token_type {
+            match self.tokens.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
-                    while self.peek()?.token_type == TokenType::Symbol(tokenizer::Symbol::COMMA) {
-                        range.end = self.next()?.range.end;
+                    while self.tokens.peek()?.token_type == TokenType::Symbol(tokenizer::Symbol::COMMA) {
+                        range.end = self.tokens.next()?.range.end;
                         expressions.push(Expression {
                             expression_type: ExpressionType::Error,
                             range: Range {
@@ -141,7 +141,7 @@ impl Parser {
                     }
                 }
                 ending if ending == ending_token => {
-                    range.end = self.next()?.range.end;
+                    range.end = self.tokens.next()?.range.end;
                     break;
                 }
                 _ => {}
@@ -157,13 +157,13 @@ impl Parser {
                 break;
             }
 
-            match self.peek()?.token_type {
+            match self.tokens.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
-                    range.end = self.next()?.range.end;
+                    range.end = self.tokens.next()?.range.end;
                 }
                 token_type => {
                     if token_type != ending_token {
-                        let range = self.peek()?.range;
+                        let range = self.tokens.peek()?.range;
                         err = self
                             .fatal::<()>(
                                 &format!("Expected either ',' or {:#}", ending_token),
@@ -205,13 +205,13 @@ impl Parser {
     }
 
     pub fn parse_expression(&mut self, is_sql: bool) -> EOFOrParserResult<Expression> {
-        let start = self.peek()?.range.start;
+        let start = self.tokens.peek()?.range.start;
         let mut end;
         let mut err = None;
 
-        let expression_type = match self.peek()?.token_type {
+        let expression_type = match self.tokens.peek()?.token_type {
             TokenType::Symbol(tokenizer::Symbol::LPAREN) => {
-                self.next()?;
+                self.tokens.next()?;
                 let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 if err.is_none() {
@@ -228,7 +228,7 @@ impl Parser {
                 array.expression_type
             }
             TokenType::Keyword(tokenizer::Keyword::NOT) => {
-                self.next()?;
+                self.tokens.next()?;
                 let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::BooleanNot(Box::new(expression))
@@ -236,7 +236,7 @@ impl Parser {
             TokenType::Operator(
                 operator @ (tokenizer::Operator::PLUS | tokenizer::Operator::MINUS),
             ) => {
-                self.next()?;
+                self.tokens.next()?;
                 let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::UnaryOperation(operator, Box::new(expression))
@@ -250,16 +250,16 @@ impl Parser {
                 ExpressionType::LValue(lvalue)
             }
             TokenType::Keyword(tokenizer::Keyword::CREATE) if !is_sql => {
-                self.next()?;
+                self.tokens.next()?;
 
-                match self.peek()?.token_type {
+                match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::USING) => {
                         let class = quick_exit!(self.parse_expression(is_sql)?, err);
                         end = class.range.end;
                         ExpressionType::CreateUsing(Box::new(class))
                     }
                     TokenType::ID => {
-                        let class = self.next()?;
+                        let class = self.tokens.next()?;
 
                         end = class.range.end;
                         ExpressionType::Create(DataType {
@@ -271,7 +271,7 @@ impl Parser {
                         })
                     }
                     _ => {
-                        let range = self.peek()?.range;
+                        let range = self.tokens.peek()?.range;
                         return self.fatal_res(
                             &"Expected 'USING' or a Class Name".into(),
                             range,
@@ -282,7 +282,7 @@ impl Parser {
                 }
             }
             TokenType::Literal(literal) => {
-                let token = self.next()?;
+                let token = self.tokens.next()?;
                 end = token.range.end;
                 ExpressionType::Literal(Literal {
                     literal_type: literal,
@@ -294,13 +294,13 @@ impl Parser {
                 tokenizer::Symbol::RBRACE | tokenizer::Symbol::COMMA | tokenizer::Symbol::DOT,
             )
             | TokenType::IncrDecrOperator(_) => {
-                let range = self.peek()?.range;
+                let range = self.tokens.peek()?.range;
                 self.error(&"Unexpected Token for Expression".into(), range);
                 end = range.end;
                 ExpressionType::Error
             }
             _ => {
-                let range = self.peek()?.range;
+                let range = self.tokens.peek()?.range;
                 return self.fatal_res(
                     &"Unexpected Token for Expression".into(),
                     range,
@@ -318,9 +318,9 @@ impl Parser {
             return Some(Err((err, Some(expression))));
         }
 
-        match self.peek()?.token_type {
+        match self.tokens.peek()?.token_type {
             TokenType::IncrDecrOperator(operator) => {
-                let token = self.next()?;
+                let token = self.tokens.next()?;
 
                 expression = Expression {
                     range: Range {
@@ -336,8 +336,8 @@ impl Parser {
             _ => {}
         }
 
-        if let TokenType::Operator(operator) = self.peek()?.token_type {
-            self.next()?;
+        if let TokenType::Operator(operator) = self.tokens.peek()?.token_type {
+            self.tokens.next()?;
             let right_side = quick_exit!(self.parse_expression(is_sql)?, err);
 
             expression = match right_side.expression_type {
@@ -390,7 +390,7 @@ impl Parser {
             None
         };
 
-        let keyword = match self.peek()?.token_type {
+        let keyword = match self.tokens.peek()?.token_type {
             TokenType::Keyword(kw @ (tokenizer::Keyword::THIS | tokenizer::Keyword::PARENT)) => {
                 Some(kw)
             }
@@ -402,7 +402,7 @@ impl Parser {
 
         let mut previous = match keyword {
             Some(kw) => Some({
-                let token = self.next()?;
+                let token = self.tokens.next()?;
                 let range = token.range;
 
                 LValue {
@@ -427,9 +427,9 @@ impl Parser {
 
         loop {
             match &mut previous {
-                Some(prev) => match self.peek()?.token_type {
+                Some(prev) => match self.tokens.peek()?.token_type {
                     TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
-                        let colon = self.next()?;
+                        let colon = self.tokens.next()?;
 
                         match prev.lvalue_type {
                             LValueType::Super => {}
@@ -443,7 +443,7 @@ impl Parser {
                         }
                     }
                     TokenType::Symbol(tokenizer::Symbol::DOT) => {
-                        let dot = self.next()?;
+                        let dot = self.tokens.next()?;
 
                         if let LValueType::Super = prev.lvalue_type {
                             self.error(
@@ -453,7 +453,7 @@ impl Parser {
                         }
                     }
                     TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
-                        let lbrace = self.next()?;
+                        let lbrace = self.tokens.next()?;
                         let res = match self.parse_expression(is_sql)? {
                             Ok(exp) => {
                                 match self.expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))? {
@@ -507,7 +507,7 @@ impl Parser {
                 None => {}
             }
 
-            match (self.peek()?.token_type, self.peek_nth(1)?.token_type) {
+            match (self.tokens.peek()?.token_type, self.tokens.peek_nth(1)?.token_type) {
                 (
                     TokenType::Keyword(tokenizer::Keyword::STATIC)
                     | TokenType::Keyword(tokenizer::Keyword::DYNAMIC)
@@ -524,18 +524,18 @@ impl Parser {
                     /* TODO: || colon.is_some()*/
                     {
                         loop {
-                            match self.peek()?.token_type {
+                            match self.tokens.peek()?.token_type {
                                 TokenType::Keyword(tokenizer::Keyword::STATIC) => {
-                                    statics.push(self.next()?)
+                                    statics.push(self.tokens.next()?)
                                 }
                                 TokenType::Keyword(tokenizer::Keyword::DYNAMIC) => {
-                                    dynamics.push(self.next()?)
+                                    dynamics.push(self.tokens.next()?)
                                 }
                                 TokenType::Keyword(tokenizer::Keyword::EVENT) => {
-                                    events.push(self.next()?)
+                                    events.push(self.tokens.next()?)
                                 }
                                 TokenType::Keyword(tokenizer::Keyword::POST) => {
-                                    posts.push(self.next()?)
+                                    posts.push(self.tokens.next()?)
                                 }
                                 _ => break,
                             }
@@ -621,7 +621,7 @@ impl Parser {
                 }
                 (TokenType::ID, _) => {
                     let var = VariableAccess {
-                        name: self.next()?,
+                        name: self.tokens.next()?,
                         is_write: false,
                     };
 
@@ -637,7 +637,7 @@ impl Parser {
                     };
                 }
                 _ => {
-                    let range = self.peek()?.range;
+                    let range = self.tokens.peek()?.range;
                     return self.fatal_res(
                         &"Unexpected Token for LValue".into(),
                         range,
@@ -657,7 +657,7 @@ impl Parser {
                 None => prev,
             }),
             None => {
-                let range = self.peek()?.range.start.into();
+                let range = self.tokens.peek()?.range.start.into();
                 Err((
                     ParseError::UnexpectedToken,
                     Some(LValue {

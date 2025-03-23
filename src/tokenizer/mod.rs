@@ -14,8 +14,6 @@ pub fn tokenize_file(file: &Path) -> anyhow::Result<FileTokenizer> {
     Ok(tokens)
 }
 
-pub fn tokenize(buf: &String) -> anyhow::Result<FileTokenizer> {
-    let tokens = FileTokenizer::new(buf.clone());
-
-    Ok(tokens)
+pub fn tokenize(buf: &String) -> FileTokenizer {
+    FileTokenizer::new(buf.clone())
 }
