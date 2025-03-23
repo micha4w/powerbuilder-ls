@@ -4,7 +4,7 @@ use multipeek::{multipeek, MultiPeek};
 
 use super::types::*;
 use crate::{
-    tokenizer::{tokenize, tokenize_file, FileTokenizer, Token, TokenType},
+    tokenizer::{self, tokenize, tokenize_file, FileTokenizer, Token, TokenType},
     types::*,
 };
 
@@ -40,7 +40,7 @@ macro_rules! quick_exit_opt {
     ( $func:expr ) => {
         match $func {
             Ok(ret) => ret,
-            Err(_) => return Some(None),
+            Err((_, _)) => return Some(None),
         }
     };
 }
@@ -71,6 +71,8 @@ pub(crate) use quick_exit_simple_opt;
 pub struct Parser {
     last_token: Option<Token>,
     tokenizer: MultiPeek<Filter<FileTokenizer, fn(&Token) -> bool>>,
+    pub(crate) tokenizer_ignore_newlines: bool,
+
     syntax_errors: Vec<Diagnostic>,
 }
 
@@ -83,6 +85,7 @@ impl Parser {
         Parser {
             last_token: None,
             tokenizer: multipeek(tokenizer.filter::<fn(&Token) -> bool>(filter)),
+            tokenizer_ignore_newlines: false,
             syntax_errors: Vec::new(),
         }
     }
@@ -94,22 +97,45 @@ impl Parser {
     }
 
     pub(crate) fn next(&mut self) -> EOFOr<Token> {
-        self.last_token = self.tokenizer.next();
+        self.last_token = loop {
+            let token = self.tokenizer.next()?;
+            if !(self.tokenizer_ignore_newlines
+                && matches!(token.token_type, TokenType::NEWLINE))
+            {
+                break Some(token);
+            };
+        };
         self.last_token.clone()
     }
 
     pub(crate) fn peek(&mut self) -> EOFOr<&Token> {
-        self.tokenizer.peek()
+        let mut i = 0;
+        loop {
+            let token = self.tokenizer.peek_nth(i)?;
+            if !(self.tokenizer_ignore_newlines
+                && matches!(token.token_type, TokenType::NEWLINE))
+            {
+                break;
+            };
+            i += 1;
+        }
+        self.tokenizer.peek_nth(i)
     }
 
     pub(crate) fn peek_nth(&mut self, n: usize) -> EOFOr<&Token> {
+        assert!(
+            !self.tokenizer_ignore_newlines,
+            "peek_nth is not supported when using tokenizer_ignore_whitespaces"
+        );
         self.tokenizer.peek_nth(n)
     }
 
     pub(crate) fn consume_line(&mut self) -> EOFOr<()> {
         loop {
             match self.next()?.token_type {
-                TokenType::NEWLINE => break Some(()),
+                TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
+                    break Some(())
+                }
                 _ => {}
             }
         }
@@ -172,6 +198,34 @@ impl Parser {
         } else {
             self.fatal(
                 &format!("Expected {:?}", token_type),
+                token.range,
+                matches!(
+                    token.token_type,
+                    TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON)
+                ),
+            )
+        }
+    }
+
+    pub(crate) fn optional_newline(&mut self) -> EOFOr<Option<Token>> {
+        if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
+            self.peek()?.token_type
+        {
+            Some(Some(self.next()?))
+        } else {
+            Some(None)
+        }
+    }
+
+    pub(crate) fn expect_newline(&mut self) -> EOFOr<Result<Token, ParseError>> {
+        let token = self.next()?;
+        if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
+            token.token_type
+        {
+            Some(Ok(token))
+        } else {
+            self.fatal(
+                &format!("Expected NEWLINE"),
                 token.range,
                 token.token_type != TokenType::NEWLINE,
             )

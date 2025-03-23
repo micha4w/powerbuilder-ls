@@ -24,7 +24,23 @@ impl Parser {
     }
 
     pub fn parse_type(&mut self) -> EOFOrParserResult<DataType> {
-        let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+        let mut err = None;
+        let (group, name) = quick_exit!(self.parse_class_id()?, err);
+        if let Some(group) = group {
+            return Some(ParseResult::new(
+                DataType {
+                    data_type_type: DataTypeType::Complex(GroupedName::new(
+                        Some(group.content),
+                        name.content,
+                    )),
+                    range: Range {
+                        start: group.range.start,
+                        end: name.range.end,
+                    },
+                },
+                err,
+            ));
+        }
 
         if name.content.eq_ignore_ascii_case("decimal") || name.content.eq_ignore_ascii_case("dec")
         {
@@ -72,23 +88,6 @@ impl Parser {
             }));
         }
 
-        if let Some(tick) = self.optional(TokenType::Symbol(tokenizer::Symbol::TICK))? {
-            let start = name.range.start;
-            let group = name.content;
-
-            let (name, end, err) = match self.expect(TokenType::ID)? {
-                Ok(id) => (id.content, id.range.end, None),
-                Err(err) => ("".into(), tick.range.end, Some(err)),
-            };
-
-            return Some(ParseResult::new(
-                DataType {
-                    data_type_type: DataTypeType::Complex(GroupedName::new(Some(group), name)),
-                    range: Range { start, end },
-                },
-                err,
-            ));
-        }
         let data_type = match name.content.to_lowercase().as_str() {
             "any" => DataTypeType::Any,
             "blob" => DataTypeType::Blob,
@@ -107,7 +106,7 @@ impl Parser {
             "time" => DataTypeType::Time,
             "unsignedinteger" | "unsignedint" | "uint" => DataTypeType::Uint,
             "unsignedlong" | "ulong" => DataTypeType::Ulong,
-            _ => DataTypeType::Complex(GroupedName::new(None, name.content.clone())),
+            _ => DataTypeType::Complex(GroupedName::simple(name.content.clone())),
         };
 
         Some(Ok(DataType {
@@ -116,8 +115,14 @@ impl Parser {
         }))
     }
 
-    pub fn parse_array_declaration(&mut self) -> EOFOrParserResult<Expression> {
-        let Range { start, mut end } = self.next()?.range;
+    pub fn parse_expression_list(
+        &mut self,
+        is_sql: bool,
+        starting_token: TokenType,
+        ending_token: TokenType,
+    ) -> EOFOrParserResult<(Vec<Expression>, Range)> {
+        let mut range = quick_exit_simple!(self.expect(starting_token)?).range;
+
         let mut expressions = Vec::new();
         let mut err = None;
 
@@ -125,24 +130,27 @@ impl Parser {
             match self.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
                     while self.peek()?.token_type == TokenType::Symbol(tokenizer::Symbol::COMMA) {
-                        end = self.next()?.range.end;
+                        range.end = self.next()?.range.end;
                         expressions.push(Expression {
                             expression_type: ExpressionType::Error,
-                            range: Range { start: end, end },
+                            range: Range {
+                                start: range.end,
+                                end: range.end,
+                            },
                         })
                     }
                 }
-                TokenType::Symbol(tokenizer::Symbol::RCURLY) => {
-                    end = self.next()?.range.end;
+                ending if ending == ending_token => {
+                    range.end = self.next()?.range.end;
                     break;
                 }
                 _ => {}
             }
 
             let expression;
-            (expression, err) = self.parse_expression()?.split();
+            (expression, err) = self.parse_expression(is_sql)?.split();
             if let Some(expression) = expression {
-                end = expression.range.end;
+                range.end = expression.range.end;
                 expressions.push(expression);
             }
             if err.is_some() {
@@ -151,29 +159,52 @@ impl Parser {
 
             match self.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
-                    end = self.next()?.range.end;
+                    range.end = self.next()?.range.end;
                 }
-                TokenType::Symbol(tokenizer::Symbol::RCURLY) => {}
-                _ => {
-                    let range = self.peek()?.range;
-                    err = self
-                        .fatal::<()>(&"Expected either , or }".into(), range, true)?
-                        .err();
-                    break;
+                token_type => {
+                    if token_type != ending_token {
+                        let range = self.peek()?.range;
+                        err = self
+                            .fatal::<()>(
+                                &format!("Expected either ',' or {:#}", ending_token),
+                                range,
+                                matches!(
+                                    token_type,
+                                    TokenType::NEWLINE
+                                        | TokenType::Symbol(tokenizer::Symbol::SEMICOLON)
+                                ),
+                            )?
+                            .err();
+                        break;
+                    }
                 }
             }
         }
 
+        Some(ParseResult::new((expressions, range), err))
+    }
+
+    pub fn parse_array_declaration(&mut self) -> EOFOrParserResult<Expression> {
+        let mut err = None;
+        let (expressions, range) = quick_exit!(
+            self.parse_expression_list(
+                false,
+                TokenType::Symbol(tokenizer::Symbol::LCURLY),
+                TokenType::Symbol(tokenizer::Symbol::RCURLY),
+            )?,
+            err
+        );
+
         Some(ParseResult::new(
             Expression {
                 expression_type: ExpressionType::ArrayLiteral(expressions),
-                range: Range::new(start, end),
+                range,
             },
             err,
         ))
     }
 
-    pub fn parse_expression(&mut self) -> EOFOrParserResult<Expression> {
+    pub fn parse_expression(&mut self, is_sql: bool) -> EOFOrParserResult<Expression> {
         let start = self.peek()?.range.start;
         let mut end;
         let mut err = None;
@@ -181,7 +212,7 @@ impl Parser {
         let expression_type = match self.peek()?.token_type {
             TokenType::Symbol(tokenizer::Symbol::LPAREN) => {
                 self.next()?;
-                let expression = quick_exit!(self.parse_expression()?, err);
+                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 if err.is_none() {
                     match self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))? {
@@ -191,14 +222,14 @@ impl Parser {
                 }
                 ExpressionType::Parenthesized(Box::new(expression))
             }
-            TokenType::Symbol(tokenizer::Symbol::LCURLY) => {
+            TokenType::Symbol(tokenizer::Symbol::LCURLY) if !is_sql => {
                 let array = quick_exit!(self.parse_array_declaration()?, err);
                 end = array.range.end;
                 array.expression_type
             }
             TokenType::Keyword(tokenizer::Keyword::NOT) => {
                 self.next()?;
-                let expression = quick_exit!(self.parse_expression()?, err);
+                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::BooleanNot(Box::new(expression))
             }
@@ -206,7 +237,7 @@ impl Parser {
                 operator @ (tokenizer::Operator::PLUS | tokenizer::Operator::MINUS),
             ) => {
                 self.next()?;
-                let expression = quick_exit!(self.parse_expression()?, err);
+                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::UnaryOperation(operator, Box::new(expression))
             }
@@ -214,16 +245,16 @@ impl Parser {
             | TokenType::Keyword(tokenizer::Keyword::SUPER)
             | TokenType::Keyword(tokenizer::Keyword::PARENT)
             | TokenType::ID => {
-                let lvalue = quick_exit!(self.parse_lvalue()?, err);
+                let lvalue = quick_exit!(self.parse_lvalue(is_sql)?, err);
                 end = lvalue.range.end;
                 ExpressionType::LValue(lvalue)
             }
-            TokenType::Keyword(tokenizer::Keyword::CREATE) => {
+            TokenType::Keyword(tokenizer::Keyword::CREATE) if !is_sql => {
                 self.next()?;
 
                 match self.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::USING) => {
-                        let class = quick_exit!(self.parse_expression()?, err);
+                        let class = quick_exit!(self.parse_expression(is_sql)?, err);
                         end = class.range.end;
                         ExpressionType::CreateUsing(Box::new(class))
                     }
@@ -260,12 +291,9 @@ impl Parser {
                 })
             }
             TokenType::Symbol(
-                tokenizer::Symbol::RBRACE
-                | tokenizer::Symbol::COMMA
-                | tokenizer::Symbol::DOT
-                | tokenizer::Symbol::PLUSPLUS
-                | tokenizer::Symbol::MINUSMINUS,
-            ) => {
+                tokenizer::Symbol::RBRACE | tokenizer::Symbol::COMMA | tokenizer::Symbol::DOT,
+            )
+            | TokenType::IncrDecrOperator(_) => {
                 let range = self.peek()?.range;
                 self.error(&"Unexpected Token for Expression".into(), range);
                 end = range.end;
@@ -291,9 +319,7 @@ impl Parser {
         }
 
         match self.peek()?.token_type {
-            TokenType::Symbol(
-                operator @ (tokenizer::Symbol::PLUSPLUS | tokenizer::Symbol::MINUSMINUS),
-            ) => {
+            TokenType::IncrDecrOperator(operator) => {
                 let token = self.next()?;
 
                 expression = Expression {
@@ -312,7 +338,7 @@ impl Parser {
 
         if let TokenType::Operator(operator) = self.peek()?.token_type {
             self.next()?;
-            let right_side = quick_exit!(self.parse_expression()?, err);
+            let right_side = quick_exit!(self.parse_expression(is_sql)?, err);
 
             expression = match right_side.expression_type {
                 ExpressionType::Operation(sub_left, sub_operator, sub_right)
@@ -357,27 +383,52 @@ impl Parser {
         Some(ParseResult::new(expression, err))
     }
 
-    pub fn parse_lvalue(&mut self) -> EOFOrParserResult<LValue> {
-        let mut previous = match self.peek()?.token_type {
-            TokenType::Keyword(tokenizer::Keyword::SUPER) => Some(LValue {
-                lvalue_type: LValueType::Super,
-                range: self.next()?.range,
-            }),
-            TokenType::Keyword(tokenizer::Keyword::THIS) => Some(LValue {
-                lvalue_type: LValueType::This,
-                range: self.next()?.range,
-            }),
-            TokenType::Keyword(tokenizer::Keyword::PARENT) => Some(LValue {
-                lvalue_type: LValueType::Parent,
-                range: self.next()?.range,
-            }),
+    pub fn parse_lvalue(&mut self, is_sql: bool) -> EOFOrParserResult<LValue> {
+        let colon = if is_sql {
+            self.optional(TokenType::Symbol(tokenizer::Symbol::COLON))?
+        } else {
+            None
+        };
+
+        let keyword = match self.peek()?.token_type {
+            TokenType::Keyword(kw @ (tokenizer::Keyword::THIS | tokenizer::Keyword::PARENT)) => {
+                Some(kw)
+            }
+            TokenType::Keyword(kw @ tokenizer::Keyword::SUPER) if colon.is_none() || !is_sql => {
+                Some(kw)
+            }
             _ => None,
+        };
+
+        let mut previous = match keyword {
+            Some(kw) => Some({
+                let token = self.next()?;
+                let range = token.range;
+
+                LValue {
+                    lvalue_type: if is_sql && colon.is_none() {
+                        LValueType::Variable(VariableAccess {
+                            name: token,
+                            is_write: false,
+                        })
+                    } else {
+                        match kw {
+                            tokenizer::Keyword::SUPER => LValueType::Super,
+                            tokenizer::Keyword::THIS => LValueType::This,
+                            tokenizer::Keyword::PARENT => LValueType::Parent,
+                            _ => unreachable!(),
+                        }
+                    },
+                    range,
+                }
+            }),
+            None => None,
         };
 
         loop {
             match &mut previous {
                 Some(prev) => match self.peek()?.token_type {
-                    TokenType::Symbol(tokenizer::Symbol::COLONCOLON) => {
+                    TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
                         let colon = self.next()?;
 
                         match prev.lvalue_type {
@@ -401,9 +452,9 @@ impl Parser {
                             );
                         }
                     }
-                    TokenType::Symbol(tokenizer::Symbol::LBRACE) => {
+                    TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
                         let lbrace = self.next()?;
-                        let res = match self.parse_expression()? {
+                        let res = match self.parse_expression(is_sql)? {
                             Ok(exp) => {
                                 match self.expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))? {
                                     Ok(rbrace) => Ok((rbrace.range.end, exp)),
@@ -469,21 +520,25 @@ impl Parser {
                     let mut events = Vec::new();
                     let mut posts = Vec::new();
                     let mut statics = Vec::new();
-                    loop {
-                        match self.peek()?.token_type {
-                            TokenType::Keyword(tokenizer::Keyword::STATIC) => {
-                                statics.push(self.next()?)
+                    if !is_sql
+                    /* TODO: || colon.is_some()*/
+                    {
+                        loop {
+                            match self.peek()?.token_type {
+                                TokenType::Keyword(tokenizer::Keyword::STATIC) => {
+                                    statics.push(self.next()?)
+                                }
+                                TokenType::Keyword(tokenizer::Keyword::DYNAMIC) => {
+                                    dynamics.push(self.next()?)
+                                }
+                                TokenType::Keyword(tokenizer::Keyword::EVENT) => {
+                                    events.push(self.next()?)
+                                }
+                                TokenType::Keyword(tokenizer::Keyword::POST) => {
+                                    posts.push(self.next()?)
+                                }
+                                _ => break,
                             }
-                            TokenType::Keyword(tokenizer::Keyword::DYNAMIC) => {
-                                dynamics.push(self.next()?)
-                            }
-                            TokenType::Keyword(tokenizer::Keyword::EVENT) => {
-                                events.push(self.next()?)
-                            }
-                            TokenType::Keyword(tokenizer::Keyword::POST) => {
-                                posts.push(self.next()?)
-                            }
-                            _ => break,
                         }
                     }
 
@@ -525,60 +580,19 @@ impl Parser {
                         }
                     }
 
-                    let mut arguments = Vec::new();
-
-                    let mut err = None;
-                    let mut end;
-                    match self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))? {
-                        Ok(lparen) => {
-                            end = lparen.range.end;
-                            if self.peek()?.token_type
-                                != TokenType::Symbol(tokenizer::Symbol::RPAREN)
-                            {
-                                loop {
-                                    let argument;
-                                    (argument, err) = self.parse_expression()?.split();
-                                    if let Some(arg) = argument {
-                                        end = arg.range.end;
-                                        arguments.push(arg);
-                                    }
-                                    if err.is_some() {
-                                        break;
-                                    }
-
-                                    let token = self.next()?;
-                                    match token.token_type {
-                                        TokenType::Symbol(tokenizer::Symbol::COMMA) => {}
-                                        TokenType::Symbol(tokenizer::Symbol::RPAREN) => {
-                                            end = token.range.end;
-                                            break;
-                                        }
-                                        _ => {
-                                            err = self
-                                                .fatal::<()>(
-                                                    &"Expected ',' or ')'".into(),
-                                                    token.range,
-                                                    token.token_type != TokenType::NEWLINE,
-                                                )?
-                                                .err();
-                                            break;
-                                        }
-                                    }
-                                }
-                            } else {
-                                end = self.next()?.range.end;
-                            }
-                        }
-                        Err(res_err) => {
-                            err = Some(res_err);
-                            end = name.range.end
-                        }
-                    }
+                    let (res, err) = self
+                        .parse_expression_list(
+                            is_sql,
+                            TokenType::Symbol(tokenizer::Symbol::LPAREN),
+                            TokenType::Symbol(tokenizer::Symbol::RPAREN),
+                        )?
+                        .split();
+                    let (arguments, range) = res.unwrap_or((Vec::new(), name.range.end.into()));
 
                     let func = FunctionCall {
                         range: Range {
                             start: name.range.start,
-                            end,
+                            end: range.end,
                         },
                         name,
                         arguments,
@@ -591,7 +605,7 @@ impl Parser {
                         Some(prev) => Some(LValue {
                             range: Range {
                                 start: prev.range.start,
-                                end,
+                                end: range.end,
                             },
                             lvalue_type: LValueType::Method(Box::new(prev), func),
                         }),
@@ -613,10 +627,7 @@ impl Parser {
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
-                            range: Range {
-                                start: prev.range.start,
-                                end: var.name.range.end,
-                            },
+                            range: Range::merge(&prev.range, &var.name.range),
                             lvalue_type: LValueType::Member(Box::new(prev), var),
                         }),
                         None => Some(LValue {
@@ -637,9 +648,32 @@ impl Parser {
             }
         }
 
-        match previous {
-            Some(prev) => Some(Ok(prev)),
-            None => Some(Err((ParseError::UnexpectedToken, None))),
-        }
+        Some(match previous {
+            Some(prev) => Ok(match colon {
+                Some(colon) => LValue {
+                    range: Range::merge(&colon.range, &prev.range),
+                    lvalue_type: LValueType::SQLAccess(colon, Box::new(prev)),
+                },
+                None => prev,
+            }),
+            None => {
+                let range = self.peek()?.range.start.into();
+                Err((
+                    ParseError::UnexpectedToken,
+                    Some(LValue {
+                        lvalue_type: LValueType::Variable(VariableAccess {
+                            name: Token {
+                                token_type: TokenType::INVALID,
+                                content: "".into(),
+                                range,
+                                error: None,
+                            },
+                            is_write: false,
+                        }),
+                        range,
+                    }),
+                ))
+            }
+        })
     }
 }

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Debug};
 
 use anyhow::anyhow;
 
@@ -98,12 +98,17 @@ impl GroupedName {
     pub fn new(group: Option<String>, name: String) -> Self {
         Self { group, name }
     }
+    pub fn simple(name: String) -> Self {
+        Self { group: None, name }
+    }
+}
 
-    pub fn combine(&self) -> String {
-        match &self.group {
-            Some(g) => g.clone() + "`" + &self.name,
-            None => self.name.clone(),
+impl fmt::Display for GroupedName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(g) = &self.group {
+            write!(f, "{}`", g)?;
         }
+        write!(f, "{}", self.name)
     }
 }
 
@@ -166,6 +171,20 @@ impl DataTypeType {
             | Self::Void => None,
         }
     }
+
+    pub fn grouped_name(&self) -> GroupedName {
+        match self {
+            Self::Complex(grouped_name) => grouped_name.clone(),
+            _ => GroupedName::simple(self.to_string()),
+        }
+    }
+
+    pub fn wrap_variable(&self, variable: &String) -> String {
+        match self {
+            Self::Array(data_type) => format!("{} {}[]", data_type, variable),
+            _ => format!("{} {}", self, variable),
+        }
+    }
 }
 
 impl fmt::Display for DataTypeType {
@@ -182,9 +201,9 @@ impl fmt::Display for DataTypeType {
 
             Self::Boolean => "boolean".into(),
             Self::Int => "int".into(),
-            Self::Uint => "unsigned int".into(),
+            Self::Uint => "unsignedint".into(),
             Self::Long => "long".into(),
-            Self::Ulong => "unsigned long".into(),
+            Self::Ulong => "unsignedlong".into(),
             Self::Longlong => "longlong".into(),
             Self::Longptr => "longptr".into(),
             Self::Real => "real".into(),
@@ -196,7 +215,7 @@ impl fmt::Display for DataTypeType {
                     "decimal".into()
                 }
             }
-            Self::Complex(grouped_name) => grouped_name.combine(),
+            Self::Complex(grouped_name) => grouped_name.to_string(),
             Self::Array(data_type) => data_type.to_string() + "[]",
 
             Self::Any => "any".into(),
@@ -239,16 +258,63 @@ pub struct Variable {
     pub range: Range,
 }
 
+impl fmt::Display for Variable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.constant {
+            write!(f, "constant ")?;
+        }
+        write!(
+            f,
+            "{}",
+            self.data_type
+                .data_type_type
+                .wrap_variable(&self.name.content)
+        )?;
+        if let Some(init) = &self.initial_value {
+            write!(f, " = {}", init.expression_type)?;
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstanceVariable {
     pub access: Access,
     pub variable: Variable,
 }
 
+impl fmt::Display for InstanceVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.access.read, &self.access.write) {
+            (Some(read), Some(write)) => {
+                if read == write {
+                    write!(f, "{} ", read)?;
+                } else if write.is_general() {
+                    write!(f, "{} {} ", write, read)?;
+                } else {
+                    write!(f, "{} {} ", read, write)?;
+                }
+            }
+            (Some(acc), None) | (None, Some(acc)) => {
+                write!(f, "{} ", acc)?;
+            }
+            (None, None) => {}
+        };
+        write!(f, "{}", self.variable)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScopedVariable {
     pub scope: tokenizer::ScopeModif,
     pub variable: Variable,
+}
+
+impl fmt::Display for ScopedVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.scope, self.variable)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +365,37 @@ pub struct Function {
     pub range: Range,
 }
 
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(scope) = &self.scope_modif {
+            write!(f, "{} ", scope)?;
+        };
+        if let Some(access) = &self.access {
+            write!(f, "{} ", access)?;
+        };
+        if let Some(ret) = &self.returns {
+            write!(f, "function {} ", ret.data_type_type)?;
+        } else {
+            write!(f, "subroutine ")?;
+        }
+
+        write!(
+            f,
+            "{} ({}",
+            self.name.content,
+            self.arguments
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+        if self.vararg.is_some() {
+            write!(f, ", ...")?;
+        }
+        write!(f, ")")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EventType {
     User(Option<DataType>, Vec<Argument>),
@@ -324,10 +421,46 @@ impl Event {
     }
 }
 
+impl fmt::Display for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "event ")?;
+
+        match &self.event_type {
+            EventType::User(returns, args) => {
+                if let Some(ret) = &returns {
+                    write!(f, "type {} ", ret.data_type_type)?;
+                }
+                write!(f, "{} ", self.name.content)?;
+                if !args.is_empty() {
+                    write!(
+                        f,
+                        "({})",
+                        args.iter()
+                            .map(|arg| arg.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )?;
+                } else {
+                    write!(f, "( )")?;
+                }
+                Ok(())
+            }
+            EventType::System(event) => write!(f, "{} {}", self.name.content, event),
+            EventType::Predefined => write!(f, "{}", self.name.content),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct On {
     pub class: Token,
     pub name: Token,
+}
+
+impl fmt::Display for On {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "on {}.{}", self.class.content, self.name.content)
+    }
 }
 
 // impl Function {
@@ -361,9 +494,9 @@ pub struct FunctionCall {
 #[derive(Debug, Clone)]
 pub struct Class {
     pub scope: Option<tokenizer::ScopeModif>,
-    pub name: Token,
-    pub base: (Option<Token>, Token),
-    pub within: Option<(Option<Token>, Token)>,
+    pub name: DataType,
+    pub base: DataType,
+    pub within: Option<DataType>,
 }
 
 #[derive(Debug)]
@@ -385,6 +518,49 @@ pub enum LValueType {
     Method(Box<LValue>, FunctionCall),
     Member(Box<LValue>, VariableAccess),
     Index(Box<LValue>, Box<Expression>),
+    SQLAccess(Token, Box<LValue>),
+}
+
+fn join_expressions(vec: &Vec<Expression>) -> String {
+    vec.iter()
+        .map(|expr| expr.expression_type.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl fmt::Display for LValueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LValueType::This => write!(f, "this"),
+            LValueType::Super => write!(f, "super"),
+            LValueType::Parent => write!(f, "parent"),
+            LValueType::Variable(variable_access) => write!(f, "{}", variable_access.name.content),
+            LValueType::Function(function_call) => write!(
+                f,
+                "{}({})",
+                function_call.name.content,
+                join_expressions(&function_call.arguments)
+            ),
+            LValueType::Method(lvalue, function_call) => {
+                write!(
+                    f,
+                    "{}.{}({})",
+                    lvalue.lvalue_type,
+                    function_call.name.content,
+                    join_expressions(&function_call.arguments)
+                )
+            }
+            LValueType::Member(lvalue, variable_access) => {
+                write!(f, "{}.{}", lvalue.lvalue_type, variable_access.name.content)
+            }
+            LValueType::Index(lvalue, expression) => {
+                write!(f, "{}[{}]", lvalue.lvalue_type, expression.expression_type)
+            }
+            LValueType::SQLAccess(_, lvalue) => {
+                write!(f, ":{}", lvalue.lvalue_type)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +568,7 @@ pub struct LValue {
     pub lvalue_type: LValueType,
     pub range: Range,
 }
+
 impl LValue {
     fn get_expression_at(&self, pos: &Position) -> Option<EitherOr<&Expression, &LValue>> {
         if !self.range.contains(pos) {
@@ -416,7 +593,6 @@ impl LValue {
         match &self.lvalue_type {
             LValueType::This | LValueType::Super | LValueType::Parent | LValueType::Variable(_) => {
             }
-
             LValueType::Function(call) => ret_if_one_contains!(&call.arguments),
             LValueType::Method(lvalue, call) => {
                 ret_if_contains!(lvalue);
@@ -429,18 +605,22 @@ impl LValue {
                 ret_if_contains!(lvalue);
                 ret_if_contains!(expression);
             }
+            LValueType::SQLAccess(_, lvalue) => ret_if_contains!(lvalue),
         }
 
         Some(EitherOr::Right(self))
     }
 
-    fn get_variable_at(&self, pos: &Position) -> Option<&VariableAccess> {
+    pub fn get_variable_at(&self, pos: &Position) -> Option<&VariableAccess> {
         match &self.lvalue_type {
+            // TODO make these be variable accesses?
             LValueType::This | LValueType::Super | LValueType::Parent => {}
+            // TODO why arent we recursing
             LValueType::Function(..)
             | LValueType::Method(..)
             | LValueType::Member(..)
-            | LValueType::Index(..) => {}
+            | LValueType::Index(..)
+            | LValueType::SQLAccess(..) => {}
 
             LValueType::Variable(access) => {
                 if self.range.contains(pos) {
@@ -451,6 +631,25 @@ impl LValue {
 
         None
     }
+
+    pub fn set_write(&mut self) -> Option<(String, Range)> {
+        match &mut self.lvalue_type {
+            LValueType::Variable(ref mut access) => {
+                access.is_write = true;
+                None
+            }
+            LValueType::Member(lvalue, ref mut access) => {
+                lvalue.set_write();
+                access.is_write = true;
+                None
+            }
+            LValueType::SQLAccess(_, lvalue) => lvalue.set_write(),
+            _ => Some((
+                "Can only assign to LValue of type Variable or Member".into(),
+                self.range,
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -459,13 +658,49 @@ pub enum ExpressionType {
     ArrayLiteral(Vec<Expression>),
     Operation(Box<Expression>, tokenizer::Operator, Box<Expression>),
     UnaryOperation(tokenizer::Operator, Box<Expression>),
-    IncrementDecrement(Box<Expression>, tokenizer::Symbol),
+    IncrementDecrement(Box<Expression>, tokenizer::IncrDecrOperator),
     BooleanNot(Box<Expression>),
     Parenthesized(Box<Expression>),
     Create(DataType),
     CreateUsing(Box<Expression>),
     LValue(LValue),
     Error,
+}
+
+impl fmt::Display for ExpressionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            Self::Literal(literal) => {
+                write!(f, "{}({})", literal.literal_type, literal.content)
+            }
+            Self::ArrayLiteral(expressions) => write!(f, "{{ {} }}", join_expressions(expressions)),
+            Self::Operation(left, operator, right) => write!(
+                f,
+                "{} {} {}",
+                left.expression_type, operator, right.expression_type
+            ),
+            Self::UnaryOperation(operator, expression) => {
+                write!(f, "{} {}", operator, expression.expression_type)
+            }
+            Self::IncrementDecrement(expression, operator) => write!(
+                f,
+                "{} {}",
+                expression.expression_type,
+                match operator {
+                    tokenizer::IncrDecrOperator::PLUSPLUS => "++",
+                    tokenizer::IncrDecrOperator::MINUSMINUS => "--",
+                }
+            ),
+            Self::BooleanNot(expression) => write!(f, "not {}", expression.expression_type),
+            Self::Parenthesized(expression) => write!(f, "({})", expression.expression_type),
+            Self::Create(data_type) => write!(f, "create {}", data_type.data_type_type),
+            Self::CreateUsing(expression) => {
+                write!(f, "create using {}", expression.expression_type)
+            }
+            Self::LValue(lvalue) => write!(f, "{}", lvalue.lvalue_type),
+            Self::Error => write!(f, "<error>"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -572,6 +807,13 @@ impl Expression {
     //         ExpressionType::IncrementDecrement(lvalue, _) => lvalue.get_type(),
     //     }
     // }
+
+    pub fn set_write(&mut self) -> Option<(String, Range)> {
+        match self.expression_type {
+            ExpressionType::LValue(ref mut lvalue) => lvalue.set_write(),
+            _ => Some(("Cannot assign to non-LValue".into(), self.range)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -645,8 +887,66 @@ pub struct CallStatement {
     pub function: FunctionCall,
 }
 
+pub type UsingTranscation = Option<Token>;
+
+#[derive(Debug)]
+pub struct SQLDeclareProcedureStatement {
+    pub procedure_name: Token,
+    pub stored_procedure_name: Token,
+    pub params: Vec<(Token, Expression)>,
+    pub transaction: Option<Token>,
+}
+
+#[derive(Debug)]
+pub struct SQLSelectStatement {
+    pub is_blob: bool,
+    pub fields: Vec<Expression>,
+    pub intos: Vec<LValue>,
+    pub table: Token,
+    pub clause: Option<Expression>,
+    pub transaction: UsingTranscation,
+}
+
+#[derive(Debug)]
+pub struct SQLInsertStatement {
+    pub table: Token,
+    pub fields: Vec<LValue>,
+    pub values: Vec<Vec<Expression>>,
+    pub transaction: UsingTranscation,
+}
+
+#[derive(Debug)]
+pub struct SQLUpdateStatement {
+    pub is_blob: bool,
+    pub table: Token,
+    pub set: Expression,
+    pub clause: EitherOr<(Expression, UsingTranscation), Token>,
+}
+
+#[derive(Debug)]
+pub enum SQLStatement {
+    OPEN(Token),
+    CLOSE(Token),
+    CONNECT(UsingTranscation),
+    DISCONNECT(UsingTranscation),
+
+    COMMIT(UsingTranscation),
+    DECLARE_CURSOR(Token, SQLSelectStatement),
+    DECLARE_PROCEDURE(SQLDeclareProcedureStatement),
+    EXECUTE(Token),
+    FETCH(Token, Vec<LValue>),
+    ROLLBACK(UsingTranscation),
+
+    DELETE(Token, Expression, UsingTranscation),
+    DELETE_OF_CURSOR(Token, Token),
+    INSERT(SQLInsertStatement),
+    SELECT(SQLSelectStatement),
+    UPDATE(SQLUpdateStatement),
+}
+
 #[derive(Debug)]
 pub enum StatementType {
+    SQL(SQLStatement),
     Expression(Expression),
     If(IfStatement),
     Throw(Expression),
@@ -661,7 +961,6 @@ pub enum StatementType {
     Call(CallStatement),
     Exit,
     Continue,
-    SQL,
     Error,
 }
 
@@ -702,7 +1001,7 @@ impl Statement {
             | StatementType::Call(..)
             | StatementType::Exit
             | StatementType::Continue
-            | StatementType::SQL
+            | StatementType::SQL(..)
             | StatementType::Error => {}
 
             StatementType::If(if_statement) => {
@@ -772,7 +1071,7 @@ impl Statement {
             StatementType::Call(..) | // TODO
             StatementType::Exit |
             StatementType::Continue |
-            StatementType::SQL |
+            StatementType::SQL(..) | // TODO
             StatementType::Error => {},
 
             StatementType::If(if_statement) => {
@@ -814,24 +1113,25 @@ impl Statement {
                     return Some(EitherOr::Left(var));
                 }
             }
-            StatementType::Expression(_expression) => {}
-            StatementType::Throw(_expression) => {}
-            StatementType::Destroy(_expression) => {}
-            StatementType::Assignment(_lvalue, _assignment, _expression) => {}
-            StatementType::If(_if_statement) => {}
-            StatementType::TryCatch(_try_catch) => {}
             StatementType::ForLoop(for_loop) => {
                 if for_loop.variable.name.range.contains(pos) {
                     return Some(EitherOr::Right(&for_loop.variable));
                 }
             }
+
+            StatementType::Expression(_expression) => {}
+            StatementType::Throw(_expression) => {}
+            StatementType::Destroy(_expression) => {}
+            StatementType::Assignment(_lvalue, _assignment, _expression) => {}
+            StatementType::If(_if_statement) => {}
+            StatementType::TryCatch(try_catch) => {}
             StatementType::WhileLoop(_while_loop) => {}
             StatementType::Choose(_choose_case) => {}
             StatementType::Return(_expression) => {}
             StatementType::Call(_call) => todo!(),
             StatementType::Exit => {}
             StatementType::Continue => {}
-            StatementType::SQL => {}
+            StatementType::SQL(..) => panic!("TODO"),
             StatementType::Error => {}
         };
         None
@@ -875,4 +1175,51 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub range: Range,
+}
+
+pub enum Node<'a> {
+    DataType(&'a DataType),
+    ScopedVariableDeclaration(&'a ScopedVariable),
+    VariableDeclaration(&'a InstanceVariable),
+    LocalVariableDeclaration(&'a Variable),
+    FunctionDeclaration(&'a Function),
+    EventDeclaration(&'a Event),
+    VariableAccess(&'a VariableAccess),
+    LValue(&'a LValue),
+    Expression(&'a Expression),
+    Statement(&'a Statement),
+}
+
+impl<'a> Node<'a> {
+    pub fn get_range(&self) -> &Range {
+        match self {
+            Node::DataType(data_type) => &data_type.range,
+            Node::ScopedVariableDeclaration(decl) => &decl.variable.range,
+            Node::VariableDeclaration(decl) => &decl.variable.range,
+            Node::VariableAccess(var) => &var.name.range,
+            Node::LocalVariableDeclaration(variable) => &variable.range,
+            Node::FunctionDeclaration(function) => &function.range,
+            Node::EventDeclaration(event) => &event.range,
+            Node::LValue(lvalue) => &lvalue.range,
+            Node::Expression(expression) => &expression.range,
+            Node::Statement(statement) => &statement.range,
+        }
+    }
+}
+
+impl<'a> fmt::Display for Node<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Node::DataType(data_type) => fmt::Display::fmt(&data_type.data_type_type, f),
+            Node::ScopedVariableDeclaration(decl) => fmt::Display::fmt(&decl.variable, f),
+            Node::VariableDeclaration(decl) => fmt::Display::fmt(&decl.variable, f),
+            Node::VariableAccess(var) => write!(f, "{}", var.name.content),
+            Node::LocalVariableDeclaration(variable) => write!(f, "{}", variable),
+            Node::FunctionDeclaration(function) => write!(f, "{}", function),
+            Node::EventDeclaration(event) => write!(f, "{}", event),
+            Node::LValue(lvalue) => fmt::Display::fmt(&lvalue.lvalue_type, f),
+            Node::Expression(expression) => fmt::Display::fmt(&expression.expression_type, f),
+            Node::Statement(statement) => write!(f, "<TODO statement>"),
+        }
+    }
 }

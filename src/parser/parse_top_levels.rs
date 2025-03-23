@@ -106,7 +106,7 @@ impl Parser {
     }
 
     pub fn parse_event_header(&mut self) -> EOFOrParserResult<Event> {
-        let start = quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?)
+        let start = quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::EVENT))?)
             .range
             .start;
 
@@ -175,7 +175,7 @@ impl Parser {
         };
 
         if err.is_none() {
-            err = self.expect(TokenType::NEWLINE)?.err();
+            err = self.expect_newline()?.err();
         }
 
         let event = Event {
@@ -288,7 +288,7 @@ impl Parser {
         }
 
         if err.is_none() {
-            err = self.expect(TokenType::NEWLINE)?.err();
+            err = self.expect_newline()?.err();
         }
 
         Some(ParseResult::new(
@@ -306,7 +306,6 @@ impl Parser {
         ))
     }
 
-
     pub fn parse_event(&mut self) -> EOFOr<Option<TopLevel>> {
         let event = quick_exit_opt!(self.parse_event_header()?);
 
@@ -320,7 +319,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE)?.ok();
+                        self.expect_newline()?.ok();
                         break;
                     }
                     _ => {
@@ -381,7 +380,7 @@ impl Parser {
                             );
                         }
 
-                        self.expect(TokenType::NEWLINE)?.ok();
+                        self.expect_newline()?.ok();
                         break;
                     }
                     _ => {
@@ -427,7 +426,7 @@ impl Parser {
         let name = match self.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CREATE | tokenizer::Keyword::DESTROY) => {
                 let name = self.next()?;
-                self.expect(TokenType::NEWLINE);
+                self.expect_newline()?.ok();
                 name
             }
             _ => {
@@ -450,7 +449,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE)?.ok();
+                        self.expect_newline()?.ok();
                         break;
                     }
                     _ => {
@@ -488,26 +487,23 @@ impl Parser {
         };
 
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
-        let name = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
+        let id = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
+        let name = DataType {
+            data_type_type: DataTypeType::Complex(GroupedName::new(None, id.content)),
+            range: id.range,
+        };
         let mut base_pos = name.range.end;
 
         let (base, mut err) = match self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))? {
             Ok(from) => {
                 base_pos = from.range.end;
-                self.parse_class_id()?.split()
+                self.parse_type()?.split()
             }
             Err(err) => (None, Some(err)),
         };
-        let base = base.unwrap_or_else(|| {
-            (
-                None,
-                Token {
-                    token_type: TokenType::ID,
-                    content: "powerobject".into(),
-                    range: Range::new_point(base_pos),
-                    error: None,
-                },
-            )
+        let base = base.unwrap_or_else(|| DataType {
+            data_type_type: DataTypeType::Complex(GroupedName::new(None, "powerobject".into())),
+            range: base_pos.into(),
         });
 
         let within = if err.is_none()
@@ -516,14 +512,14 @@ impl Parser {
                 .is_some()
         {
             let within;
-            (within, err) = self.parse_class_id()?.split();
+            (within, err) = self.parse_type()?.split();
             within
         } else {
             None
         };
 
         if err.is_none() {
-            self.expect(TokenType::NEWLINE)?.ok();
+            self.expect_newline()?.ok();
         }
 
         let end;
@@ -537,7 +533,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE);
+                        self.expect_newline()?.ok();
                         break;
                     }
                     _ => {
@@ -638,7 +634,7 @@ impl Parser {
             }
         };
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
-        self.expect(TokenType::NEWLINE)?.ok();
+        self.expect_newline()?.ok();
 
         let end;
         let mut declarations = Vec::new();
@@ -650,7 +646,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE);
+                        let _ = self.expect_newline();
                         break;
                     }
                     _ => {
@@ -690,7 +686,7 @@ impl Parser {
         let start = self.peek()?.range.start;
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
-        self.expect(TokenType::NEWLINE)?.ok();
+        self.expect_newline()?.ok();
 
         let end;
         let mut declarations = Vec::new();
@@ -703,7 +699,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE);
+                        let _ = self.expect_newline();
                         break;
                     }
                     _ => {
@@ -732,7 +728,7 @@ impl Parser {
                     }
 
                     self.next()?;
-                    self.expect(TokenType::NEWLINE)?.ok();
+                    self.expect_newline()?.ok();
                 }
                 _ => {
                     if let Some(statement) = self.parse_variable_declaration()?.value() {
@@ -764,7 +760,7 @@ impl Parser {
                 .range
                 .start;
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
-        self.expect(TokenType::NEWLINE)?.ok();
+        self.expect_newline()?.ok();
 
         let mut functions = Vec::new();
         let end;
@@ -776,7 +772,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE);
+                        let _ = self.expect_newline();
                         break;
                     }
                     _ => {
@@ -809,7 +805,7 @@ impl Parser {
                 .range
                 .start;
         quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
-        self.expect(TokenType::NEWLINE)?.ok();
+        self.expect_newline()?.ok();
 
         let mut functions = Vec::new();
         let end;
@@ -821,7 +817,7 @@ impl Parser {
                         let close = self.next()?;
                         end = close.range.end;
 
-                        self.expect(TokenType::NEWLINE);
+                        let _ = self.expect_newline();
                         break;
                     }
                     _ => {
@@ -853,7 +849,7 @@ impl Parser {
             quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::FORWARD))?)
                 .range
                 .start;
-        self.expect(TokenType::NEWLINE)?.ok();
+        self.expect_newline()?.ok();
 
         let mut types = Vec::new();
         let end;
@@ -863,7 +859,7 @@ impl Parser {
                     TokenType::Keyword(tokenizer::Keyword::FORWARD) => {
                         self.next()?;
                         end = self.next()?.range.end;
-                        self.expect(TokenType::NEWLINE)?.ok();
+                        let _ = self.expect_newline()?;
                         break;
                     }
                     _ => {
@@ -898,7 +894,9 @@ impl Parser {
                 TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
                     self.parse_functions_forward_decl()
                 }
-                TokenType::NEWLINE => self.parse_forward_decl(),
+                TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
+                    self.parse_forward_decl()
+                }
                 _ => {
                     let range = self.peek()?.range;
                     Some(
@@ -935,7 +933,7 @@ impl Parser {
                 _ => self.parse_scoped_variable_decl(),
             },
             TokenType::ID => self.parse_scoped_variable_decl(),
-            TokenType::NEWLINE => {
+            TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
                 self.next();
                 Some(None)
             }

@@ -319,7 +319,7 @@ impl<'a> Linter<'a> {
             let file = _file_lock.read().await;
 
             for (name, class) in &file.classes {
-                if class.lock().await.base.combine().to_lowercase() == "function_object" {
+                if class.lock().await.base.to_string().to_lowercase() == "function_object" {
                     if let Some(func) = self
                         .find_callable_function_in_class(
                             &class,
@@ -492,7 +492,7 @@ impl<'a> Linter<'a> {
                             stream::iter(file.read().await.classes.clone())
                                 .filter_map(move |(name, class_mut)| async move {
                                     let class = class_mut.lock().await;
-                                    if class.base.combine().to_lowercase() == "function_object" {
+                                    if class.base.to_string().to_lowercase() == "function_object" {
                                         if let Some(funcs) = class.functions.get(&name) {
                                             return Some(
                                                 stream::iter(funcs.clone())
@@ -533,6 +533,13 @@ impl<'a> Linter<'a> {
         self.get_functions_helper(false)
             .await
             .map(|(name, var, err)| (name, var, err.unwrap()))
+    }
+
+    pub async fn find_class_dt(&self, data_type: &parser::DataType) -> Option<Complex> {
+        match &data_type.data_type_type {
+            parser::DataTypeType::Complex(grouped_name) => self.find_class(grouped_name).await,
+            _ => None,
+        }
     }
 
     pub async fn find_class(&self, grouped_name: &GroupedName) -> Option<Complex> {

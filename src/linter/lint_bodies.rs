@@ -97,7 +97,6 @@ impl<'a> Linter<'a> {
                         }
                     }
                 }
-
                 parser::LValueType::Variable(variable) => self.lint_variable_access(variable).await,
                 parser::LValueType::Function(call) => {
                     // let types = Vec::new();
@@ -308,6 +307,16 @@ impl<'a> Linter<'a> {
                         }
                     }
                 }
+                parser::LValueType::SQLAccess(_, access) => match self.lint_lvalue(access).await {
+                    parser::DataTypeType::Complex(..) | parser::DataTypeType::Array(..) => {
+                        self.diagnostic_error(
+                            "SQL statements read or write to Complex data types".into(),
+                            lvalue.range,
+                        );
+                        parser::DataTypeType::Unknown
+                    }
+                    access_type => access_type,
+                },
             }
         }
         .boxed()
@@ -423,20 +432,14 @@ impl<'a> Linter<'a> {
                 parser::ExpressionType::UnaryOperation(_operator, expression) => {
                     let data_type = self.lint_expression(expression).await;
 
-                    if !data_type.is_numeric() {
+                    if data_type.is_numeric() {
+                        data_type
+                    } else {
                         self.diagnostic_error(
                             "Invalid type, expected number".into(),
                             expression.range,
                         );
 
-                        if data_type.numeric_precedence()
-                            >= parser::DataTypeType::Long.numeric_precedence()
-                        {
-                            parser::DataTypeType::Long
-                        } else {
-                            parser::DataTypeType::Int
-                        }
-                    } else {
                         parser::DataTypeType::Unknown
                     }
                 }
@@ -508,6 +511,33 @@ impl<'a> Linter<'a> {
                     expression_type
                 }
                 parser::ExpressionType::Error => parser::DataTypeType::Unknown,
+            }
+        }
+        .boxed()
+    }
+
+    fn lint_sql_statement<'b>(
+        &'b mut self,
+        statement: &'b parser::SQLStatement,
+    ) -> BoxFuture<'b, ()> {
+        async move {
+            // TODO
+            match statement {
+                parser::SQLStatement::OPEN(token) => {}
+                parser::SQLStatement::CLOSE(token) => {}
+                parser::SQLStatement::CONNECT(token) => {}
+                parser::SQLStatement::DISCONNECT(token) => {}
+                parser::SQLStatement::COMMIT(token) => {}
+                parser::SQLStatement::DECLARE_CURSOR(token, sqlselect_statement) => {}
+                parser::SQLStatement::DECLARE_PROCEDURE(sqldeclare_procedure_statement) => {}
+                parser::SQLStatement::EXECUTE(token) => {}
+                parser::SQLStatement::FETCH(token, lvalues) => {}
+                parser::SQLStatement::ROLLBACK(token) => {}
+                parser::SQLStatement::DELETE(token, expression, token1) => {}
+                parser::SQLStatement::DELETE_OF_CURSOR(token, token1) => {}
+                parser::SQLStatement::INSERT(sqlinsert_statement) => {}
+                parser::SQLStatement::SELECT(sqlselect_statement) => {}
+                parser::SQLStatement::UPDATE(sqlupdate_statement) => {}
             }
         }
         .boxed()
@@ -831,7 +861,7 @@ impl<'a> Linter<'a> {
                 }
                 parser::StatementType::Exit => {} // TODO stack?
                 parser::StatementType::Continue => {}
-                parser::StatementType::SQL => {}
+                parser::StatementType::SQL(sql) => self.lint_sql_statement(sql).await,
                 parser::StatementType::Error => {}
             }
         }

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use strum::Display;
 use strum_macros::EnumString;
 
@@ -12,12 +14,14 @@ pub enum Literal {
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq, Display)]
+// #[strum(serialize_all = "lowercase")]
 pub enum ScopeModif {
     GLOBAL,
     SHARED,
 }
 
-#[derive(Clone, Copy, EnumString, Debug, PartialEq)]
+#[derive(Clone, Copy, EnumString, Debug, PartialEq, Display)]
+// #[strum(serialize_all = "lowercase")]
 pub enum AccessType {
     PUBLIC,
     PRIVATE,
@@ -148,11 +152,10 @@ pub enum Keyword {
     END,
 
     // SQL
-    // Mixed SQL
-    XOR,
-    // TODO specific SQL Tokenizing?
+    //  Non-reserved keywords
     CLOSE,
     OPEN,
+    UPDATE,
 
     COMMIT,
     CONNECT,
@@ -167,7 +170,6 @@ pub enum Keyword {
     ROLLBACK,
     SELECT,
     SELECTBLOB,
-    UPDATE,
     UPDATEBLOB,
     SET,
     CURRENT,
@@ -187,6 +189,7 @@ pub enum Keyword {
     PROCEDURE,
     OF,
 
+
     CREATE,
     DESTROY,
 
@@ -201,6 +204,7 @@ pub enum Keyword {
     ENUMERATED,
     EXTERNAL,
     NATIVE,
+    XOR,
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
@@ -247,6 +251,34 @@ impl Operator {
     }
 }
 
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::PLUS => "+",
+            Self::MINUS => "-",
+            Self::MULT => "*",
+            Self::DIV => "/",
+            Self::CARAT => "^",
+
+            Self::EQ => "=",
+            Self::GT => ">",
+            Self::GTE => ">=",
+            Self::LT => "<",
+            Self::LTE => "<=",
+            Self::GTLT => "<>",
+
+            Self::OR => "or",
+            Self::AND => "and",
+        })
+    }
+}
+
+#[derive(Clone, Copy, EnumString, Debug, PartialEq)]
+pub enum IncrDecrOperator {
+    PLUSPLUS,
+    MINUSMINUS,
+}
+
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]
 pub enum SpecialAssignment {
     PLUSEQ,
@@ -260,6 +292,7 @@ pub enum Symbol {
     AT,
     COLON,
     COLONCOLON,
+    SEMICOLON,
 
     LCURLY,
     RCURLY,
@@ -273,7 +306,4 @@ pub enum Symbol {
     // SEMI,
     DOTDOTDOT,
     DOT,
-
-    PLUSPLUS,
-    MINUSMINUS,
 }

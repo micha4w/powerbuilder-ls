@@ -1,9 +1,12 @@
+use std::cmp::min;
+
+#[derive(Debug)]
 pub enum EitherOr<Left, Right> {
     Left(Left),
     Right(Right),
 }
 
-#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Debug)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
@@ -51,6 +54,13 @@ impl Range {
         Self { start, end }
     }
 
+    pub(crate) fn merge(a: &Range, b: &Range) -> Self {
+        Self {
+            start: a.start.min(b.start),
+            end: a.end.max(b.end),
+        }
+    }
+
     pub(crate) fn new_point(base_pos: Position) -> Self {
         Self {
             start: base_pos,
@@ -66,6 +76,12 @@ impl Range {
 impl std::fmt::Display for Range {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({} - {})", self.start, self.end)
+    }
+}
+
+impl From<Position> for Range {
+    fn from(value: Position) -> Self {
+        Self::new_point(value)
     }
 }
 

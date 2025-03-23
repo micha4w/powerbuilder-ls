@@ -310,15 +310,9 @@ impl LanguageServer for PowerBuilderLS {
         let Some(file_lock) = proj.files.get(&path) else {
             return Ok(None);
         };
+        let pos = params.text_document_position_params.position.into();
         let file = file_lock.read().await;
-        let top_levels = match &file.top_levels {
-            linter::ProgressedTopLevels::Complete(top_levels) => top_levels,
-            _ => return Ok(None),
-        };
-
-        let pos = &params.text_document_position_params.position.into();
-        let Some((_, top_level_type)) = top_levels.iter().find(|(range, _)| range.contains(pos))
-        else {
+        let Some((top_level_type, Some(node))) = proj.get_node_at(&file, &pos) else {
             return Ok(None);
         };
 
@@ -333,84 +327,88 @@ impl LanguageServer for PowerBuilderLS {
             file: MaybeMut::No(&file),
         };
 
-        match top_level_type.get_expression_at(pos) {
-            Some(EitherOr::Left(expression)) => match &expression.expression_type {
-                parser::ExpressionType::Literal(literal) => {
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(format!(
-                            "{} (literal): {}",
-                            literal.content, literal.literal_type
-                        ))),
-                        range: Some(literal.range.into()),
-                    }));
+        let mut title = None;
+        // let mut description = None;
+        let range = node.get_range();
+        match node {
+            parser::Node::VariableDeclaration(var) => {
+                let mut name = var.to_string();
+                let class = match top_level_type {
+                    linter::TopLevelType::ForwardDecl(_)
+                    | linter::TopLevelType::FunctionsForwardDecl(_)
+                    | linter::TopLevelType::ScopedVariableDecl(_)
+                    | linter::TopLevelType::ScopedVariablesDecl(_)
+                    | linter::TopLevelType::ExternalFunctions(_) => None,
+
+                    linter::TopLevelType::DatatypeDecl((_, class)) => Some(class),
+                    linter::TopLevelType::TypeVariablesDecl((_, (class, _)))
+                    | linter::TopLevelType::FunctionBody((_, (class, _)))
+                    | linter::TopLevelType::EventBody((_, (class, _)))
+                    | linter::TopLevelType::OnBody((_, (class,))) => class.as_ref(),
+                };
+                if let Some(class) = class {
+                    name = format!("type {}\n{}", class.lock().await.name, name);
                 }
-                parser::ExpressionType::ArrayLiteral(vec) => {}
-                parser::ExpressionType::Operation(expression, operator, expression1) => {}
-                parser::ExpressionType::UnaryOperation(operator, expression) => {}
-                parser::ExpressionType::IncrementDecrement(expression, symbol) => {}
-                parser::ExpressionType::BooleanNot(expression) => {}
-                parser::ExpressionType::Parenthesized(expression) => {}
-                parser::ExpressionType::Create(data_type) => {}
-                parser::ExpressionType::CreateUsing(expression) => {}
-                parser::ExpressionType::LValue(lvalue) => unreachable!(),
-                parser::ExpressionType::Error => {}
-            },
-            Some(EitherOr::Right(lvalue)) => match &lvalue.lvalue_type {
+                title = Some(name);
+            }
+            parser::Node::ScopedVariableDeclaration(var) => title = Some(var.to_string()),
+            parser::Node::VariableAccess(access) => {
+                let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
+                    linter
+                        .get_variables(&access.name.range.end, access.is_write)
+                        .await,
+                );
+
+                while let Some((name, var)) = vars.next().await {
+                    if name == (&access.name.content).into() {
+                        let lock = var.lock().await;
+                        if let linter::VariableType::Instance((class_wk, _)) = &lock.variable_type {
+                            if let Some(class) = class_wk.upgrade() {
+                                title = Some(format!(
+                                    "type {}\n{}",
+                                    class.lock().await.name,
+                                    lock.parsed(),
+                                ));
+                                break;
+                            }
+                        }
+
+                        title = Some(lock.parsed().to_string());
+                        break;
+                    }
+                }
+            }
+            parser::Node::LocalVariableDeclaration(var) => title = Some(var.to_string()),
+            parser::Node::FunctionDeclaration(func) => title = Some(func.to_string()),
+            parser::Node::EventDeclaration(event) => title = Some(event.to_string()),
+            parser::Node::LValue(lvalue) => match &lvalue.lvalue_type {
                 parser::LValueType::This => {
                     let mut contents = "this (Reserved Keyword)".to_owned();
                     if let Some(class) = top_level_type.get_class() {
                         contents += ": ";
                         contents += &class.lock().await.name;
                     }
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(contents)),
-                        range: Some(lvalue.range.into()),
-                    }));
+                    title = Some(contents);
                 }
                 parser::LValueType::Super => {
                     let mut contents = "super (Reserved Keyword)".to_owned();
-                    if let Some(class) = top_level_type.get_class() {
+                    if let Some(class) = linter.class {
                         contents += ": ";
-                        contents += &class.lock().await.base.combine();
+                        contents += &class.lock().await.base.to_string();
                     }
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(contents)),
-                        range: Some(lvalue.range.into()),
-                    }));
+                    title = Some(contents);
                 }
                 parser::LValueType::Parent => {
                     let mut contents = "parent (Reserved Keyword)".to_owned();
-                    if let Some(class) = top_level_type.get_class() {
+                    if let Some(class) = linter.class {
                         if let Some(within) = &class.lock().await.within {
                             contents += ": ";
-                            contents += &within.combine();
+                            contents += &within.to_string();
                         }
                     }
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(contents)),
-                        range: Some(lvalue.range.into()),
-                    }));
+                    title = Some(contents);
                 }
-                parser::LValueType::Variable(access) => {
-                    let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
-                        linter
-                            .get_variables(&lvalue.range.end, access.is_write)
-                            .await,
-                    );
-
-                    while let Some((name, var)) = vars.next().await {
-                        if name == (&access.name.content).into() {
-                            let contents = name.to_string()
-                                + " (variable):"
-                                + &var.lock().await.data_type.to_string();
-
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Scalar(MarkedString::String(contents)),
-                                range: Some(lvalue.range.into()),
-                            }));
-                        }
-                    }
-                }
+                parser::LValueType::Variable(_) => unreachable!(),
                 parser::LValueType::Member(lvalue, access) => {
                     let data_type = linter.lint_lvalue(&*lvalue).await;
                     match data_type {
@@ -430,16 +428,12 @@ impl LanguageServer for PowerBuilderLS {
 
                                 while let Some((name, var)) = vars.next().await {
                                     if name == (&access.name.content).into() {
-                                        let contents = name.to_string()
-                                            + " (variable):"
-                                            + &var.lock().await.data_type.to_string();
-
-                                        return Ok(Some(Hover {
-                                            contents: HoverContents::Scalar(MarkedString::String(
-                                                contents,
-                                            )),
-                                            range: Some(access.name.range.into()),
-                                        }));
+                                        title = Some(format!(
+                                            "type {}\n{}",
+                                            grouped_name,
+                                            var.lock().await.unwrap_instance().1
+                                        ));
+                                        break;
                                     }
                                 }
                             }
@@ -462,12 +456,8 @@ impl LanguageServer for PowerBuilderLS {
                                 )
                                 .await
                         {
-                            let contents = lock.to_string();
-
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Scalar(MarkedString::String(contents)),
-                                range: Some(call.name.range.into()),
-                            }));
+                            title = Some(lock.to_string());
+                            break;
                         }
                     }
                 }
@@ -502,53 +492,61 @@ impl LanguageServer for PowerBuilderLS {
                                 )
                                 .await
                         {
-                            let contents = lock.to_string();
-
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Scalar(MarkedString::String(contents)),
-                                range: Some(call.name.range.into()),
-                            }));
+                            title = Some(format!("type {}\n{}", grouped_name, lock));
+                            break;
                         }
                     }
                 }
-                parser::LValueType::Index(lvalue, expression) => return Ok(None),
+                index @ parser::LValueType::Index(..) => title = Some(index.to_string()),
+                parser::LValueType::SQLAccess(_, access) => {
+                    title = Some(format!(":{}", access.lvalue_type.to_string()))
+                }
             },
-            None => {}
+            parser::Node::Expression(expr) => title = Some(expr.expression_type.to_string()),
+            parser::Node::Statement(_) => {}
+            parser::Node::DataType(dt) => {
+                let dt_name = dt.data_type_type.to_string();
+                title = Some(match &dt.data_type_type {
+                    parser::DataTypeType::Complex(grouped_name) => {
+                        match linter.find_class(&grouped_name).await {
+                            Some(linter::Complex::Class(class_mut)) => {
+                                class_mut.lock().await.to_string()
+                            }
+                            Some(linter::Complex::Enum(en)) => {
+                                format!("enum {}", dt_name)
+                            }
+                            None => format!("type {} from class_not_found", dt_name),
+                        }
+                    }
+                    _ => dt_name,
+                })
+            }
         }
 
-        if let Some(statement) = top_level_type.get_statement_at(pos) {
-            match statement.get_variable_at(pos) {
-                Some(EitherOr::Left(var)) => {
-                    if let Some(var_mut) = linter.variables.get(&(&var.variable.name.content).into())
-                    {
-                        let contents = var.variable.name.content.clone()
-                            + " (variable):"
-                            + &var_mut.lock().await.data_type.to_string();
-
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Scalar(MarkedString::String(contents)),
-                            range: Some(var.variable.name.range.into()),
-                        }));
-                    }
+        if title.is_none() {
+            let mut handle_var = |var: &parser::ScopedVariable| {
+                if var.variable.name.range.contains(&pos) {
+                    title = Some(var.to_string());
                 }
-                Some(EitherOr::Right(var)) => {
-                    if let Some(var_mut) = linter.variables.get(&(&var.name.content).into()) {
-                        let contents = var.name.content.clone()
-                            + " (variable):"
-                            + &var_mut.lock().await.data_type.to_string();
-
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Scalar(MarkedString::String(contents)),
-                            range: Some(var.name.range.into()),
-                        }));
-                    }
-                }
-                None => {}
             };
-        };
+            match top_level_type {
+                linter::TopLevelType::ScopedVariableDecl((var, _)) => handle_var(var),
+                linter::TopLevelType::ScopedVariablesDecl((vars, _)) => {
+                    vars.iter().for_each(handle_var)
+                }
+                _ => {}
+            }
+        }
 
-        Ok(None)
-        // Ok(Some(CompletionResponse::Array(items)))
+        let Some(title) = title else { return Ok(None) };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```powerbuilder\n{}\n```", title),
+            }),
+            range: Some((*range).into()),
+        }))
     }
 
     async fn completion(
@@ -789,12 +787,12 @@ async fn main() -> anyhow::Result<()> {
     let creator =
         PowerBuilderLSCreator::new("/home/micha4w/Code/Rust/powerbuilder-ls/system".into()).await?;
 
-    // ls::add_file(
-    //     creator.proj.clone(),
-    //     &"/home/micha4w/Code/Rust/powerbuilder-ls/res/pfc_w_find.srw".into(),
-    //     ls_types::LintProgress::Complete,
-    // )
-    // .await?;
+    // creator
+    //     .proj
+    //     .write()
+    //     .await
+    //     .add_file(&"res/test.sru".into(), linter::LintProgress::Complete)
+    //     .await?;
 
     // for (x,y) in &creator.proj.read().await.files {
     //     for diagnostic in &y.read().await.diagnostics {

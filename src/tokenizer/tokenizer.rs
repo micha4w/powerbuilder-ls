@@ -17,6 +17,7 @@ pub enum TokenType {
     Literal(Literal),
     Symbol(Symbol),
     Operator(Operator),
+    IncrDecrOperator(IncrDecrOperator),
     SpecialAssignment(SpecialAssignment),
 
     ID,
@@ -151,7 +152,8 @@ impl FileTokenizer {
         let start_pos = self.pos;
         let mut error = None;
         let token_type = match self.next()? {
-            '\n' | ';' => TokenType::NEWLINE,
+            '\n' => TokenType::NEWLINE,
+            ';' => TokenType::Symbol(Symbol::SEMICOLON),
             c if c.is_alphabetic() || c == '_' => loop {
                 match self.chars.peek() {
                     Some('_' | '$' | '#' | '%' | '-') => {
@@ -371,7 +373,7 @@ impl FileTokenizer {
                 }
                 Some('+') => {
                     self.next();
-                    TokenType::Symbol(Symbol::PLUSPLUS)
+                    TokenType::IncrDecrOperator(IncrDecrOperator::PLUSPLUS)
                 }
                 _ => TokenType::Operator(Operator::PLUS),
             },
@@ -382,7 +384,7 @@ impl FileTokenizer {
                 }
                 Some('-') => {
                     self.next();
-                    TokenType::Symbol(Symbol::MINUSMINUS)
+                    TokenType::IncrDecrOperator(IncrDecrOperator::MINUSMINUS)
                 }
                 _ => TokenType::Operator(Operator::MINUS),
             },
@@ -453,6 +455,15 @@ impl Iterator for FileTokenizer {
             // println!("got: {token:?}");
             // println!("had: {:?}", self.previous.token_type);
 
+            // Because some SQL Statements can also be used as function names
+            // e.g. The SQL OPEN Cursor;  keyword can appear in the open(aw_window) function
+            // But if an '(' appears after the keyword, we know its a function, otherwise its a the keyword.
+            macro_rules! non_reserved_sql_keyword {
+                () => {
+                    TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE | Keyword::UPDATE)
+                };
+            }
+
             match (self.previous.token_type, token.token_type) {
                 (_, TokenType::COMMENT) => continue,
                 (TokenType::NEWLINE, TokenType::NEWLINE) => continue,
@@ -465,18 +476,15 @@ impl Iterator for FileTokenizer {
                     token.token_type = TokenType::ID;
                 }
 
-                // Because there is SQL OPEN and PB open(aw_window)
-                // This way only \n OPEN (?!\() will be identified as OPEN
-                // Same for CLOSE obviously
-                (TokenType::NEWLINE, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
+                (TokenType::NEWLINE, non_reserved_sql_keyword!()) => {
                     self.previous = token;
                     // println!("condition newline");
                     continue;
                 }
-                (_, TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE)) => {
+                (_, non_reserved_sql_keyword!()) => {
                     token.token_type = TokenType::ID;
                 }
-                (TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE), cur) => {
+                (non_reserved_sql_keyword!(), cur) => {
                     self.next = Some(token);
                     // println!("double open/close");
 

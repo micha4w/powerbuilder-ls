@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use super::Linter;
 use crate::{
-    parser::{self, Expression, GroupedName, Statement},
+    parser::{self, GroupedName},
     tokenizer::{self},
     types::*,
 };
@@ -385,6 +385,20 @@ impl Class {
     }
 }
 
+impl fmt::Display for Class {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_global {
+            write!(f, "global ")?;
+        }
+        write!(f, "type {} from {}", &self.name, &self.base)?;
+        if let Some(within) = &self.within {
+            write!(f, " within {}", within)?;
+        };
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Complex {
     Class(Arc<Mutex<Class>>),
@@ -557,7 +571,7 @@ impl TopLevelType<LintProgressComplete> {
         }
     }
 
-    pub fn get_statement_at(&self, pos: &Position) -> Option<&Statement> {
+    pub fn get_statement_at(&self, pos: &Position) -> Option<&parser::Statement> {
         match self {
             TopLevelType::ForwardDecl(_)
             | TopLevelType::ScopedVariableDecl(_)
@@ -578,7 +592,7 @@ impl TopLevelType<LintProgressComplete> {
     pub fn get_expression_at(
         &self,
         pos: &Position,
-    ) -> Option<EitherOr<&Expression, &parser::LValue>> {
+    ) -> Option<EitherOr<&parser::Expression, &parser::LValue>> {
         macro_rules! ret_if_contains {
             ( $val:expr ) => {
                 if let Some(val) = $val.get_expression_at(pos) {
@@ -659,5 +673,26 @@ impl ProgressedTopLevels {
             ProgressedTopLevels::Shallow(_) => LintProgress::Shallow,
             ProgressedTopLevels::Complete(_) => LintProgress::Complete,
         }
+    }
+}
+
+pub trait Hoverable {
+    fn get_title(&self) -> String;
+    fn get_description(&self) -> String;
+    fn get_range(&self) -> Range;
+    // fn get_links() -> String;
+}
+
+impl<'a> Hoverable for parser::Node<'a> {
+    fn get_title(&self) -> String {
+        self.to_string()
+    }
+
+    fn get_description(&self) -> String {
+        "".into()
+    }
+
+    fn get_range(&self) -> Range {
+        *self.get_range()
     }
 }

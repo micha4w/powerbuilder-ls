@@ -694,6 +694,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protobuf-src",
+ "scopeguard",
  "serde",
  "serde_json",
  "strum",

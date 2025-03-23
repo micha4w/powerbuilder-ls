@@ -17,27 +17,43 @@ use crate::{
 impl<'a> Linter<'a> {
     async fn lint_datatype_decl(&mut self, decl: &parser::DatatypeDecl) -> Arc<Mutex<Class>> {
         let within = match &decl.class.within {
-            Some((group, name)) => {
-                let within_name = (group, name).into();
-                if self.find_class(&within_name).await.is_none() {
-                    self.diagnostic_error("Within Class not found".into(), decl.range);
+            Some(within) => {
+                match &within.data_type_type {
+                    parser::DataTypeType::Complex(within_name) => {
+                        if self.find_class(&within_name).await.is_none() {
+                            self.diagnostic_error("Parent Class not found".into(), within.range);
+                        }
+                    }
+                    _ => {
+                        self.diagnostic_error(
+                            "Parent Class has to be a Complex Type".into(),
+                            within.range,
+                        );
+                    }
                 }
 
-                Some(within_name)
+                Some(within.data_type_type.grouped_name())
             }
             None => None,
         };
 
-        let (group, name) = decl.class.base.clone();
-        let base_name = (&group, &name).into();
-        let base = self.find_class(&base_name).await;
-
-        if base.is_none() {
-            self.diagnostic_error("Base Class not found".into(), decl.range);
+        match &decl.class.base.data_type_type {
+            parser::DataTypeType::Complex(base_name) => {
+                if self.find_class(&base_name).await.is_none() {
+                    self.diagnostic_error("Base Class not found".into(), decl.class.base.range);
+                }
+            }
+            _ => {
+                self.diagnostic_error(
+                    "Base Class has to be a Complex Type".into(),
+                    decl.class.base.range,
+                );
+            }
         }
+
         let new_class_mut = Arc::new(Mutex::new(Class::new(
-            decl.class.name.content.clone(),
-            base_name,
+            decl.class.name.data_type_type.to_string(),
+            decl.class.base.data_type_type.grouped_name(),
             within,
             matches!(decl.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
         )));
@@ -93,15 +109,19 @@ impl<'a> Linter<'a> {
 
                     for datatype in &types {
                         let mut new_class = Class::new(
-                            datatype.class.name.content.clone(),
-                            (&datatype.class.base).into(),
-                            datatype.class.within.as_ref().map(Into::into),
+                            datatype.class.name.data_type_type.to_string(),
+                            datatype.class.base.data_type_type.grouped_name(),
+                            datatype
+                                .class
+                                .within
+                                .as_ref()
+                                .map(|within| within.data_type_type.grouped_name()),
                             matches!(datatype.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
                         );
                         new_class.usage.declaration = Some(datatype.range);
 
                         classes.insert(
-                            (&datatype.class.name.content).into(),
+                            (&datatype.class.name.data_type_type.to_string()).into(),
                             Mutex::new(new_class).into(),
                         );
                     }
@@ -220,7 +240,7 @@ impl<'a> Linter<'a> {
                     .file
                     .unwrap_mut()
                     .classes
-                    .get(&(&datatype.class.name.content).into())
+                    .get(&(&datatype.class.name.data_type_type.to_string()).into())
                     .cloned()
                 {
                     Some(class_arc) => {
@@ -296,6 +316,15 @@ impl<'a> Linter<'a> {
                     let mut new_vars = HashMap::new();
                     for var in &vars {
                         let data_type = var.variable.data_type.data_type_type.clone();
+
+                        if let parser::DataTypeType::Complex(name) = &data_type {
+                            if self.find_class(&name).await.is_none() {
+                                self.diagnostic_error(
+                                    "Class not found".into(),
+                                    var.variable.data_type.range,
+                                );
+                            }
+                        }
 
                         new_vars.insert(
                             (&var.variable.name.content).into(),
