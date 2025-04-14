@@ -10,7 +10,7 @@ use super::{
     Linter,
 };
 use crate::{
-    parser::{self, GroupedName, Parser},
+    parser::{self, GroupedName, Parser, VariableAccess},
     tokenizer::{self, Token, TokenType},
     types::*,
 };
@@ -98,7 +98,7 @@ impl Project {
         &mut self,
         path: &PathBuf,
         lint_progress: LintProgress,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<&RwLock<File>> {
         if !self.files.contains_key(path) {
             self.files
                 .insert(path.clone(), RwLock::new(File::new(path.clone())?));
@@ -112,7 +112,7 @@ impl Project {
         //     println!("{} - {}", diagnostic.range, diagnostic.message)
         // }
 
-        Ok(())
+        Ok(_file_lock)
     }
 
     fn parse_type(mut name: String) -> anyhow::Result<parser::DataType> {
@@ -161,11 +161,14 @@ impl Project {
                     variable: parser::Variable {
                         constant: flags & variable::Flag::NoWrite as u32 > 0,
                         data_type: Project::parse_type(arg.r#type.unwrap())?,
-                        name: Token {
-                            token_type: TokenType::ID,
-                            content: arg.name.clone().unwrap(),
-                            range: Range::default(),
-                            error: None,
+                        access: VariableAccess {
+                            name: Token {
+                                token_type: TokenType::ID,
+                                content: arg.name.clone().unwrap(),
+                                range: Range::default(),
+                                error: None,
+                            },
+                            is_write: true,
                         },
                         initial_value: None,
                         range: Default::default(),
@@ -240,11 +243,14 @@ impl Project {
                                 constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32
                                     > 0,
                                 data_type: Project::parse_type(var.r#type.unwrap())?,
-                                name: Token {
-                                    token_type: TokenType::ID,
-                                    content: var.name.unwrap(),
-                                    range: Range::default(),
-                                    error: None,
+                                access: VariableAccess {
+                                    name: Token {
+                                        token_type: TokenType::ID,
+                                        content: var.name.unwrap(),
+                                        range: Range::default(),
+                                        error: None,
+                                    },
+                                    is_write: true,
                                 },
                                 initial_value: None,
                                 range: Default::default(),
@@ -392,11 +398,7 @@ impl Project {
         Ok(())
     }
 
-    pub fn get_node_at<'a>(
-        &'a self,
-        file: &'a File,
-        pos: &Position,
-    ) -> Option<(&TopLevelType<LintProgressComplete>, Option<parser::Node>)> {
+    pub fn get_node_at<'a>(&'a self, file: &'a File, pos: &Position) -> Option<(&'a TopLevelType<LintProgressComplete>, Vec<Node<'a>>)> {
         let top_levels = match &file.top_levels {
             ProgressedTopLevels::Complete(top_levels) => top_levels,
             _ => return None,
@@ -407,193 +409,7 @@ impl Project {
             return None;
         };
 
-        match top_level_type.get_expression_at(pos) {
-            Some(EitherOr::Left(expression)) => {
-                return Some((top_level_type, Some(parser::Node::Expression(expression))))
-            }
-            Some(EitherOr::Right(lvalue)) => {
-                return Some((
-                    top_level_type,
-                    Some(match lvalue.get_variable_at(pos) {
-                        Some(var) => parser::Node::VariableAccess(var),
-                        None => parser::Node::LValue(lvalue),
-                    }),
-                ))
-            }
-            None => {}
-        }
-
-        if let Some(statement) = top_level_type.get_statement_at(pos) {
-            return Some((
-                top_level_type,
-                Some(match statement.get_variable_at(pos) {
-                    Some(EitherOr::Left(var)) => parser::Node::VariableDeclaration(var),
-                    Some(EitherOr::Right(var)) => parser::Node::VariableAccess(var),
-                    None => parser::Node::Statement(statement),
-                }),
-            ));
-        };
-
-        macro_rules! handle_var {
-            ( $var:expr ) => {{
-                let var = $var;
-                if var.data_type.range.contains(pos) {
-                    return Some((top_level_type, Some(parser::Node::DataType(&var.data_type))));
-                }
-
-                var.name.range.contains(pos)
-            }};
-        }
-
-        macro_rules! handle_event {
-            ( $event:expr ) => {{
-                let event = $event;
-
-                if event.name.range.contains(pos) {
-                    return Some((top_level_type, Some(parser::Node::EventDeclaration(&event))));
-                }
-
-                match &event.event_type {
-                    parser::EventType::User(ret, args) => {
-                        if let Some(ret) = &ret {
-                            if ret.range.contains(pos) {
-                                return Some((top_level_type, Some(parser::Node::DataType(&ret))));
-                            }
-                        }
-
-                        for arg in args {
-                            if handle_var!(&arg.variable) {
-                                return Some((
-                                    top_level_type,
-                                    Some(parser::Node::LocalVariableDeclaration(&arg.variable)),
-                                ));
-                            }
-                        }
-                    }
-                    parser::EventType::System(_) => {} // TODO
-                    parser::EventType::Predefined => {}
-                }
-            }};
-        }
-
-        macro_rules! handle_func {
-            ( $func:expr ) => {{
-                let func = $func;
-                if let Some(ret) = &func.returns {
-                    if ret.range.contains(pos) {
-                        return Some((top_level_type, Some(parser::Node::DataType(&ret))));
-                    }
-                }
-
-                if func.name.range.contains(pos) {
-                    return Some((
-                        top_level_type,
-                        Some(parser::Node::FunctionDeclaration(&func)),
-                    ));
-                }
-
-                for arg in &func.arguments {
-                    if handle_var!(&arg.variable) {
-                        return Some((
-                            top_level_type,
-                            Some(parser::Node::LocalVariableDeclaration(&arg.variable)),
-                        ));
-                    }
-                }
-            }};
-        }
-
-        macro_rules! handle_class {
-            ( $class:expr ) => {{
-                let class = $class;
-                if class.name.range.contains(pos) {
-                    return Some((top_level_type, Some(parser::Node::DataType(&class.name))));
-                }
-                if class.base.range.contains(pos) {
-                    return Some((top_level_type, Some(parser::Node::DataType(&class.base))));
-                }
-                if let Some(within) = &class.within {
-                    if within.range.contains(pos) {
-                        return Some((top_level_type, Some(parser::Node::DataType(&within))));
-                    }
-                }
-            }};
-        }
-
-        match top_level_type {
-            TopLevelType::ForwardDecl((fowards, _)) => {
-                for forward in fowards {
-                    handle_class!(&forward.class);
-                    for event in &forward.events {
-                        handle_event!(&event)
-                    }
-                }
-            }
-            TopLevelType::ScopedVariableDecl((var, _)) => {
-                if handle_var!(&var.variable) {
-                    return Some((
-                        top_level_type,
-                        Some(parser::Node::ScopedVariableDeclaration(&var)),
-                    ));
-                }
-            }
-            TopLevelType::ScopedVariablesDecl((vars, _)) => {
-                for var in vars {
-                    if handle_var!(&var.variable) {
-                        return Some((
-                            top_level_type,
-                            Some(parser::Node::ScopedVariableDeclaration(&var)),
-                        ));
-                    }
-                }
-            }
-            TopLevelType::DatatypeDecl((type_decl, _)) => {
-                handle_class!(&type_decl.class);
-
-                for var in &type_decl.variables {
-                    if handle_var!(&var.variable) {
-                        return Some((
-                            top_level_type,
-                            Some(parser::Node::VariableDeclaration(&var)),
-                        ));
-                    }
-                }
-
-                for event in &type_decl.events {
-                    handle_event!(&event);
-                }
-            }
-            TopLevelType::TypeVariablesDecl((vars, _)) => {
-                for var in vars {
-                    if handle_var!(&var.variable) {
-                        return Some((
-                            top_level_type,
-                            Some(parser::Node::VariableDeclaration(&var)),
-                        ));
-                    }
-                }
-            }
-            TopLevelType::FunctionsForwardDecl((funcs, _)) => {
-                for func in funcs {
-                    handle_func!(func)
-                }
-            }
-            TopLevelType::FunctionBody(((func, _), _)) => {
-                handle_func!(func)
-            }
-
-            TopLevelType::ExternalFunctions((funcs, _)) => {
-                for func in funcs {
-                    handle_func!(func)
-                }
-            }
-
-            TopLevelType::EventBody(((event, _), _)) => {
-                handle_event!(event)
-            }
-            TopLevelType::OnBody(_) => {}
-        }
-
-        Some((top_level_type, None))
+        let nodes = top_level_type.get_nodes_at(pos);
+        Some((top_level_type, nodes))
     }
 }

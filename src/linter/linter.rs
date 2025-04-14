@@ -139,7 +139,7 @@ impl<'a> Linter<'a> {
     ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, Option<String>)> + Send + 'b {
         let wants_accessible = accessible;
         let variables = stream::iter(&self.variables).filter_map(move |(name, var)| async move {
-            let is_accessible = &var.lock().await.parsed().range.end < local_before;
+            let is_accessible = &var.lock().await.parsed().range.end <= local_before;
 
             if is_accessible == wants_accessible {
                 let err = (!accessible).then(|| "Variable has not been defined yet".to_string());

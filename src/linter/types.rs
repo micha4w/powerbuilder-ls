@@ -159,7 +159,7 @@ impl FunctionDefinition {
                 .iter()
                 .map(|arg| {
                     (
-                        (&arg.variable.name.content).into(),
+                        (&arg.variable.access.name.content).into(),
                         Mutex::new(Variable {
                             variable_type: VariableType::Argument(arg.clone()),
                             data_type: arg.variable.data_type.data_type_type.clone(),
@@ -571,71 +571,54 @@ impl TopLevelType<LintProgressComplete> {
         }
     }
 
-    pub fn get_statement_at(&self, pos: &Position) -> Option<&parser::Statement> {
+    pub fn get_nodes_at(&self, pos: &Position) -> Vec<Node> {
+        let mut nodes = vec![];
+
         match self {
-            TopLevelType::ForwardDecl(_)
-            | TopLevelType::ScopedVariableDecl(_)
-            | TopLevelType::ScopedVariablesDecl(_)
-            | TopLevelType::DatatypeDecl(_)
-            | TopLevelType::TypeVariablesDecl(_)
-            | TopLevelType::FunctionsForwardDecl(_)
-            | TopLevelType::ExternalFunctions(_) => None,
-
-            TopLevelType::FunctionBody(((_, statements), _))
-            | TopLevelType::EventBody(((_, statements), _))
-            | TopLevelType::OnBody(((_, statements), _)) => statements
-                .iter()
-                .find_map(|statement| statement.get_statement_at(pos)),
-        }
-    }
-
-    pub fn get_expression_at(
-        &self,
-        pos: &Position,
-    ) -> Option<EitherOr<&parser::Expression, &parser::LValue>> {
-        macro_rules! ret_if_contains {
-            ( $val:expr ) => {
-                if let Some(val) = $val.get_expression_at(pos) {
-                    return Some(val);
+            TopLevelType::ForwardDecl((forwards, _)) => {
+                for forward in forwards {
+                    forward.class.search(pos, &mut nodes);
+                    forward.events.search(pos, &mut nodes);
+                    forward.variables.search(pos, &mut nodes);
                 }
-            };
-        }
-        macro_rules! ret_if_one_contains {
-            ( $vec:expr ) => {
-                for val in $vec {
-                    ret_if_contains!(val);
-                }
-            };
-        }
+            }
+            TopLevelType::TypeVariablesDecl((vars, _)) => {
+                vars.search(pos, &mut nodes);
+            }
+            TopLevelType::FunctionsForwardDecl((functions, _))
+            | TopLevelType::ExternalFunctions((functions, _)) => {
+                functions.search(pos, &mut nodes);
+            }
 
-        match &self {
-            TopLevelType::ForwardDecl(..)
-            | TopLevelType::TypeVariablesDecl(..)
-            | TopLevelType::FunctionsForwardDecl(..)
-            | TopLevelType::ExternalFunctions(..)
-            | TopLevelType::FunctionBody(..)
-            | TopLevelType::EventBody(..)
-            | TopLevelType::OnBody(..) => {}
+            TopLevelType::FunctionBody(((function, statements), _)) => {
+                function.search(pos, &mut nodes);
+                statements.search(pos, &mut nodes);
+            }
+            TopLevelType::EventBody(((event, statements), _)) => {
+                event.search(pos, &mut nodes);
+                statements.search(pos, &mut nodes);
+            }
+            TopLevelType::OnBody(((_, statements), _)) => {
+                statements.search(pos, &mut nodes);
+            }
 
             TopLevelType::ScopedVariableDecl((var, _)) => {
-                ret_if_one_contains!(var.variable.initial_value.iter());
+                var.variable.search(pos, &mut nodes);
             }
-            TopLevelType::ScopedVariablesDecl((vars, _)) => ret_if_one_contains!(vars
-                .iter()
-                .filter_map(|var| var.variable.initial_value.as_ref())),
-            TopLevelType::DatatypeDecl((decl, _)) => ret_if_one_contains!(decl
-                .variables
-                .iter()
-                .filter_map(|var| var.variable.initial_value.as_ref())),
+            TopLevelType::ScopedVariablesDecl((vars, _)) => {
+                for var in vars {
+                    var.variable.search(pos, &mut nodes);
+                }
+            }
+            TopLevelType::DatatypeDecl((decl, _)) => {
+                decl.class.search(pos, &mut nodes);
+
+                decl.events.search(pos, &mut nodes);
+                decl.variables.search(pos, &mut nodes);
+            }
         }
 
-        if let Some(statement) = &self.get_statement_at(pos) {
-            if let Some(expression) = statement.get_expression_at(pos) {
-                return Some(expression);
-            };
-        };
-
-        None
+        nodes
     }
 }
 
@@ -676,23 +659,340 @@ impl ProgressedTopLevels {
     }
 }
 
-pub trait Hoverable {
-    fn get_title(&self) -> String;
-    fn get_description(&self) -> String;
-    fn get_range(&self) -> Range;
-    // fn get_links() -> String;
+pub enum Node<'a> {
+    DataType(&'a parser::DataType),
+    VariableDeclaration(&'a parser::Variable),
+    ScopedVariableDeclaration(&'a parser::ScopedVariable),
+    InstanceVariableDeclaration(&'a parser::InstanceVariable),
+    FunctionDeclaration(&'a parser::Function),
+    EventDeclaration(&'a parser::Event),
+    VariableAccess(&'a parser::VariableAccess),
+    LValue(&'a parser::LValue),
+    Expression(&'a parser::Expression),
+    Statement(&'a parser::Statement),
 }
 
-impl<'a> Hoverable for parser::Node<'a> {
-    fn get_title(&self) -> String {
-        self.to_string()
+impl<'a> Node<'a> {
+    pub fn get_range(&self) -> &Range {
+        match self {
+            Node::DataType(data_type) => &data_type.range,
+            Node::ScopedVariableDeclaration(decl) => &decl.variable.range,
+            Node::InstanceVariableDeclaration(decl) => &decl.variable.range,
+            Node::VariableAccess(var) => &var.name.range,
+            Node::VariableDeclaration(variable) => &variable.range,
+            Node::FunctionDeclaration(function) => &function.range,
+            Node::EventDeclaration(event) => &event.range,
+            Node::LValue(lvalue) => &lvalue.range,
+            Node::Expression(expression) => &expression.range,
+            Node::Statement(statement) => &statement.range,
+        }
     }
+}
 
-    fn get_description(&self) -> String {
-        "".into()
+impl<'a> fmt::Display for Node<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Node::DataType(data_type) => fmt::Display::fmt(&data_type.data_type_type, f),
+            Node::ScopedVariableDeclaration(decl) => fmt::Display::fmt(&decl.variable, f),
+            Node::InstanceVariableDeclaration(decl) => fmt::Display::fmt(&decl.variable, f),
+            Node::VariableAccess(var) => write!(f, "{}", var.name.content),
+            Node::VariableDeclaration(variable) => write!(f, "{}", variable),
+            Node::FunctionDeclaration(function) => write!(f, "{}", function),
+            Node::EventDeclaration(event) => write!(f, "{}", event),
+            Node::LValue(lvalue) => fmt::Display::fmt(&lvalue.lvalue_type, f),
+            Node::Expression(expression) => fmt::Display::fmt(&expression.expression_type, f),
+            Node::Statement(_) => write!(f, "<TODO statement>"),
+        }
     }
+}
 
-    fn get_range(&self) -> Range {
-        *self.get_range()
+trait NodeSearcher {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()>;
+}
+
+impl<T: NodeSearcher> NodeSearcher for Option<T> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if let Some(val) = self {
+            val.search(pos, nodes)?;
+        }
+
+        Some(())
+    }
+}
+
+impl<T: NodeSearcher> NodeSearcher for Vec<T> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        for val in self {
+            val.search(pos, nodes)?;
+        }
+
+        Some(())
+    }
+}
+
+impl NodeSearcher for parser::DataType {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::DataType(self));
+        None
+    }
+}
+
+impl NodeSearcher for parser::VariableAccess {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.name.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::VariableAccess(self));
+        None
+    }
+}
+
+impl NodeSearcher for parser::Variable {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::VariableDeclaration(self));
+        self.access.search(pos, nodes)?;
+        self.data_type.search(pos, nodes)?;
+        self.initial_value.search(pos, nodes)?;
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::InstanceVariable {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.variable.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::InstanceVariableDeclaration(self));
+        self.variable.search(pos, nodes)?;
+        None
+    }
+}
+
+impl NodeSearcher for parser::ScopedVariable {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.variable.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::ScopedVariableDeclaration(self));
+        self.variable.search(pos, nodes)?;
+        None
+    }
+}
+
+impl NodeSearcher for parser::LValue {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::LValue(self));
+
+        match &self.lvalue_type {
+            // TODO make these be variable accesses?
+            parser::LValueType::This | parser::LValueType::Super | parser::LValueType::Parent => {}
+            parser::LValueType::Variable(access) => access.search(pos, nodes)?,
+            parser::LValueType::Function(call) => {
+                call.arguments.search(pos, nodes)?;
+            }
+            parser::LValueType::Method(lvalue, call) => {
+                lvalue.search(pos, nodes)?;
+                call.arguments.search(pos, nodes)?;
+            }
+            parser::LValueType::Member(lvalue, _) => {
+                lvalue.search(pos, nodes)?;
+            }
+            parser::LValueType::Index(lvalue, expression) => {
+                lvalue.search(pos, nodes)?;
+                expression.search(pos, nodes)?;
+            }
+            parser::LValueType::SQLAccess(_, lvalue) => lvalue.search(pos, nodes)?,
+        }
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::Expression {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::Expression(self));
+
+        match &self.expression_type {
+            parser::ExpressionType::Create(data_type) => {
+                data_type.search(pos, nodes)?;
+            }
+            parser::ExpressionType::Literal(..) => {}
+            parser::ExpressionType::ArrayLiteral(expressions) => {
+                expressions.search(pos, nodes)?;
+            }
+            parser::ExpressionType::Operation(left, _operator, right) => {
+                left.search(pos, nodes)?;
+                right.search(pos, nodes)?;
+            }
+            parser::ExpressionType::UnaryOperation(_, expression)
+            | parser::ExpressionType::IncrementDecrement(expression, _)
+            | parser::ExpressionType::BooleanNot(expression)
+            | parser::ExpressionType::Parenthesized(expression)
+            | parser::ExpressionType::CreateUsing(expression) => expression.search(pos, nodes)?,
+
+            parser::ExpressionType::LValue(lvalue) => lvalue.search(pos, nodes)?,
+            parser::ExpressionType::Error => {}
+        };
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::Statement {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::Statement(self));
+
+        match &self.statement_type {
+            parser::StatementType::Expression(expression) |
+            parser::StatementType::Throw(expression) |
+            parser::StatementType::Destroy(expression) |
+            parser::StatementType::Return(Some(expression)) => {
+                    expression.search(pos, nodes)?;
+            }
+            parser::StatementType::Assignment(lvalue, _, expression) => {
+                    lvalue.search(pos, nodes)?;
+                    expression.search(pos, nodes)?;
+            }
+            parser::StatementType::Declaration(var) => {
+                var.search(pos, nodes)?;
+            }
+            parser::StatementType::Return(None) |
+            parser::StatementType::Call(..) | // TODO
+            parser::StatementType::Exit |
+            parser::StatementType::Continue |
+            parser::StatementType::SQL(..) | // TODO
+            parser::StatementType::Error => {},
+
+            parser::StatementType::If(if_statement) => {
+                if_statement.condition.search(pos, nodes)?;
+                if_statement.statements.search(pos, nodes)?;
+                for (expression, statements) in &if_statement.elseif_statements {
+                    expression.search(pos, nodes)?;
+                    statements.search(pos, nodes)?;
+                }
+                if_statement.else_statements.search(pos, nodes)?;
+            },
+
+            parser::StatementType::TryCatch(try_catch_statement) => {
+                try_catch_statement.statements.search(pos, nodes)?;
+
+                for (variable, statements) in &try_catch_statement.catches {
+                    variable.search(pos, nodes)?;
+                    statements.search(pos, nodes)?;
+
+                }
+
+                if let Some(statements) = &try_catch_statement.finally {
+                    statements.search(pos, nodes)?;
+                };
+            }
+            parser::StatementType::ForLoop(for_loop) => {
+                for_loop.variable.search(pos, nodes)?;
+
+                for_loop.start.search(pos, nodes)?;
+                for_loop.stop.search(pos, nodes)?;
+                for_loop.step.search(pos, nodes)?;
+
+                for_loop.statements.search(pos, nodes)?;
+            },
+            parser::StatementType::WhileLoop(while_loop) => {
+                while_loop.condition.search(pos, nodes)?;
+                while_loop.statements.search(pos, nodes)?;
+            },
+            parser::StatementType::Choose(choose_case) => {
+                choose_case.choose.search(pos, nodes)?;
+
+                for (_specifiers, statements) in &choose_case.cases {
+                    // for specifier in specifiers {
+                    //     match specifier.specifier_type {
+                    //         parser::CaseSpecifierType::Literals(literal) => todo!(),
+                    //         parser::CaseSpecifierType::To(literal, literal) => todo!(),
+                    //         parser::CaseSpecifierType::Is(operator, literal) => todo!(),
+                    //         parser::CaseSpecifierType::Else => todo!(),
+                    //     }
+                    // }
+
+                    statements.search(pos, nodes)?;
+                }
+            },
+        };
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::Function {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::FunctionDeclaration(self));
+
+        self.returns.search(pos, nodes)?;
+
+        for arg in &self.arguments {
+            arg.variable.search(pos, nodes)?;
+        }
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::Event {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        if !self.range.contains(pos) {
+            return Some(());
+        }
+
+        nodes.push(Node::EventDeclaration(self));
+
+        match &self.event_type {
+            parser::EventType::User(returns, arguments) => {
+                returns.search(pos, nodes)?;
+
+                for arg in arguments {
+                    arg.variable.search(pos, nodes)?;
+                }
+            }
+            parser::EventType::Predefined => todo!(),
+            parser::EventType::System(_) => todo!(),
+        }
+
+        None
+    }
+}
+
+impl NodeSearcher for parser::Class {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+        self.name.search(pos, nodes)?;
+        self.base.search(pos, nodes)?;
+        self.within.search(pos, nodes)?;
+
+        Some(())
     }
 }

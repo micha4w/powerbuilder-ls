@@ -73,7 +73,7 @@ impl Parser {
                 variable: Variable {
                     constant: is_readonly,
                     data_type,
-                    name,
+                    access: VariableAccess { name, is_write: true },
                     initial_value: None,
                     range: Range {
                         start: var_start,

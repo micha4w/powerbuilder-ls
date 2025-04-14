@@ -63,7 +63,7 @@ impl<'a> Linter<'a> {
 
             for var in &decl.variables {
                 new_class.instance_variables.insert(
-                    (&var.variable.name.content).into(),
+                    (&var.variable.access.name.content).into(),
                     Mutex::new(Variable {
                         variable_type: VariableType::Instance((
                             Arc::downgrade(&new_class_mut),
@@ -135,7 +135,7 @@ impl<'a> Linter<'a> {
                             data_type: var.variable.data_type.data_type_type.clone(),
                             variable_type: VariableType::Scoped(var.clone()),
                         }));
-                        new_vars.insert((&var.variable.name.content).into(), new_var.clone());
+                        new_vars.insert((&var.variable.access.name.content).into(), new_var.clone());
                     }
 
                     self.file.unwrap_mut().variables.extend(new_vars.clone());
@@ -149,7 +149,7 @@ impl<'a> Linter<'a> {
                     self.file
                         .unwrap_mut()
                         .variables
-                        .insert((&var.variable.name.content).into(), new_var.clone());
+                        .insert((&var.variable.access.name.content).into(), new_var.clone());
                     TopLevelType::ScopedVariableDecl((var, new_var))
                 }
                 parser::TopLevelType::DatatypeDecl(datatype_decl) => {
@@ -327,7 +327,7 @@ impl<'a> Linter<'a> {
                         }
 
                         new_vars.insert(
-                            (&var.variable.name.content).into(),
+                            (&var.variable.access.name.content).into(),
                             Mutex::new(Variable {
                                 variable_type: VariableType::Instance((
                                     self.class

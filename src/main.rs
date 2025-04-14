@@ -65,6 +65,37 @@ impl PowerBuilderLS {
         }
     }
 
+    async fn get_file(&self, url: Url) -> jsonrpc::Result<PathBuf> {
+        let path = match std::path::absolute(url.path()) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(jsonrpc::Error::invalid_params(format!(
+                    "Invalid path: {}",
+                    err
+                )))
+            }
+        };
+
+        if let Err(err) = self
+            .m
+            .proj
+            .write()
+            .await
+            .add_file(&path, LintProgress::Complete)
+            .await
+        {
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to Lint File: {:?}", err),
+                )
+                .await;
+            return Err(jsonrpc::Error::internal_error());
+        }
+
+        Ok(path)
+    }
+
     async fn get_file_diagnostics(&self, path: PathBuf) -> jsonrpc::Result<Vec<Diagnostic>> {
         self.m.proj.write().await.files.remove(&path);
         if let Err(err) = self
@@ -273,46 +304,18 @@ impl LanguageServer for PowerBuilderLS {
     }
 
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
-        let path = match std::path::absolute(
-            params
-                .text_document_position_params
-                .text_document
-                .uri
-                .path(),
-        ) {
-            Ok(path) => path,
-            Err(err) => {
-                return Err(jsonrpc::Error::invalid_params(format!(
-                    "Invalid path: {}",
-                    err
-                )))
-            }
-        };
-
-        if let Err(err) = self
-            .m
-            .proj
-            .write()
-            .await
-            .add_file(&path, LintProgress::Complete)
-            .await
-        {
-            self.client
-                .log_message(
-                    MessageType::ERROR,
-                    format!("Failed to Lint File: {:?}", err),
-                )
-                .await;
-            return Err(jsonrpc::Error::internal_error());
-        }
-
+        let path = self
+            .get_file(params.text_document_position_params.text_document.uri)
+            .await?;
         let proj = self.m.proj.read().await;
-        let Some(file_lock) = proj.files.get(&path) else {
+        let file_lock = proj.files.get(&path).unwrap();
+        let file = file_lock.read().await;
+
+        let pos = params.text_document_position_params.position.into();
+        let Some((top_level_type, nodes)) = proj.get_node_at(&file, &pos) else {
             return Ok(None);
         };
-        let pos = params.text_document_position_params.position.into();
-        let file = file_lock.read().await;
-        let Some((top_level_type, Some(node))) = proj.get_node_at(&file, &pos) else {
+        let Some(node) = nodes.last() else {
             return Ok(None);
         };
 
@@ -331,28 +334,16 @@ impl LanguageServer for PowerBuilderLS {
         // let mut description = None;
         let range = node.get_range();
         match node {
-            parser::Node::VariableDeclaration(var) => {
+            linter::Node::InstanceVariableDeclaration(var) => {
                 let mut name = var.to_string();
-                let class = match top_level_type {
-                    linter::TopLevelType::ForwardDecl(_)
-                    | linter::TopLevelType::FunctionsForwardDecl(_)
-                    | linter::TopLevelType::ScopedVariableDecl(_)
-                    | linter::TopLevelType::ScopedVariablesDecl(_)
-                    | linter::TopLevelType::ExternalFunctions(_) => None,
 
-                    linter::TopLevelType::DatatypeDecl((_, class)) => Some(class),
-                    linter::TopLevelType::TypeVariablesDecl((_, (class, _)))
-                    | linter::TopLevelType::FunctionBody((_, (class, _)))
-                    | linter::TopLevelType::EventBody((_, (class, _)))
-                    | linter::TopLevelType::OnBody((_, (class,))) => class.as_ref(),
-                };
-                if let Some(class) = class {
+                if let Some(class) = linter.class {
                     name = format!("type {}\n{}", class.lock().await.name, name);
                 }
                 title = Some(name);
             }
-            parser::Node::ScopedVariableDeclaration(var) => title = Some(var.to_string()),
-            parser::Node::VariableAccess(access) => {
+            linter::Node::ScopedVariableDeclaration(var) => title = Some(var.to_string()),
+            linter::Node::VariableAccess(access) => {
                 let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
                     linter
                         .get_variables(&access.name.range.end, access.is_write)
@@ -378,10 +369,10 @@ impl LanguageServer for PowerBuilderLS {
                     }
                 }
             }
-            parser::Node::LocalVariableDeclaration(var) => title = Some(var.to_string()),
-            parser::Node::FunctionDeclaration(func) => title = Some(func.to_string()),
-            parser::Node::EventDeclaration(event) => title = Some(event.to_string()),
-            parser::Node::LValue(lvalue) => match &lvalue.lvalue_type {
+            linter::Node::VariableDeclaration(var) => title = Some(var.to_string()),
+            linter::Node::FunctionDeclaration(func) => title = Some(func.to_string()),
+            linter::Node::EventDeclaration(event) => title = Some(event.to_string()),
+            linter::Node::LValue(lvalue) => match &lvalue.lvalue_type {
                 parser::LValueType::This => {
                     let mut contents = "this (Reserved Keyword)".to_owned();
                     if let Some(class) = top_level_type.get_class() {
@@ -502,9 +493,9 @@ impl LanguageServer for PowerBuilderLS {
                     title = Some(format!(":{}", access.lvalue_type.to_string()))
                 }
             },
-            parser::Node::Expression(expr) => title = Some(expr.expression_type.to_string()),
-            parser::Node::Statement(_) => {}
-            parser::Node::DataType(dt) => {
+            linter::Node::Expression(expr) => title = Some(expr.expression_type.to_string()),
+            linter::Node::Statement(_) => {}
+            linter::Node::DataType(dt) => {
                 let dt_name = dt.data_type_type.to_string();
                 title = Some(match &dt.data_type_type {
                     parser::DataTypeType::Complex(grouped_name) => {
@@ -513,28 +504,13 @@ impl LanguageServer for PowerBuilderLS {
                                 class_mut.lock().await.to_string()
                             }
                             Some(linter::Complex::Enum(en)) => {
-                                format!("enum {}", dt_name)
+                                format!("type {} from enumerated", dt_name)
                             }
                             None => format!("type {} from class_not_found", dt_name),
                         }
                     }
-                    _ => dt_name,
+                    _ => format!("type {} from primitives", dt_name),
                 })
-            }
-        }
-
-        if title.is_none() {
-            let mut handle_var = |var: &parser::ScopedVariable| {
-                if var.variable.name.range.contains(&pos) {
-                    title = Some(var.to_string());
-                }
-            };
-            match top_level_type {
-                linter::TopLevelType::ScopedVariableDecl((var, _)) => handle_var(var),
-                linter::TopLevelType::ScopedVariablesDecl((vars, _)) => {
-                    vars.iter().for_each(handle_var)
-                }
-                _ => {}
             }
         }
 

@@ -145,11 +145,18 @@ impl Parser {
             }
         }
 
-        let constant = self
-            .optional(TokenType::Keyword(tokenizer::Keyword::CONSTANT))?
-            .is_some();
+        let mut var_start = None;
+        let constant =
+            if let Some(token) = self.optional(TokenType::Keyword(tokenizer::Keyword::CONSTANT))? {
+                var_start = Some(token.range.start);
+                true
+            } else {
+                false
+            };
 
         let mut data_type = quick_exit!(self.parse_type()?);
+        let var_start = var_start.unwrap_or(data_type.range.start);
+
         let name = quick_exit_simple!(self.expect(TokenType::ID)?);
 
         let mut end = name.range.end;
@@ -241,9 +248,12 @@ impl Parser {
                 statement_type: StatementType::Declaration(InstanceVariable {
                     access,
                     variable: Variable {
-                        range: name.range,
+                        range: Range { start: var_start, end },
                         data_type,
-                        name,
+                        access: VariableAccess {
+                            name,
+                            is_write: true,
+                        },
                         constant,
                         initial_value: expression,
                     },
@@ -721,7 +731,10 @@ impl Parser {
                                         range,
                                         constant: false,
                                         data_type,
-                                        name,
+                                        access: VariableAccess {
+                                            name,
+                                            is_write: true,
+                                        },
                                         initial_value: None,
                                     },
                                 }),
@@ -1124,7 +1137,7 @@ impl Parser {
             TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
                 self.tokens.next()?;
                 Some(None)
-            },
+            }
             _ => {
                 let Token {
                     token_type, range, ..

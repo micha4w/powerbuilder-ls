@@ -622,7 +622,7 @@ impl<'a> Linter<'a> {
                     }
 
                     self.variables.insert(
-                        (&var.variable.name.content).into(),
+                        (&var.variable.access.name.content).into(),
                         Mutex::new(Variable {
                             variable_type: VariableType::Local(var.variable.clone()),
                             data_type,
