@@ -73,11 +73,15 @@ impl Parser {
                 variable: Variable {
                     constant: is_readonly,
                     data_type,
-                    access: VariableAccess { name, is_write: true },
+                    access: VariableAccess {
+                        name,
+                        is_write: true,
+                    },
                     initial_value: None,
                     range: Range {
                         start: var_start,
                         end,
+                        uri: self.uri(),
                     },
                 },
             });
@@ -100,7 +104,15 @@ impl Parser {
         }
 
         Some(ParseResult::new(
-            (Range { start, end }, arguments, vararg),
+            (
+                Range {
+                    start,
+                    end,
+                    uri: self.uri(),
+                },
+                arguments,
+                vararg,
+            ),
             err,
         ))
     }
@@ -166,7 +178,11 @@ impl Parser {
                 if returns.is_some() {
                     self.error(
                         &"Can't specify a return Type when declaring a Predefined Event".into(),
-                        Range { start, end },
+                        Range {
+                            start,
+                            end,
+                            uri: self.uri(),
+                        },
                     );
                 }
 
@@ -181,7 +197,11 @@ impl Parser {
         let event = Event {
             name,
             event_type,
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         };
 
         Some(ParseResult::new(event, err))
@@ -190,7 +210,8 @@ impl Parser {
     pub fn parse_function_header(&mut self) -> EOFOrParserResult<Function> {
         let start = self.tokens.peek()?.range.start;
 
-        let scope_modif = if let TokenType::ScopeModif(scope_modif) = self.tokens.peek()?.token_type {
+        let scope_modif = if let TokenType::ScopeModif(scope_modif) = self.tokens.peek()?.token_type
+        {
             self.tokens.next()?;
             Some(scope_modif)
         } else {
@@ -300,7 +321,11 @@ impl Parser {
                 arguments,
                 vararg,
 
-                range: Range { start, end },
+                range: Range {
+                    start,
+                    end,
+                    uri: self.uri(),
+                },
             },
             err,
         ))
@@ -313,25 +338,27 @@ impl Parser {
         let end;
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::EVENT) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::EVENT) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        self.expect_newline()?.ok();
-                        break;
+                            self.expect_newline()?.ok();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END EVENT".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END EVENT".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 _ => {
                     if let Some(statement) = self.parse_statement()? {
                         statements.push(statement);
@@ -344,6 +371,7 @@ impl Parser {
             range: Range {
                 start: event.range.start,
                 end,
+                uri: self.uri(),
             },
             top_level_type: TopLevelType::EventBody(event, statements),
         }))
@@ -357,47 +385,49 @@ impl Parser {
 
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(
-                        function_type @ (tokenizer::Keyword::FUNCTION
-                        | tokenizer::Keyword::SUBROUTINE),
-                    ) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(
+                            function_type @ (tokenizer::Keyword::FUNCTION
+                            | tokenizer::Keyword::SUBROUTINE),
+                        ) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        if (function.returns.is_none())
-                            ^ (function_type == tokenizer::Keyword::SUBROUTINE)
-                        {
-                            self.error(
+                            if (function.returns.is_none())
+                                ^ (function_type == tokenizer::Keyword::SUBROUTINE)
+                            {
+                                self.error(
+                                    &if function.returns.is_none() {
+                                        "Dangling END keyword, did you mean END SUBROUTINE"
+                                    } else {
+                                        "Dangling END keyword, did you mean END FUNCTION"
+                                    }
+                                    .into(),
+                                    close.range,
+                                );
+                            }
+
+                            self.expect_newline()?.ok();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
                                 &if function.returns.is_none() {
                                     "Dangling END keyword, did you mean END SUBROUTINE"
                                 } else {
                                     "Dangling END keyword, did you mean END FUNCTION"
                                 }
                                 .into(),
-                                close.range,
-                            );
+                                range,
+                                true,
+                            )?
+                            .ok();
                         }
-
-                        self.expect_newline()?.ok();
-                        break;
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &if function.returns.is_none() {
-                                "Dangling END keyword, did you mean END SUBROUTINE"
-                            } else {
-                                "Dangling END keyword, did you mean END FUNCTION"
-                            }
-                            .into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 _ => {
                     if let Some(statement) = self.parse_statement()? {
                         statements.push(statement);
@@ -410,6 +440,7 @@ impl Parser {
             range: Range {
                 start: function.range.start,
                 end,
+                uri: self.uri(),
             },
             top_level_type: TopLevelType::FunctionBody(function, statements),
         }))
@@ -443,25 +474,27 @@ impl Parser {
 
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::ON) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::ON) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        self.expect_newline()?.ok();
-                        break;
+                            self.expect_newline()?.ok();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END ON".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END ON".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 _ => {
                     if let Some(statement) = self.parse_statement()? {
                         statements.push(statement);
@@ -472,7 +505,11 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::OnBody(On { class, name }, statements),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -503,7 +540,7 @@ impl Parser {
         };
         let base = base.unwrap_or_else(|| DataType {
             data_type_type: DataTypeType::Complex(GroupedName::new(None, "powerobject".into())),
-            range: base_pos.into(),
+            range: Range::new_point(base_pos.into(), self.uri()),
         });
 
         let within = if err.is_none()
@@ -522,12 +559,16 @@ impl Parser {
             self.expect_newline()?.ok();
         }
 
-        let end;
+        let mut end;
         let mut variables = Vec::new();
         let mut events = Vec::new();
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
+                TokenType::Keyword(tokenizer::Keyword::END) => match self
+                    .tokens
+                    .peek_nth(1)?
+                    .token_type
+                {
                     TokenType::Keyword(tokenizer::Keyword::TYPE) => {
                         self.tokens.next()?;
                         let close = self.tokens.next()?;
@@ -538,7 +579,7 @@ impl Parser {
                     }
                     _ => {
                         let range = self.tokens.next()?.range;
-                        self.error(&"Dangling END keyword, did you mean END TYPE".into(), range);
+                        self.error(&"Dangling END keyword, did you mean END TYPE".into(), range.clone());
                         end = range.end;
 
                         self.consume_line()?;
@@ -578,9 +619,17 @@ impl Parser {
                 },
                 variables,
                 events,
-                range: Range { start, end },
+                range: Range {
+                    start,
+                    end,
+                    uri: self.uri(),
+                },
             }),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -597,7 +646,7 @@ impl Parser {
             if var.access.read.is_some() || var.access.write.is_some() {
                 self.error(
                     &"Global variable cannot specify Access Rights".into(),
-                    var.variable.range,
+                    var.variable.range.clone(),
                 );
             }
 
@@ -605,6 +654,7 @@ impl Parser {
                 range: Range {
                     start,
                     end: variable.range.end,
+                    uri: self.uri(),
                 },
                 top_level_type: TopLevelType::ScopedVariableDecl(ScopedVariable {
                     scope,
@@ -640,27 +690,29 @@ impl Parser {
         let mut declarations = Vec::new();
         loop {
             match self.tokens.peek()?.token_type.clone() {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        let _ = self.expect_newline();
-                        break;
+                            let _ = self.expect_newline();
+                            break;
+                        }
+                        _ => {
+                            end = self.tokens.peek()?.range.end;
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END VARIABLES".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                            break;
+                        }
                     }
-                    _ => {
-                        end = self.tokens.peek()?.range.end;
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END VARIABLES".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                        break;
-                    }
-                },
+                }
                 _ => {
                     if let Some(statement) = self.parse_variable_declaration()?.value() {
                         if let StatementType::Declaration(var) = statement.statement_type {
@@ -678,7 +730,11 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::ScopedVariablesDecl(declarations),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -693,25 +749,27 @@ impl Parser {
         let mut access = None;
         loop {
             match self.tokens.peek()?.token_type.clone() {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        let _ = self.expect_newline();
-                        break;
+                            let _ = self.expect_newline();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END VARIABLES".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END VARIABLES".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 TokenType::AccessType(new_access)
                     if self.tokens.peek_nth(1)?.token_type
                         == TokenType::Symbol(tokenizer::Symbol::COLON) =>
@@ -750,7 +808,11 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::TypeVariablesDecl(declarations),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -766,25 +828,27 @@ impl Parser {
         let end;
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        let _ = self.expect_newline();
-                        break;
+                            let _ = self.expect_newline();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END PROTOTYPES".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END PROTOTYPES".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 _ => {
                     if let Some(function) = self.parse_function_header()?.value() {
                         functions.push(function);
@@ -795,7 +859,11 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::FunctionsForwardDecl(functions),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -811,25 +879,27 @@ impl Parser {
         let end;
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        let _ = self.expect_newline();
-                        break;
+                            let _ = self.expect_newline();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END PROTOTYPES".into(),
+                                range,
+                                true,
+                            )?
+                            .ok();
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Dangling END keyword, did you mean END PROTOTYPES".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                    }
-                },
+                }
                 _ => {
                     if let Some(function) = self.parse_function_header()?.value() {
                         functions.push(function);
@@ -840,7 +910,11 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::ExternalFunctions(functions),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
@@ -855,22 +929,24 @@ impl Parser {
         let end;
         loop {
             match self.tokens.peek()?.token_type.clone() {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self.tokens.peek_nth(1)?.token_type {
-                    TokenType::Keyword(tokenizer::Keyword::FORWARD) => {
-                        self.tokens.next()?;
-                        end = self.tokens.next()?.range.end;
-                        let _ = self.expect_newline()?;
-                        break;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::FORWARD) => {
+                            self.tokens.next()?;
+                            end = self.tokens.next()?.range.end;
+                            let _ = self.expect_newline()?;
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.next()?.range;
+                            self.error(
+                                &"Dangling END keyword, did you mean END FORWARD".into(),
+                                range,
+                            );
+                            self.consume_line()?;
+                        }
                     }
-                    _ => {
-                        let range = self.tokens.next()?.range;
-                        self.error(
-                            &"Dangling END keyword, did you mean END FORWARD".into(),
-                            range,
-                        );
-                        self.consume_line()?;
-                    }
-                },
+                }
                 _ => match self.parse_datatype_decl()? {
                     Some(TopLevel {
                         top_level_type: TopLevelType::DatatypeDecl(datatype),
@@ -884,22 +960,27 @@ impl Parser {
 
         Some(Some(TopLevel {
             top_level_type: TopLevelType::ForwardDecl(types),
-            range: Range { start, end },
+            range: Range {
+                start,
+                end,
+                uri: self.uri(),
+            },
         }))
     }
 
     pub fn parse_top_level(&mut self) -> EOFOr<Option<TopLevel>> {
         match self.tokens.peek()?.token_type {
-            TokenType::Keyword(tokenizer::Keyword::FORWARD) => match self.tokens.peek_nth(1)?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
-                    self.parse_functions_forward_decl()
-                }
-                TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
-                    self.parse_forward_decl()
-                }
-                _ => {
-                    let range = self.tokens.peek()?.range;
-                    Some(
+            TokenType::Keyword(tokenizer::Keyword::FORWARD) => {
+                match self.tokens.peek_nth(1)?.token_type {
+                    TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
+                        self.parse_functions_forward_decl()
+                    }
+                    TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
+                        self.parse_forward_decl()
+                    }
+                    _ => {
+                        let range = self.tokens.peek()?.range;
+                        Some(
                         self.fatal(
                             &"Unexpected Token for FORWARD, expected either PROTOTYPE or NEWLINE"
                                 .into(),
@@ -908,23 +989,26 @@ impl Parser {
                         )?
                         .ok(),
                     )
+                    }
                 }
-            },
+            }
             TokenType::AccessType(_)
             | TokenType::Keyword(tokenizer::Keyword::FUNCTION | tokenizer::Keyword::SUBROUTINE) => {
                 self.parse_function()
             }
             TokenType::Keyword(tokenizer::Keyword::EVENT) => self.parse_event(),
             TokenType::Keyword(tokenizer::Keyword::ON) => self.parse_on(),
-            TokenType::Keyword(tokenizer::Keyword::TYPE) => match self.tokens.peek_nth(1)?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
-                    self.parse_type_variables_decl()
+            TokenType::Keyword(tokenizer::Keyword::TYPE) => {
+                match self.tokens.peek_nth(1)?.token_type {
+                    TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
+                        self.parse_type_variables_decl()
+                    }
+                    TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
+                        self.parse_external_functions()
+                    }
+                    _ => self.parse_datatype_decl(),
                 }
-                TokenType::Keyword(tokenizer::Keyword::PROTOTYPES) => {
-                    self.parse_external_functions()
-                }
-                _ => self.parse_datatype_decl(),
-            },
+            }
             TokenType::ScopeModif(_) => match self.tokens.peek_nth(1)?.token_type {
                 TokenType::Keyword(tokenizer::Keyword::TYPE) => self.parse_datatype_decl(),
                 TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {

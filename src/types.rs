@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{cell::RefCell, cmp::min, path::PathBuf, sync::Arc};
 
 #[derive(Debug)]
 pub enum EitherOr<Left, Right> {
@@ -43,28 +43,56 @@ impl From<tower_lsp::lsp_types::Position> for Position {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
+    pub uri: Arc<PathBuf>,
 }
 
 impl Range {
-    pub(crate) fn new(start: Position, end: Position) -> Self {
-        Self { start, end }
+    pub(crate) fn new(start: Position, end: Position, uri: Arc<PathBuf>) -> Self {
+        Self { start, end, uri }
     }
 
-    pub(crate) fn merge(a: &Range, b: &Range) -> Self {
-        Self {
-            start: a.start.min(b.start),
-            end: a.end.max(b.end),
+    pub(crate) fn merged(mut self, b: &Range) -> Self {
+        self.merge(b);
+        self
+    }
+
+    pub(crate) fn merge(&mut self, b: &Range) -> &Self {
+        assert!(self.uri == b.uri, "Merging Ranges from 2 different files");
+
+        if b.start < self.start {
+            self.start = b.start;
         }
+        if self.end < b.end {
+            self.end = b.end;
+        }
+
+        self
     }
 
-    pub(crate) fn new_point(base_pos: Position) -> Self {
+    pub(crate) fn expanded(mut self, pos: &Position) -> Self {
+        self.expand(pos);
+        self
+    }
+
+    pub(crate) fn expand(&mut self, pos: &Position) -> &Self {
+        if pos < &self.start {
+            self.start = pos.clone()
+        }
+        if &self.end < pos {
+            self.end = pos.clone()
+        }
+        self
+    }
+
+    pub(crate) fn new_point(base_pos: Position, uri: Arc<PathBuf>) -> Self {
         Self {
             start: base_pos,
             end: base_pos,
+            uri,
         }
     }
 
@@ -76,12 +104,6 @@ impl Range {
 impl std::fmt::Display for Range {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({} - {})", self.start, self.end)
-    }
-}
-
-impl From<Position> for Range {
-    fn from(value: Position) -> Self {
-        Self::new_point(value)
     }
 }
 

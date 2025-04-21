@@ -27,6 +27,10 @@ impl<I: Iterator<Item = Token>> TokenIter<I> {
         }
     }
 
+    pub fn underlying(&self) -> &I {
+        &self.iter
+    }
+
     pub fn prev(&self) -> &Option<Token> {
         &self.prev
     }

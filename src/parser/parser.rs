@@ -1,4 +1,8 @@
-use std::{backtrace::Backtrace, path::Path};
+use std::{
+    backtrace::Backtrace,
+    cell::RefCell,
+    path::{Path, PathBuf}, sync::Arc,
+};
 
 use super::{token_iter::TokenIter, types::*};
 use crate::{
@@ -82,8 +86,12 @@ impl Parser {
     pub fn new_from_file(file: &Path) -> anyhow::Result<Parser> {
         Ok(Parser::new(tokenize_file(file)?))
     }
-    pub fn new_from_string(buf: &String) -> anyhow::Result<Parser> {
-        Ok(Parser::new(tokenize(buf)))
+    pub fn new_from_string(buf: &String, uri: PathBuf) -> anyhow::Result<Parser> {
+        Ok(Parser::new(tokenize(buf, uri)))
+    }
+
+    pub(crate) fn uri(&self) -> Arc<PathBuf> {
+        self.tokens.underlying().uri.clone()
     }
 
     pub(crate) fn consume_line(&mut self) -> EOFOr<()> {

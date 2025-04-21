@@ -8,10 +8,10 @@ use std::{
 use futures::future::{self};
 use tokio::sync::Mutex;
 
-use super::Linter;
+use super::{File, Linter};
 use crate::{
-    parser::{self, GroupedName},
-    tokenizer::{self},
+    parser::{self, GroupedName, SQLDeclareProcedureStatement, SQLSelectStatement, VariableAccess},
+    tokenizer::{self, Token},
     types::*,
 };
 
@@ -70,36 +70,50 @@ impl Variable {
     }
 }
 
+#[derive(Debug)]
+pub struct SQLCursor {
+    pub definitions: Vec<(Token, SQLSelectStatement)>,
+    pub references: Vec<Token>,
+}
+
+#[derive(Debug)]
+pub struct SQLProcedure {
+    pub definitions: Vec<SQLDeclareProcedureStatement>,
+    pub references: Vec<Token>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EventDefinition {
+    pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
+    pub parsed: parser::Event,
+}
+
 #[derive(Clone, Debug)]
 pub struct Event {
-    pub parsed: parser::Event,
-
     pub returns: parser::DataTypeType,
+
     pub arguments: Vec<Arc<Mutex<Variable>>>,
-    pub declaration: Option<Range>,
-    pub definition: Option<FunctionDefinition>,
+    pub declaration: Option<parser::Event>,
+    pub definition: Option<EventDefinition>,
+
     pub uses: Vec<Range>,
 }
 
 impl Event {
-    pub fn new(
-        parsed: parser::Event,
-        declaration: Option<Range>,
-        definition: Option<FunctionDefinition>,
-    ) -> Self {
+    pub fn get_types(parsed: &parser::Event) -> (parser::DataTypeType, Vec<Variable>) {
         let returns;
         let arguments;
+
         match &parsed.event_type {
             parser::EventType::User(ret, args) => {
                 arguments = args
                     .iter()
                     .map(|arg| {
-                        Mutex::new(Variable {
+                        Variable {
                             variable_type: VariableType::Argument(arg.clone()),
                             data_type: arg.variable.data_type.data_type_type.clone(),
                             // uses: Vec::new(),
-                        })
-                        .into()
+                        }
                     })
                     .collect();
                 returns = ret.clone()
@@ -116,14 +130,49 @@ impl Event {
             }
         }
 
+        return (
+            returns.map_or(parser::DataTypeType::Void, |dt| dt.data_type_type),
+            arguments,
+        );
+    }
+
+    pub fn new_declaration(parsed: parser::Event) -> Self {
+        let (returns, arguments) = Event::get_types(&parsed);
+
         Event {
-            declaration,
-            definition,
+            declaration: Some(parsed),
+            definition: None,
             uses: Vec::new(),
 
-            parsed,
-            returns: returns.map_or(parser::DataTypeType::Void, |dt| dt.data_type_type),
-            arguments,
+            returns,
+            arguments: arguments
+                .into_iter()
+                .map(|var| Mutex::new(var).into())
+                .collect(),
+        }
+    }
+
+    pub fn new_definition(parsed: parser::Event) -> Self {
+        let (returns, arguments) = Event::get_types(&parsed);
+
+        let mut variables = HashMap::new();
+        let mut argument_muts = Vec::new();
+
+        for arg in arguments {
+            let iname = (&arg.parsed().access.name.content).into();
+            let arg_mut = Arc::new(Mutex::new(arg));
+
+            argument_muts.push(arg_mut.clone());
+            variables.insert(iname, arg_mut);
+        }
+
+        Event {
+            declaration: None,
+            definition: Some(EventDefinition { variables, parsed }),
+            uses: Vec::new(),
+
+            returns,
+            arguments: argument_muts,
         }
     }
 
@@ -142,20 +191,29 @@ impl Event {
                 .all(|(self_arg, other_arg)| self_arg.data_type == other_arg.data_type)
         }
     }
+
+    pub fn parsed(&self) -> &parser::Event {
+        if let Some(def) = &self.definition {
+            return &def.parsed;
+        }
+        if let Some(parsed) = &self.declaration {
+            return parsed;
+        }
+        unreachable!()
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct FunctionDefinition {
     pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
-    pub range: Range,
+    pub parsed: parser::Function,
 }
 
 impl FunctionDefinition {
-    pub fn new(args: &Vec<parser::Argument>, range: Range) -> Self {
+    pub fn new(parsed: parser::Function) -> Self {
         FunctionDefinition {
-            range,
-
-            variables: args
+            variables: parsed
+                .arguments
                 .iter()
                 .map(|arg| {
                     (
@@ -169,38 +227,31 @@ impl FunctionDefinition {
                     )
                 })
                 .collect(),
+            parsed,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Function {
-    pub parsed: parser::Function,
-
     pub returns: parser::DataTypeType,
     pub help: Option<String>,
 
-    pub declaration: Option<Range>,
+    pub declaration: Option<parser::Function>,
     pub definition: Option<FunctionDefinition>,
     // pub uses: Vec<Range>,
 }
 
 impl Function {
-    pub fn new(
-        parsed: parser::Function,
-        declaration: Option<Range>,
-        definition: Option<Range>,
-        help: Option<String>,
-    ) -> Self {
+    pub fn new_declaration(parsed: parser::Function, help: Option<String>) -> Self {
         Function {
-            declaration,
-            definition: definition.map(|range| FunctionDefinition::new(&parsed.arguments, range)),
+            returns: (&parsed.returns).into(),
+
+            declaration: Some(parsed),
+            definition: None,
 
             // uses: Vec::new(),
             help,
-
-            returns: (&parsed.returns).into(),
-            parsed,
         }
     }
 
@@ -209,17 +260,27 @@ impl Function {
     }
 
     pub async fn conflicts(&self, other: &Function) -> bool {
-        self.parsed.arguments.len() == other.parsed.arguments.len()
-            && self.parsed.vararg.is_some() == other.parsed.vararg.is_some()
+        self.parsed().arguments.len() == other.parsed().arguments.len()
+            && self.parsed().vararg.is_some() == other.parsed().vararg.is_some()
             && {
-                self.parsed
+                self.parsed()
                     .arguments
                     .iter()
-                    .zip(&other.parsed.arguments)
+                    .zip(&other.parsed().arguments)
                     .all(|(self_arg, other_arg)| {
                         self_arg.variable.data_type == other_arg.variable.data_type
                     })
             }
+    }
+
+    pub fn parsed(&self) -> &parser::Function {
+        if let Some(def) = &self.definition {
+            return &def.parsed;
+        }
+        if let Some(parsed) = &self.declaration {
+            return parsed;
+        }
+        unreachable!()
     }
 }
 
@@ -229,9 +290,9 @@ impl fmt::Display for Function {
             f,
             "{} {}({})",
             &self.returns,
-            &self.parsed.name.content,
+            &self.parsed().name.content,
             &self
-                .parsed
+                .parsed()
                 .arguments
                 .iter()
                 .map(ToString::to_string)
@@ -250,6 +311,8 @@ pub struct Enum {
 
 #[derive(Debug, Clone)]
 pub struct Class {
+    pub parsed: parser::Class,
+
     pub name: String,
     pub base: GroupedName,
     pub within: Option<GroupedName>,
@@ -267,20 +330,19 @@ pub struct Class {
 }
 
 impl Class {
-    pub fn new(
-        name: String,
-        base: GroupedName,
-        within: Option<GroupedName>,
-        is_global: bool,
-    ) -> Class {
+    pub fn new(parsed: parser::Class) -> Class {
         Class {
-            // file,
-            name,
-            base,
-            within,
+            name: parsed.name.data_type_type.to_string(),
+            base: parsed.base.data_type_type.grouped_name(),
+            within: parsed
+                .within
+                .as_ref()
+                .map(|within| within.data_type_type.grouped_name()),
             help: None,
 
-            is_global,
+            is_global: matches!(parsed.scope, Some(tokenizer::ScopeModif::GLOBAL)),
+            parsed,
+
             usage: Usage {
                 declaration: None,
                 definition: None,
@@ -348,7 +410,7 @@ impl Class {
     // }
 
     pub async fn find_conflicting_event(&self, event: &Event) -> Option<Arc<Mutex<Event>>> {
-        if let Some(ev) = self.events.get(&(&event.parsed.name.content).into()) {
+        if let Some(ev) = self.events.get(&(&event.parsed().name.content).into()) {
             ev.lock().await.conflicts(event).await.then_some(ev.clone())
         } else {
             None
@@ -372,7 +434,7 @@ impl Class {
         function: &Function,
     ) -> Option<Arc<Mutex<Function>>> {
         for functions in [&self.functions, &self.external_functions] {
-            if let Some(funcs) = functions.get(&(&function.parsed.name.content).into()) {
+            if let Some(funcs) = functions.get(&(&function.parsed().name.content).into()) {
                 for func in funcs {
                     if func.lock().await.conflicts(function).await {
                         return Some(func.clone());
@@ -858,6 +920,29 @@ impl NodeSearcher for parser::Expression {
     }
 }
 
+fn search_lvalue_sql<'a, T: NodeSearcher>(
+    t: &'a T,
+    pos: &Position,
+    nodes: &mut Vec<Node<'a>>,
+) -> Option<()> {
+    let mut new_nodes = Vec::new();
+    if t.search(pos, &mut new_nodes).is_none() {
+        if new_nodes.iter().any(|node| {
+            matches!(
+                node,
+                Node::LValue(parser::LValue {
+                    lvalue_type: parser::LValueType::SQLAccess(..),
+                    ..
+                })
+            )
+        }) {
+            nodes.extend(new_nodes);
+            return None;
+        }
+    }
+    Some(())
+}
+
 impl NodeSearcher for parser::Statement {
     fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
         if !self.range.contains(pos) {
@@ -884,8 +969,49 @@ impl NodeSearcher for parser::Statement {
             parser::StatementType::Call(..) | // TODO
             parser::StatementType::Exit |
             parser::StatementType::Continue |
-            parser::StatementType::SQL(..) | // TODO
             parser::StatementType::Error => {},
+
+            parser::StatementType::SQL(sql) => {
+                sql.get_transaction().search(pos, nodes)?;
+
+
+                match sql {
+                    parser::SQLStatement::OPEN(token) => {}
+                    parser::SQLStatement::CLOSE(token) => {}
+                    parser::SQLStatement::CONNECT(_) => {}
+                    parser::SQLStatement::DISCONNECT(_) => {}
+                    parser::SQLStatement::COMMIT(_) => { }
+                    parser::SQLStatement::DECLARE_CURSOR(cursor, select) => {
+                        search_lvalue_sql(&select.fields, pos, nodes)?;
+                        search_lvalue_sql(&select.intos, pos, nodes)?;
+                        search_lvalue_sql(&select.clause, pos, nodes)?;
+                    }
+                    parser::SQLStatement::DECLARE_PROCEDURE(decl) => {},
+                    parser::SQLStatement::EXECUTE(procedure) => {},
+                    parser::SQLStatement::FETCH(cursor_or_procedure, intos) => intos.search(pos, nodes)?,
+                    parser::SQLStatement::ROLLBACK(_) => {},
+                    parser::SQLStatement::DELETE(_, criteria, _) => {
+                        search_lvalue_sql(criteria, pos, nodes)?
+                    }
+                    parser::SQLStatement::DELETE_OF_CURSOR(_, cursor) => todo!(),
+                    parser::SQLStatement::INSERT(insert) => {
+                        search_lvalue_sql(&insert.fields, pos, nodes)?;
+                        search_lvalue_sql(&insert.values, pos, nodes)?;
+                    }
+                    parser::SQLStatement::SELECT(select) => {
+                        search_lvalue_sql(&select.fields, pos, nodes)?;
+                        search_lvalue_sql(&select.intos, pos, nodes)?;
+                        search_lvalue_sql(&select.clause, pos, nodes)?;
+                    }
+                    parser::SQLStatement::UPDATE(update) => {
+                        search_lvalue_sql(&update.set, pos, nodes)?;
+                        search_lvalue_sql(&update.clause, pos, nodes)?;
+                    }
+                    parser::SQLStatement::UPDATE_OF_CURSOR(update) => {
+                        search_lvalue_sql(&update.set, pos, nodes)?;
+                    }
+                }
+            }
 
             parser::StatementType::If(if_statement) => {
                 if_statement.condition.search(pos, nodes)?;

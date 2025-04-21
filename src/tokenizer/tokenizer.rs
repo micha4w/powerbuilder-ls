@@ -1,4 +1,6 @@
-use std::{fs::File, io::Read, path::Path, str::FromStr};
+use std::{
+    cell::RefCell, fs::File, io::Read, path::{Path, PathBuf}, str::FromStr, sync::Arc
+};
 
 use anyhow::Result;
 use encoding_rs_io::DecodeReaderBytesBuilder;
@@ -39,6 +41,7 @@ pub struct FileTokenizer {
     chars: MultiPeek<std::vec::IntoIter<char>>,
 
     buildup: String,
+    pub uri: Arc<PathBuf>,
 
     pos: Position,
     next: Option<Token>,
@@ -46,12 +49,15 @@ pub struct FileTokenizer {
 }
 
 impl FileTokenizer {
-    pub fn new(buf: String) -> Self {
+    pub fn new(buf: String, uri: PathBuf) -> Self {
+        let uri = Arc::new(uri);
         Self {
             chars: multipeek(buf.chars().collect::<Vec<_>>().into_iter()),
             buildup: String::new(),
             pos: Position { line: 0, column: 0 },
             next: None,
+            uri,
+
             previous: Token {
                 token_type: TokenType::INVALID,
                 content: String::new(),
@@ -67,7 +73,7 @@ impl FileTokenizer {
         let mut buf = String::new();
         reader.read_to_string(&mut buf)?;
 
-        Ok(Self::new(buf))
+        Ok(Self::new(buf, path.into()))
     }
 
     pub fn skip_headers(&mut self) -> Option<()> {
@@ -434,6 +440,7 @@ impl FileTokenizer {
             range: Range {
                 start: start_pos,
                 end: self.pos,
+                uri: self.uri.clone(),
             },
             error: error.map(str::to_owned),
         })

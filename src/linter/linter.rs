@@ -385,7 +385,7 @@ impl<'a> Linter<'a> {
                             let is_accessible = func_mut
                                 .lock()
                                 .await
-                                .parsed
+                                .parsed()
                                 .access
                                 .map_or(0, |acc| acc.strictness())
                                 <= strictness;
@@ -630,14 +630,14 @@ impl<'a> Linter<'a> {
     ) -> bool {
         min_access.strictness()
             >= func
-                .parsed
+                .parsed()
                 .access
                 .map(|access| access.strictness())
                 .unwrap_or(0)
-            && (func.parsed.arguments.len() == arguments.len()
-                || (func.parsed.arguments.len() < arguments.len() && func.parsed.vararg.is_some()))
+            && (func.parsed().arguments.len() == arguments.len()
+                || (func.parsed().arguments.len() < arguments.len() && func.parsed().vararg.is_some()))
             && future::join_all(
-                func.parsed
+                func.parsed()
                     .arguments
                     .iter()
                     .map(|arg| &arg.variable.data_type.data_type_type)

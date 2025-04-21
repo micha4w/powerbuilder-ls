@@ -33,10 +33,7 @@ impl Parser {
                         Some(group.content),
                         name.content,
                     )),
-                    range: Range {
-                        start: group.range.start,
-                        end: name.range.end,
-                    },
+                    range: group.range.merged(&name.range),
                 },
                 err,
             ));
@@ -54,7 +51,7 @@ impl Parser {
                                 Err(err) => {
                                     self.error(
                                         &format!("Integer Parse Error: {}", err),
-                                        prec.range,
+                                        prec.range.clone(),
                                     );
                                     None
                                 }
@@ -81,10 +78,7 @@ impl Parser {
 
             return Some(Ok(DataType {
                 data_type_type: DataTypeType::Decimal(precision),
-                range: Range {
-                    start: name.range.start,
-                    end,
-                },
+                range: name.range.expanded(&end),
             }));
         }
 
@@ -129,14 +123,13 @@ impl Parser {
         loop {
             match self.tokens.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
-                    while self.tokens.peek()?.token_type == TokenType::Symbol(tokenizer::Symbol::COMMA) {
-                        range.end = self.tokens.next()?.range.end;
+                    while self.tokens.peek()?.token_type
+                        == TokenType::Symbol(tokenizer::Symbol::COMMA)
+                    {
+                        range.merge(&self.tokens.next()?.range);
                         expressions.push(Expression {
                             expression_type: ExpressionType::Error,
-                            range: Range {
-                                start: range.end,
-                                end: range.end,
-                            },
+                            range: range.clone(),
                         })
                     }
                 }
@@ -295,7 +288,7 @@ impl Parser {
             )
             | TokenType::IncrDecrOperator(_) => {
                 let range = self.tokens.peek()?.range;
-                self.error(&"Unexpected Token for Expression".into(), range);
+                self.error(&"Unexpected Token for Expression".into(), range.clone());
                 end = range.end;
                 ExpressionType::Error
             }
@@ -312,7 +305,7 @@ impl Parser {
 
         let mut expression = Expression {
             expression_type,
-            range: Range { start, end },
+            range: Range::new(start, end, self.uri()),
         };
         if let Some(err) = err {
             return Some(Err((err, Some(expression))));
@@ -323,10 +316,7 @@ impl Parser {
                 let token = self.tokens.next()?;
 
                 expression = Expression {
-                    range: Range {
-                        start: expression.range.start,
-                        end: token.range.end,
-                    },
+                    range: expression.range.clone().merged(&token.range),
                     expression_type: ExpressionType::IncrementDecrement(
                         Box::new(expression),
                         operator,
@@ -340,21 +330,16 @@ impl Parser {
             self.tokens.next()?;
             let right_side = quick_exit!(self.parse_expression(is_sql)?, err);
 
+            let range = expression.range.clone().merged(&right_side.range);
             expression = match right_side.expression_type {
                 ExpressionType::Operation(sub_left, sub_operator, sub_right)
                     if operator.precedence() > sub_operator.precedence() =>
                 {
                     Expression {
-                        range: Range {
-                            start: expression.range.start,
-                            end: right_side.range.end,
-                        },
+                        range: range.clone(),
                         expression_type: ExpressionType::Operation(
                             Box::new(Expression {
-                                range: Range {
-                                    start: expression.range.start,
-                                    end: right_side.range.end,
-                                },
+                                range,
                                 expression_type: ExpressionType::Operation(
                                     Box::new(expression),
                                     operator,
@@ -367,10 +352,7 @@ impl Parser {
                     }
                 }
                 _ => Expression {
-                    range: Range {
-                        start: expression.range.start,
-                        end: right_side.range.end,
-                    },
+                    range,
                     expression_type: ExpressionType::Operation(
                         Box::new(expression),
                         operator,
@@ -403,9 +385,8 @@ impl Parser {
         let mut previous = match keyword {
             Some(kw) => Some({
                 let token = self.tokens.next()?;
-                let range = token.range;
-
                 LValue {
+                    range: token.range.clone(),
                     lvalue_type: if is_sql && colon.is_none() {
                         LValueType::Variable(VariableAccess {
                             name: token,
@@ -419,7 +400,6 @@ impl Parser {
                             _ => unreachable!(),
                         }
                     },
-                    range,
                 }
             }),
             None => None,
@@ -468,18 +448,15 @@ impl Parser {
                             Err((err, res)) => {
                                 let (end, exp) = res.unzip();
                                 let lvalue = LValue {
-                                    range: Range {
-                                        start: prev.range.start,
-                                        end: end.unwrap_or(lbrace.range.end),
-                                    },
+                                    range: prev
+                                        .range
+                                        .clone()
+                                        .expanded(&end.unwrap_or(lbrace.range.end)),
                                     lvalue_type: LValueType::Index(
                                         Box::new(previous.take().unwrap()),
                                         Box::new(exp.unwrap_or(Expression {
                                             expression_type: ExpressionType::Error,
-                                            range: Range {
-                                                start: lbrace.range.end,
-                                                end: lbrace.range.end,
-                                            },
+                                            range: Range::new_point(lbrace.range.end, self.uri()),
                                         })),
                                     ),
                                 };
@@ -489,10 +466,7 @@ impl Parser {
                         };
 
                         previous = Some(LValue {
-                            range: Range {
-                                start: prev.range.start,
-                                end: expression.range.end,
-                            },
+                            range: prev.range.clone().merged(&expression.range),
                             lvalue_type: LValueType::Index(
                                 Box::new(previous.take().unwrap()),
                                 Box::new(expression),
@@ -507,7 +481,10 @@ impl Parser {
                 None => {}
             }
 
-            match (self.tokens.peek()?.token_type, self.tokens.peek_nth(1)?.token_type) {
+            match (
+                self.tokens.peek()?.token_type,
+                self.tokens.peek_nth(1)?.token_type,
+            ) {
                 (
                     TokenType::Keyword(tokenizer::Keyword::STATIC)
                     | TokenType::Keyword(tokenizer::Keyword::DYNAMIC)
@@ -547,26 +524,32 @@ impl Parser {
                     if !dynamics.is_empty() && !statics.is_empty() {
                         self.error(
                             &"Mixing DYNAMIC and STATIC is not allowed".into(),
-                            name.range,
+                            name.range.clone(),
                         );
                     }
                     for dynamic in dynamics.iter().skip(1) {
                         self.error(
                             &"Cannot have multiple DYNAMIC keywords".into(),
-                            dynamic.range,
+                            dynamic.range.clone(),
                         );
                     }
                     for r#static in statics.iter().skip(1) {
                         self.error(
                             &"Cannot have multiple STATIC keywords".into(),
-                            r#static.range,
+                            r#static.range.clone(),
                         );
                     }
                     for post in posts.iter().skip(1) {
-                        self.error(&"Cannot have multiple POST keywords".into(), post.range);
+                        self.error(
+                            &"Cannot have multiple POST keywords".into(),
+                            post.range.clone(),
+                        );
                     }
                     for event in events.iter().skip(1) {
-                        self.error(&"Cannot have multiple EVENT keywords".into(), event.range);
+                        self.error(
+                            &"Cannot have multiple EVENT keywords".into(),
+                            event.range.clone(),
+                        );
                     }
 
                     if let Some(LValueType::Super) =
@@ -575,7 +558,7 @@ impl Parser {
                         if let Some(dynamic) = dynamics.get(0) {
                             self.error(
                                 &"'SUPER::' calls do not support DYNAMIC".into(),
-                                dynamic.range,
+                                dynamic.range.clone(),
                             );
                         }
                     }
@@ -587,13 +570,11 @@ impl Parser {
                             TokenType::Symbol(tokenizer::Symbol::RPAREN),
                         )?
                         .split();
-                    let (arguments, range) = res.unwrap_or((Vec::new(), name.range.end.into()));
+                    let (arguments, range) =
+                        res.unwrap_or((Vec::new(), Range::new_point(name.range.end, self.uri())));
 
                     let func = FunctionCall {
-                        range: Range {
-                            start: name.range.start,
-                            end: range.end,
-                        },
+                        range: name.range.clone().merged(&range),
                         name,
                         arguments,
                         dynamic: dynamics.into_iter().next(),
@@ -603,14 +584,11 @@ impl Parser {
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
-                            range: Range {
-                                start: prev.range.start,
-                                end: range.end,
-                            },
+                            range: prev.range.clone().merged(&range),
                             lvalue_type: LValueType::Method(Box::new(prev), func),
                         }),
                         None => Some(LValue {
-                            range: func.range,
+                            range: func.range.clone(),
                             lvalue_type: LValueType::Function(func),
                         }),
                     };
@@ -627,11 +605,11 @@ impl Parser {
 
                     previous = match previous {
                         Some(prev) => Some(LValue {
-                            range: Range::merge(&prev.range, &var.name.range),
+                            range: prev.range.clone().merged(&var.name.range),
                             lvalue_type: LValueType::Member(Box::new(prev), var),
                         }),
                         None => Some(LValue {
-                            range: var.name.range,
+                            range: var.name.range.clone(),
                             lvalue_type: LValueType::Variable(var),
                         }),
                     };
@@ -651,16 +629,17 @@ impl Parser {
         Some(match previous {
             Some(prev) => Ok(match colon {
                 Some(colon) => LValue {
-                    range: Range::merge(&colon.range, &prev.range),
+                    range: colon.range.clone().merged(&prev.range),
                     lvalue_type: LValueType::SQLAccess(colon, Box::new(prev)),
                 },
                 None => prev,
             }),
             None => {
-                let range = self.tokens.peek()?.range.start.into();
+                let range = Range::new_point(self.tokens.peek()?.range.start, self.uri());
                 Err((
                     ParseError::UnexpectedToken,
                     Some(LValue {
+                        range: range.clone(),
                         lvalue_type: LValueType::Variable(VariableAccess {
                             name: Token {
                                 token_type: TokenType::INVALID,
@@ -670,7 +649,6 @@ impl Parser {
                             },
                             is_write: false,
                         }),
-                        range,
                     }),
                 ))
             }

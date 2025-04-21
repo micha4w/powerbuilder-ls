@@ -18,6 +18,7 @@ impl Parser {
             range: Range {
                 start: throw.range.start,
                 end: expression.range.end,
+                uri: self.uri(),
             },
             statement_type: StatementType::Throw(expression),
         }))
@@ -40,6 +41,7 @@ impl Parser {
             range: Range {
                 start: ret.range.start,
                 end: value.as_ref().map_or(ret.range.end, |val| val.range.end),
+                uri: self.uri(),
             },
             statement_type: StatementType::Return(value),
         }))
@@ -57,6 +59,7 @@ impl Parser {
             range: Range {
                 start: destroy.range.start,
                 end: expression.range.end,
+                uri: self.uri(),
             },
             statement_type: StatementType::Destroy(expression),
         }))
@@ -216,10 +219,7 @@ impl Parser {
             }
 
             data_type = DataType {
-                range: Range {
-                    start: data_type.range.start,
-                    end,
-                },
+                range: data_type.range.expanded(&end),
                 data_type_type: DataTypeType::Array(Box::new(data_type.data_type_type)),
             }
         }
@@ -248,7 +248,11 @@ impl Parser {
                 statement_type: StatementType::Declaration(InstanceVariable {
                     access,
                     variable: Variable {
-                        range: Range { start: var_start, end },
+                        range: Range {
+                            start: var_start,
+                            end,
+                            uri: self.uri(),
+                        },
                         data_type,
                         access: VariableAccess {
                             name,
@@ -258,7 +262,11 @@ impl Parser {
                         initial_value: expression,
                     },
                 }),
-                range: Range { start, end },
+                range: Range {
+                    start,
+                    end,
+                    uri: self.uri(),
+                },
             },
             err,
         ))
@@ -286,7 +294,7 @@ impl Parser {
                                     Some(right) => right,
                                     None => {
                                         return Some(Some(Statement {
-                                            range: expression.range,
+                                            range: expression.range.clone(),
                                             statement_type: StatementType::Expression(expression),
                                         }))
                                     }
@@ -308,10 +316,7 @@ impl Parser {
                     self.expect(TokenType::NEWLINE)?.ok();
                     match left.expression_type {
                         ExpressionType::LValue(lvalue) => Some(Some(Statement {
-                            range: Range {
-                                start: left.range.start,
-                                end: right.range.end,
-                            },
+                            range: left.range.merged(&right.range),
                             statement_type: StatementType::Assignment(lvalue, operator, right),
                         })),
                         _ => Some(None),
@@ -320,7 +325,7 @@ impl Parser {
                 (expression, _) => {
                     self.expect(TokenType::NEWLINE)?.ok();
                     Some(Some(Statement {
-                        range: expression.range,
+                        range: expression.range.clone(),
                         statement_type: StatementType::Expression(expression),
                     }))
                 }
@@ -371,7 +376,7 @@ impl Parser {
                 (
                     Expression {
                         expression_type: ExpressionType::Error,
-                        range: Range { start: end, end },
+                        range: Range::new_point(end, self.uri()),
                     },
                     err,
                 )
@@ -442,7 +447,7 @@ impl Parser {
                                     }
                                     (None, _) => Expression {
                                         expression_type: ExpressionType::Error,
-                                        range: Range { start: end, end },
+                                        range: Range::new_point(end, self.uri()),
                                     },
                                 };
 
@@ -467,10 +472,7 @@ impl Parser {
                 }
 
                 Some(Some(Statement {
-                    range: Range {
-                        start: if_token.range.start,
-                        end,
-                    },
+                    range: if_token.range.expanded(&end),
                     statement_type: StatementType::If(ifs),
                 }))
             }
@@ -478,13 +480,10 @@ impl Parser {
                 let statement = self.parse_statement()?;
 
                 Some(Some(Statement {
-                    range: Range {
-                        start: if_token.range.start,
-                        end: match &statement {
-                            Some(statement) => statement.range.end,
-                            None => end,
-                        },
-                    },
+                    range: if_token.range.expanded(match &statement {
+                        Some(statement) => &statement.range.end,
+                        None => &end,
+                    }),
                     statement_type: StatementType::If(IfStatement {
                         condition,
                         statements: statement.into_iter().collect(),
@@ -532,10 +531,7 @@ impl Parser {
         }
 
         Some(Some(Statement {
-            range: Range {
-                start: for_token.range.start,
-                end,
-            },
+            range: for_token.range.expanded(&end),
             statement_type: StatementType::ForLoop(ForLoopStatement {
                 statements,
                 start,
@@ -619,15 +615,12 @@ impl Parser {
             }
             None => Expression {
                 expression_type: ExpressionType::Error,
-                range: Range { start: end, end },
+                range: Range::new_point(end, self.uri()),
             },
         };
 
         Some(Some(Statement {
-            range: Range {
-                start: do_token.range.start,
-                end,
-            },
+            range: do_token.range.expanded(&end),
             statement_type: StatementType::WhileLoop(WhileLoopStatement {
                 condition,
                 is_inversed,
@@ -716,10 +709,7 @@ impl Parser {
 
                 match var {
                     Some((data_type, name)) => {
-                        let range = Range {
-                            start: data_type.range.start,
-                            end: name.range.end,
-                        };
+                        let range = data_type.range.clone().merged(&name.range);
                         catches.push((
                             Statement {
                                 statement_type: StatementType::Declaration(InstanceVariable {
@@ -728,7 +718,7 @@ impl Parser {
                                         write: None,
                                     },
                                     variable: Variable {
-                                        range,
+                                        range: range.clone(),
                                         constant: false,
                                         data_type,
                                         access: VariableAccess {
@@ -800,6 +790,7 @@ impl Parser {
             range: Range {
                 start: try_token.range.start,
                 end,
+                uri: self.uri(),
             },
             statement_type: StatementType::TryCatch(TryCatchStatement {
                 statements: try_statements,
@@ -885,6 +876,7 @@ impl Parser {
                         };
 
                         CaseSpecifier {
+                            range: is.range.merged(&literal.range),
                             specifier_type: CaseSpecifierType::Is(
                                 operator,
                                 Literal {
@@ -893,10 +885,6 @@ impl Parser {
                                     range: literal.range,
                                 },
                             ),
-                            range: Range {
-                                start: is.range.start,
-                                end: literal.range.end,
-                            },
                         }
                     }
                     TokenType::Literal(literal) => {
@@ -915,6 +903,7 @@ impl Parser {
                                 };
 
                                 CaseSpecifier {
+                                    range: token.range.clone().merged(&up_to_token.range),
                                     specifier_type: CaseSpecifierType::To(
                                         Literal {
                                             literal_type: literal,
@@ -927,19 +916,15 @@ impl Parser {
                                             range: up_to_token.range,
                                         },
                                     ),
-                                    range: Range {
-                                        start: token.range.start,
-                                        end: up_to_token.range.end,
-                                    },
                                 }
                             }
                             _ => CaseSpecifier {
+                                range: token.range.clone(),
                                 specifier_type: CaseSpecifierType::Literals(Literal {
                                     literal_type: literal,
                                     content: token.content,
                                     range: token.range,
                                 }),
-                                range: token.range,
                             },
                         }
                     }
@@ -1021,6 +1006,7 @@ impl Parser {
             range: Range {
                 start: choose_token.range.start,
                 end,
+                uri: self.uri(),
             },
             statement_type: StatementType::Choose(ChooseCaseStatement { choose, cases }),
         }))
@@ -1061,7 +1047,7 @@ impl Parser {
         let function = match lvalue.lvalue_type {
             LValueType::Function(function) => function,
             LValueType::Variable(function_name) => FunctionCall {
-                range: function_name.name.range,
+                range: function_name.name.range.clone(),
                 name: function_name.name,
                 arguments: vec![],
                 dynamic: None,
@@ -1080,6 +1066,7 @@ impl Parser {
             range: Range {
                 start: call_token.range.start,
                 end: function.range.end,
+                uri: self.uri(),
             },
             statement_type: StatementType::Call(CallStatement {
                 call_type,

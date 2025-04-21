@@ -21,6 +21,9 @@ pub struct File {
     // Shared and Global variables
     pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
 
+    pub sql_cursors: HashMap<IString, Arc<Mutex<SQLCursor>>>,
+    pub sql_procedures: HashMap<IString, Arc<Mutex<SQLProcedure>>>,
+
     pub diagnostics: Vec<parser::Diagnostic>,
 
     pub top_levels: ProgressedTopLevels,
@@ -34,6 +37,9 @@ impl File {
         Ok(File {
             classes: HashMap::new(),
             variables: HashMap::new(),
+
+            sql_cursors: HashMap::new(),
+            sql_procedures: HashMap::new(),
 
             top_levels: ProgressedTopLevels::None(file.parse_tokens()),
             diagnostics: file.get_syntax_errors(),
@@ -118,7 +124,7 @@ impl Project {
     fn parse_type(mut name: String) -> anyhow::Result<parser::DataType> {
         name += "\n";
 
-        let mut parser = Parser::new_from_string(&(name + "\n"))?;
+        let mut parser = Parser::new_from_string(&(name + "\n"), "builtins.pb".into())?;
         if let Some(Ok(dt) | Err((_, Some(dt)))) = parser.parse_type() {
             return Ok(dt);
         }
@@ -227,12 +233,22 @@ impl Project {
                 }) {
                 Some(_) => {
                     let iname = (&class.name).into();
-                    let new_class_mut = Arc::new(Mutex::new(Class::new(
-                        class.name,
-                        GroupedName::new(None, class.base),
-                        None,
-                        true,
-                    )));
+                    let new_class_mut = Arc::new(Mutex::new(Class::new(parser::Class {
+                        scope: None,
+                        name: parser::DataType {
+                            data_type_type: parser::DataTypeType::Complex(GroupedName::simple(
+                                class.name,
+                            )),
+                            range: Range::default(),
+                        },
+                        base: parser::DataType {
+                            data_type_type: parser::DataTypeType::Complex(GroupedName::simple(
+                                class.base,
+                            )),
+                            range: Range::default(),
+                        },
+                        within: None,
+                    })));
                     {
                         let mut new_class = new_class_mut.lock().await;
                         new_class.help = class.help;
@@ -280,7 +296,7 @@ impl Project {
                             let iname = (&func.name).into();
                             let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
 
-                            let new_func = Mutex::new(Function::new(
+                            let new_func = Mutex::new(Function::new_declaration(
                                 parser::Function {
                                     returns,
                                     scope_modif: None,
@@ -300,8 +316,6 @@ impl Project {
                                     }),
                                     range: Default::default(),
                                 },
-                                None,
-                                None,
                                 help,
                             ))
                             .into();
@@ -323,7 +337,7 @@ impl Project {
                             }
                             new_class.events.insert(
                                 (&name).into(),
-                                Mutex::new(Event::new(
+                                Mutex::new(Event::new_declaration(
                                     parser::Event {
                                         name: Token {
                                             token_type: TokenType::ID,
@@ -334,8 +348,6 @@ impl Project {
                                         range: Default::default(),
                                         event_type: parser::EventType::User(returns, arguments),
                                     },
-                                    None,
-                                    None,
                                 ))
                                 .into(),
                             );
@@ -361,7 +373,7 @@ impl Project {
             let iname = (&func.name).into();
             let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
 
-            let new_func = Mutex::new(Function::new(
+            let new_func = Mutex::new(Function::new_declaration(
                 parser::Function {
                     returns,
                     scope_modif: None,
@@ -381,8 +393,6 @@ impl Project {
                     }),
                     range: Default::default(),
                 },
-                None,
-                None,
                 help,
             ))
             .into();
@@ -398,7 +408,11 @@ impl Project {
         Ok(())
     }
 
-    pub fn get_node_at<'a>(&'a self, file: &'a File, pos: &Position) -> Option<(&'a TopLevelType<LintProgressComplete>, Vec<Node<'a>>)> {
+    pub fn get_node_at<'a>(
+        &'a self,
+        file: &'a File,
+        pos: &Position,
+    ) -> Option<(&'a TopLevelType<LintProgressComplete>, Vec<Node<'a>>)> {
         let top_levels = match &file.top_levels {
             ProgressedTopLevels::Complete(top_levels) => top_levels,
             _ => return None,

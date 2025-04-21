@@ -411,16 +411,6 @@ pub struct Event {
     pub range: Range,
 }
 
-impl Event {
-    pub fn get_arguments(&self) -> Option<&Vec<Argument>> {
-        match &self.event_type {
-            EventType::User(_, args) => Some(&args),
-            EventType::Predefined => None,
-            EventType::System(_) => None,
-        }
-    }
-}
-
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "event ")?;
@@ -584,7 +574,7 @@ impl LValue {
             LValueType::SQLAccess(_, lvalue) => lvalue.set_write(),
             _ => Some((
                 "Can only assign to LValue of type Variable or Member".into(),
-                self.range,
+                self.range.clone(),
             )),
         }
     }
@@ -648,7 +638,6 @@ pub struct Expression {
 }
 
 impl Expression {
-
     // pub fn is_consteval()
 
     // TODO cache type??
@@ -702,7 +691,7 @@ impl Expression {
     pub fn set_write(&mut self) -> Option<(String, Range)> {
         match self.expression_type {
             ExpressionType::LValue(ref mut lvalue) => lvalue.set_write(),
-            _ => Some(("Cannot assign to non-LValue".into(), self.range)),
+            _ => Some(("Cannot assign to non-LValue".into(), self.range.clone())),
         }
     }
 }
@@ -778,17 +767,17 @@ pub struct CallStatement {
     pub function: FunctionCall,
 }
 
-pub type UsingTranscation = Option<Token>;
+pub type UsingTranscation = Option<VariableAccess>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SQLDeclareProcedureStatement {
     pub procedure_name: Token,
     pub stored_procedure_name: Token,
     pub params: Vec<(Token, Expression)>,
-    pub transaction: Option<Token>,
+    pub transaction: UsingTranscation,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SQLSelectStatement {
     pub is_blob: bool,
     pub fields: Vec<Expression>,
@@ -811,7 +800,16 @@ pub struct SQLUpdateStatement {
     pub is_blob: bool,
     pub table: Token,
     pub set: Expression,
-    pub clause: EitherOr<(Expression, UsingTranscation), Token>,
+    pub clause: Expression,
+    pub transaction: UsingTranscation,
+}
+
+#[derive(Debug)]
+pub struct SQLUpdateCursorStatement {
+    pub is_blob: bool,
+    pub table: Token,
+    pub set: Expression,
+    pub cursor: Token,
 }
 
 #[derive(Debug)]
@@ -833,6 +831,31 @@ pub enum SQLStatement {
     INSERT(SQLInsertStatement),
     SELECT(SQLSelectStatement),
     UPDATE(SQLUpdateStatement),
+    UPDATE_OF_CURSOR(SQLUpdateCursorStatement),
+}
+
+impl SQLStatement {
+    pub fn get_transaction(&self) -> &UsingTranscation {
+        match self {
+            SQLStatement::CONNECT(trans) => trans,
+            SQLStatement::DISCONNECT(trans) => trans,
+            SQLStatement::COMMIT(trans) => trans,
+            SQLStatement::DECLARE_CURSOR(_, select) => &select.transaction,
+            SQLStatement::DECLARE_PROCEDURE(decl) => &decl.transaction,
+            SQLStatement::ROLLBACK(trans) => trans,
+            SQLStatement::DELETE(_, _, trans) => trans,
+            SQLStatement::INSERT(insert) => &insert.transaction,
+            SQLStatement::SELECT(select) => &select.transaction,
+            SQLStatement::UPDATE(update) => &update.transaction,
+
+            SQLStatement::OPEN(_)
+            | SQLStatement::CLOSE(_)
+            | SQLStatement::EXECUTE(_)
+            | SQLStatement::FETCH(..)
+            | SQLStatement::DELETE_OF_CURSOR(..)
+            | SQLStatement::UPDATE_OF_CURSOR(_) => &None,
+        }
+    }
 }
 
 #[derive(Debug)]

@@ -16,47 +16,43 @@ use crate::{
 
 impl<'a> Linter<'a> {
     async fn lint_datatype_decl(&mut self, decl: &parser::DatatypeDecl) -> Arc<Mutex<Class>> {
-        let within = match &decl.class.within {
-            Some(within) => {
-                match &within.data_type_type {
-                    parser::DataTypeType::Complex(within_name) => {
-                        if self.find_class(&within_name).await.is_none() {
-                            self.diagnostic_error("Parent Class not found".into(), within.range);
-                        }
-                    }
-                    _ => {
+        if let Some(within) = &decl.class.within {
+            match &within.data_type_type {
+                parser::DataTypeType::Complex(within_name) => {
+                    if self.find_class(&within_name).await.is_none() {
                         self.diagnostic_error(
-                            "Parent Class has to be a Complex Type".into(),
-                            within.range,
+                            "Parent Class not found".into(),
+                            within.range.clone(),
                         );
                     }
                 }
-
-                Some(within.data_type_type.grouped_name())
+                _ => {
+                    self.diagnostic_error(
+                        "Parent Class has to be a Complex Type".into(),
+                        within.range.clone(),
+                    );
+                }
             }
-            None => None,
         };
 
         match &decl.class.base.data_type_type {
             parser::DataTypeType::Complex(base_name) => {
                 if self.find_class(&base_name).await.is_none() {
-                    self.diagnostic_error("Base Class not found".into(), decl.class.base.range);
+                    self.diagnostic_error(
+                        "Base Class not found".into(),
+                        decl.class.base.range.clone(),
+                    );
                 }
             }
             _ => {
                 self.diagnostic_error(
                     "Base Class has to be a Complex Type".into(),
-                    decl.class.base.range,
+                    decl.class.base.range.clone(),
                 );
             }
         }
 
-        let new_class_mut = Arc::new(Mutex::new(Class::new(
-            decl.class.name.data_type_type.to_string(),
-            decl.class.base.data_type_type.grouped_name(),
-            within,
-            matches!(decl.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
-        )));
+        let new_class_mut = Arc::new(Mutex::new(Class::new(decl.class.clone())));
 
         {
             let mut new_class = new_class_mut.lock().await;
@@ -79,7 +75,7 @@ impl<'a> Linter<'a> {
             for event in &decl.events {
                 new_class.events.insert(
                     (&event.name.content).into(),
-                    Mutex::new(Event::new(event.clone(), Some(event.range), None)).into(),
+                    Mutex::new(Event::new_declaration(event.clone())).into(),
                 );
             }
         }
@@ -108,17 +104,8 @@ impl<'a> Linter<'a> {
                     let mut classes = HashMap::new();
 
                     for datatype in &types {
-                        let mut new_class = Class::new(
-                            datatype.class.name.data_type_type.to_string(),
-                            datatype.class.base.data_type_type.grouped_name(),
-                            datatype
-                                .class
-                                .within
-                                .as_ref()
-                                .map(|within| within.data_type_type.grouped_name()),
-                            matches!(datatype.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
-                        );
-                        new_class.usage.declaration = Some(datatype.range);
+                        let mut new_class = Class::new(datatype.class.clone());
+                        new_class.usage.declaration = Some(datatype.range.clone());
 
                         classes.insert(
                             (&datatype.class.name.data_type_type.to_string()).into(),
@@ -135,7 +122,8 @@ impl<'a> Linter<'a> {
                             data_type: var.variable.data_type.data_type_type.clone(),
                             variable_type: VariableType::Scoped(var.clone()),
                         }));
-                        new_vars.insert((&var.variable.access.name.content).into(), new_var.clone());
+                        new_vars
+                            .insert((&var.variable.access.name.content).into(), new_var.clone());
                     }
 
                     self.file.unwrap_mut().variables.extend(new_vars.clone());
@@ -191,27 +179,30 @@ impl<'a> Linter<'a> {
             match class.find_conflicting_function(&new_func).await {
                 Some(func) => {
                     let mut func = func.lock().await;
-                    if func.returns != (&new_func.parsed.returns).into() {
+                    if func.returns != (&new_func.parsed().returns).into() {
                         linter.diagnostic_error(
                             "Same function with different return type already exists".into(),
-                            new_func.parsed.range,
+                            new_func.parsed().range.clone(),
                         );
-                        if let Some(declaration) = func.declaration {
+                        if let Some(declaration) = &func.declaration {
                             linter.diagnostic_hint(
                                 "Function with different return type declared here".into(),
-                                declaration,
+                                declaration.range.clone(),
                             );
                         }
                     }
 
-                    if let Some(declaration) = func.declaration {
+                    if let Some(declaration) = &func.declaration {
                         linter.diagnostic_error(
                             "Function already forward declared".into(),
-                            new_func.parsed.range,
+                            new_func.parsed().range.clone(),
                         );
-                        linter.diagnostic_hint("Already forward declared here".into(), declaration);
+                        linter.diagnostic_hint(
+                            "Already forward declared here".into(),
+                            declaration.range.clone(),
+                        );
                     } else {
-                        func.declaration = Some(new_func.parsed.range);
+                        func.declaration = new_func.declaration.clone();
                     }
                 }
                 None => {
@@ -221,7 +212,7 @@ impl<'a> Linter<'a> {
                         &mut class.functions
                     };
 
-                    let iname = IString::from(&new_func.parsed.name.content);
+                    let iname = IString::from(&new_func.parsed().name.content);
                     match functions.get_mut(&iname) {
                         Some(funcs) => funcs.push(function_mut.clone()),
                         None => {
@@ -248,13 +239,16 @@ impl<'a> Linter<'a> {
 
                         self.class = Some(class_arc.clone());
                         let mut class = class_arc.lock().await;
-                        match class.usage.definition {
+                        match &class.usage.definition {
                             Some(def) => {
                                 self.diagnostic_error(
                                     "Type already defined".into(),
-                                    datatype.range,
+                                    datatype.range.clone(),
                                 );
-                                self.diagnostic_hint("Type already defined here".into(), def);
+                                self.diagnostic_hint(
+                                    "Type already defined here".into(),
+                                    def.clone(),
+                                );
                             }
                             None => {
                                 class.usage.definition = new_class.usage.definition;
@@ -295,7 +289,7 @@ impl<'a> Linter<'a> {
                                     "Global Classes should be ".to_owned()
                                         + "Forward Declared, otherwise they "
                                         + "might not be seen by other Files",
-                                    datatype.range,
+                                    datatype.range.clone(),
                                 );
                             }
                             self.class = Some(new_class_mut.clone());
@@ -321,7 +315,7 @@ impl<'a> Linter<'a> {
                             if self.find_class(&name).await.is_none() {
                                 self.diagnostic_error(
                                     "Class not found".into(),
-                                    var.variable.data_type.range,
+                                    var.variable.data_type.range.clone(),
                                 );
                             }
                         }
@@ -359,10 +353,8 @@ impl<'a> Linter<'a> {
                 for function in &functions {
                     new_functions.insert(
                         (&function.name.content).into(),
-                        Arc::new(Mutex::new(Function::new(
+                        Arc::new(Mutex::new(Function::new_declaration(
                             function.clone(),
-                            Some(function.range),
-                            None,
                             None,
                         ))),
                     );
@@ -384,10 +376,8 @@ impl<'a> Linter<'a> {
                 for function in &functions {
                     new_functions.insert(
                         (&function.name.content).into(),
-                        Arc::new(Mutex::new(Function::new(
+                        Arc::new(Mutex::new(Function::new_declaration(
                             function.clone(),
-                            Some(function.range),
-                            None,
                             None,
                         ))),
                     );
@@ -423,16 +413,20 @@ impl<'a> Linter<'a> {
                 TopLevelType::DatatypeDecl((class_decl, class))
             }
             TopLevelType::FunctionBody((function, statements)) => {
-                let mut new_func = Function::new(function.clone(), None, None, None);
-                let mut definition = FunctionDefinition::new(&function.arguments, function.range);
+                let mut definition = FunctionDefinition::new(function.clone());
 
                 swap(&mut self.variables, &mut definition.variables);
-                self.return_type = new_func.returns.clone();
+                self.return_type = (&function.returns).into();
 
                 self.lint_statements(&statements).await;
-
                 swap(&mut self.variables, &mut definition.variables);
-                new_func.definition = Some(definition);
+
+                let mut new_func = Function {
+                    returns: self.return_type.clone(),
+                    help: None,
+                    declaration: None,
+                    definition: Some(definition),
+                };
 
                 let new_function = match self.require_class("Function Bodies".into(), range.clone())
                 {
@@ -445,13 +439,13 @@ impl<'a> Linter<'a> {
                                 if let Some(definition) = &existing.definition {
                                     self.diagnostic_error(
                                         "Function already defined".into(),
-                                        function.range,
+                                        function.range.clone(),
                                     );
                                     self.diagnostic_hint(
                                         "Already defined here".into(),
-                                        definition.range,
+                                        definition.parsed.range.clone(),
                                     );
-                                    new_func.declaration = existing.declaration;
+                                    new_func.declaration = existing.declaration.clone();
                                     None
                                 } else {
                                     existing.definition = new_func.definition.take();
@@ -461,14 +455,14 @@ impl<'a> Linter<'a> {
                             None => {
                                 self.diagnostic_error(
                                     "Function is missing a Forward Declaration".into(),
-                                    function.range,
+                                    function.range.clone(),
                                 );
                                 None
                             }
                         };
 
                         new_func_mut.unwrap_or_else(|| {
-                            let iname = IString::from(&new_func.parsed.name.content);
+                            let iname = IString::from(&new_func.parsed().name.content);
                             let new_func_mut = Arc::new(Mutex::new(new_func));
                             match class.functions.get_mut(&iname) {
                                 Some(funcs) => funcs.push(new_func_mut.clone()),
@@ -486,18 +480,14 @@ impl<'a> Linter<'a> {
                 ))
             }
             TopLevelType::EventBody((event, statements)) => {
-                let mut new_event = Event::new(event.clone(), None, None);
-                let args = Vec::new();
-                let mut definition =
-                    FunctionDefinition::new(event.get_arguments().unwrap_or(&args), event.range);
+                let mut new_event = Event::new_definition(event.clone());
+                let definition = new_event.definition.as_mut().unwrap();
 
                 swap(&mut self.variables, &mut definition.variables);
                 self.return_type = new_event.returns.clone();
-
                 self.lint_statements(&statements).await;
-
                 swap(&mut self.variables, &mut definition.variables);
-                new_event.definition = Some(definition);
+
 
                 let event_mut = match self.require_class("Event Bodies".into(), range.clone()) {
                     None => Arc::new(Mutex::new(new_event)),
@@ -509,13 +499,13 @@ impl<'a> Linter<'a> {
                                 if let Some(definition) = &existing.definition {
                                     self.diagnostic_error(
                                         "Event already defined".into(),
-                                        event.range,
+                                        event.range.clone(),
                                     );
                                     self.diagnostic_hint(
                                         "Already defined here".into(),
-                                        definition.range,
+                                        definition.parsed.range.clone(),
                                     );
-                                    new_event.declaration = existing.declaration;
+                                    new_event.declaration = existing.declaration.clone();
                                     None
                                 } else {
                                     existing.definition = new_event.definition.take();
@@ -525,14 +515,14 @@ impl<'a> Linter<'a> {
                             None => {
                                 self.diagnostic_error(
                                     "Event is missing a Forward Declaration".into(),
-                                    event.range,
+                                    event.range.clone(),
                                 );
                                 None
                             }
                         };
 
                         new_event_mut.unwrap_or_else(|| {
-                            let iname = IString::from(&new_event.parsed.name.content);
+                            let iname = IString::from(&new_event.parsed().name.content);
                             let new_event_mut = Arc::new(Mutex::new(new_event));
                             class.events.insert(iname, new_event_mut.clone());
                             new_event_mut
@@ -590,15 +580,20 @@ impl<'a> Linter<'a> {
                 ProgressedTopLevels::OnlyTypes(prev_top_levels) => {
                     let mut new_vec = Vec::new();
                     for (range, top_level) in prev_top_levels {
-                        new_vec.push((range, self.lint_top_level_shallow(&range, top_level).await))
+                        new_vec.push((
+                            range.clone(),
+                            self.lint_top_level_shallow(&range, top_level).await,
+                        ))
                     }
                     ProgressedTopLevels::Shallow(new_vec)
                 }
                 ProgressedTopLevels::Shallow(prev_top_levels) => {
                     let mut new_vec = Vec::new();
                     for (range, top_level) in prev_top_levels {
-                        new_vec
-                            .push((range, self.lint_top_level_complete(&range, top_level).await));
+                        new_vec.push((
+                            range.clone(),
+                            self.lint_top_level_complete(&range, top_level).await,
+                        ));
                     }
                     ProgressedTopLevels::Complete(new_vec)
                 }
