@@ -72,17 +72,27 @@ impl<I: Iterator<Item = Token>> Iterator for TokenIter<I> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mut next;
         loop {
-            let next = self.buf.pop_front().or_else(|| self.iter.next());
+            next = self.buf.pop_front().or_else(|| self.iter.next());
             if !self.ignore_newlines {
-                return next;
+                break;
             }
-            if let Some(token) = &next {
-                if token.token_type != TokenType::NEWLINE {
-                    return next;
+
+            match &next {
+                Some(token) => {
+                    if token.token_type != TokenType::NEWLINE {
+                        break;
+                    }
                 }
+                None => break,
             };
         }
+
+        if next.is_some() {
+            self.prev = next.clone();
+        }
+        next
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

@@ -60,11 +60,7 @@ pub struct Project {
 }
 
 impl Project {
-    pub async fn new(
-        enums_file: PathBuf,
-        classes_file: PathBuf,
-        functions_file: PathBuf,
-    ) -> anyhow::Result<Project> {
+    pub async fn new() -> anyhow::Result<Project> {
         let mut proj = Project {
             files: HashMap::new(),
             builtin_enums: HashMap::new(),
@@ -72,9 +68,9 @@ impl Project {
             builtin_classes: HashMap::new(),
         };
 
-        proj.load_enums(enums_file)?;
-        proj.load_builtin_classes(classes_file).await?;
-        proj.load_builtin_functions(functions_file)?;
+        proj.load_enums()?;
+        proj.load_builtin_classes().await?;
+        proj.load_builtin_functions()?;
 
         Ok(proj)
     }
@@ -186,9 +182,10 @@ impl Project {
         Ok((returns, arguments, has_vararg))
     }
 
-    pub fn load_enums(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
-        let enums = powerbuilder_proto::Enums::decode(buf)?;
+    pub fn load_enums(&mut self) -> anyhow::Result<()> {
+        let enums = powerbuilder_proto::Enums::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/system/enums.pb")
+        )))?;
 
         self.builtin_enums
             .extend(enums.r#enum.into_iter().map(|en| {
@@ -206,166 +203,137 @@ impl Project {
         Ok(())
     }
 
-    pub async fn load_builtin_classes(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
-        let classes = powerbuilder_proto::Classes::decode(buf)?;
+    pub async fn load_builtin_classes(&mut self) -> anyhow::Result<()> {
+        let classes = powerbuilder_proto::Classes::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/system/classes.pb")
+        )))?;
 
-        // TODO make not stupid
-        let mut skipped = std::collections::VecDeque::<powerbuilder_proto::Class>::new();
-        skipped.extend(classes.class.iter().cloned());
+        for class in classes.class {
+            let iname = (&class.name).into();
+            let new_class_mut = Arc::new(Mutex::new(Class::new(parser::Class {
+                scope: None,
+                name: parser::DataType {
+                    data_type_type: parser::DataTypeType::Complex(GroupedName::simple(class.name)),
+                    range: Range::default(),
+                },
+                base: parser::DataType {
+                    data_type_type: parser::DataTypeType::Complex(GroupedName::simple(class.base)),
+                    range: Range::default(),
+                },
+                within: None,
+            })));
 
-        loop {
-            let class = match skipped.pop_front() {
-                Some(class) => class,
-                None => break,
-            };
+            {
+                let mut new_class = new_class_mut.lock().await;
+                new_class.help = class.help;
 
-            match self
-                .builtin_classes
-                .get(&(&class.base).into())
-                .cloned()
-                .map(Complex::Class)
-                .or_else(|| {
-                    self.builtin_enums
-                        .get(&(&class.base).into())
-                        .cloned()
-                        .map(Complex::Enum)
-                }) {
-                Some(_) => {
-                    let iname = (&class.name).into();
-                    let new_class_mut = Arc::new(Mutex::new(Class::new(parser::Class {
-                        scope: None,
-                        name: parser::DataType {
-                            data_type_type: parser::DataTypeType::Complex(GroupedName::simple(
-                                class.name,
-                            )),
-                            range: Range::default(),
+                for var in class.variable {
+                    let iname = var.name.as_ref().unwrap().into();
+                    let parsed = parser::Variable {
+                        constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
+                        data_type: Project::parse_type(var.r#type.unwrap())?,
+                        access: VariableAccess {
+                            name: Token {
+                                token_type: TokenType::ID,
+                                content: var.name.unwrap(),
+                                range: Range::default(),
+                                error: None,
+                            },
+                            is_write: true,
                         },
-                        base: parser::DataType {
-                            data_type_type: parser::DataTypeType::Complex(GroupedName::simple(
-                                class.base,
+                        initial_value: None,
+                        range: Default::default(),
+                    };
+                    new_class.instance_variables.insert(
+                        iname,
+                        Mutex::new(Variable {
+                            data_type: parsed.data_type.data_type_type.clone(),
+                            variable_type: VariableType::Instance((
+                                Arc::downgrade(&new_class_mut),
+                                parser::InstanceVariable {
+                                    variable: parsed,
+                                    access: parser::Access {
+                                        read: None,
+                                        write: None,
+                                    },
+                                },
                             )),
-                            range: Range::default(),
-                        },
-                        within: None,
-                    })));
-                    {
-                        let mut new_class = new_class_mut.lock().await;
-                        new_class.help = class.help;
-
-                        for var in class.variable {
-                            let iname = var.name.as_ref().unwrap().into();
-                            let parsed = parser::Variable {
-                                constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32
-                                    > 0,
-                                data_type: Project::parse_type(var.r#type.unwrap())?,
-                                access: VariableAccess {
-                                    name: Token {
-                                        token_type: TokenType::ID,
-                                        content: var.name.unwrap(),
-                                        range: Range::default(),
-                                        error: None,
-                                    },
-                                    is_write: true,
-                                },
-                                initial_value: None,
-                                range: Default::default(),
-                            };
-                            new_class.instance_variables.insert(
-                                iname,
-                                Mutex::new(Variable {
-                                    data_type: parsed.data_type.data_type_type.clone(),
-                                    variable_type: VariableType::Instance((
-                                        Arc::downgrade(&new_class_mut),
-                                        parser::InstanceVariable {
-                                            variable: parsed,
-                                            access: parser::Access {
-                                                read: None,
-                                                write: None,
-                                            },
-                                        },
-                                    )),
-                                })
-                                .into(),
-                            );
-                        }
-
-                        for func in class.function {
-                            let help = func.help.clone();
-                            let name = func.name.clone();
-                            let iname = (&func.name).into();
-                            let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
-
-                            let new_func = Mutex::new(Function::new_declaration(
-                                parser::Function {
-                                    returns,
-                                    scope_modif: None,
-                                    access: None,
-                                    name: Token {
-                                        token_type: TokenType::ID,
-                                        content: name,
-                                        range: Range::default(),
-                                        error: None,
-                                    },
-                                    arguments,
-                                    vararg: has_vararg.then(|| Token {
-                                        token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
-                                        content: "...".into(),
-                                        range: Range::default(),
-                                        error: None,
-                                    }),
-                                    range: Default::default(),
-                                },
-                                help,
-                            ))
-                            .into();
-
-                            match new_class.functions.get_mut(&iname) {
-                                Some(funcs) => funcs.push(new_func),
-                                None => {
-                                    new_class.functions.insert(iname, vec![new_func]);
-                                }
-                            };
-                        }
-
-                        for event in class.event {
-                            let name = event.name.clone();
-                            let (returns, arguments, has_vararg) =
-                                Self::load_proto_function(event)?;
-                            if has_vararg {
-                                todo!();
-                            }
-                            new_class.events.insert(
-                                (&name).into(),
-                                Mutex::new(Event::new_declaration(
-                                    parser::Event {
-                                        name: Token {
-                                            token_type: TokenType::ID,
-                                            content: name,
-                                            range: Range::default(),
-                                            error: None,
-                                        },
-                                        range: Default::default(),
-                                        event_type: parser::EventType::User(returns, arguments),
-                                    },
-                                ))
-                                .into(),
-                            );
-                        }
-                    }
-
-                    self.builtin_classes.insert(iname, new_class_mut);
+                        })
+                        .into(),
+                    );
                 }
-                None => skipped.push_back(class),
+
+                for func in class.function {
+                    let help = func.help.clone();
+                    let name = func.name.clone();
+                    let iname = (&func.name).into();
+                    let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
+
+                    let new_func = Mutex::new(Function::new_declaration(
+                        parser::Function {
+                            returns,
+                            scope_modif: None,
+                            access: None,
+                            name: Token {
+                                token_type: TokenType::ID,
+                                content: name,
+                                range: Range::default(),
+                                error: None,
+                            },
+                            arguments,
+                            vararg: has_vararg.then(|| Token {
+                                token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
+                                content: "...".into(),
+                                range: Range::default(),
+                                error: None,
+                            }),
+                            range: Default::default(),
+                        },
+                        help,
+                    ))
+                    .into();
+
+                    match new_class.functions.get_mut(&iname) {
+                        Some(funcs) => funcs.push(new_func),
+                        None => {
+                            new_class.functions.insert(iname, vec![new_func]);
+                        }
+                    };
+                }
+
+                for event in class.event {
+                    let name = event.name.clone();
+                    let (returns, arguments, has_vararg) = Self::load_proto_function(event)?;
+                    if has_vararg {
+                        todo!();
+                    }
+                    new_class.events.insert(
+                        (&name).into(),
+                        Mutex::new(Event::new_declaration(parser::Event {
+                            name: Token {
+                                token_type: TokenType::ID,
+                                content: name,
+                                range: Range::default(),
+                                error: None,
+                            },
+                            range: Default::default(),
+                            event_type: parser::EventType::User(returns, arguments),
+                        }))
+                        .into(),
+                    );
+                }
             }
+
+            self.builtin_classes.insert(iname, new_class_mut);
         }
 
         Ok(())
     }
 
-    pub fn load_builtin_functions(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let buf = Bytes::from_iter(std::fs::read(path)?.iter().cloned());
-        let funcs = powerbuilder_proto::Functions::decode(buf)?;
+    pub fn load_builtin_functions(&mut self) -> anyhow::Result<()> {
+        let funcs = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/system/system_functions.pb")
+        )))?;
 
         for func in funcs.function {
             let help = func.help.clone();

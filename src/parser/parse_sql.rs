@@ -5,14 +5,21 @@ use crate::{
 };
 
 impl Parser {
-    fn id_or_invalid(&mut self, err: &Option<ParseError>, range: &mut Range) -> EOFOr<Token> {
+    pub(crate) fn id_or_invalid(
+        &mut self,
+        err: &Option<ParseError>,
+        range: &mut Range,
+    ) -> EOFOr<Token> {
         if err.is_none() {
             match self.optional(TokenType::ID)? {
                 Some(token) => {
                     range.end = token.range.end;
                     return Some(token);
                 }
-                None => {}
+                None => {
+                    let token = self.tokens.peek()?;
+                    self.error(&"Expected an ID".into(), token.range.clone());
+                }
             }
         }
 
@@ -572,12 +579,14 @@ impl Parser {
 
             Some(ParseResult::new(
                 Statement {
-                    statement_type: StatementType::SQL(SQLStatement::UPDATE_OF_CURSOR(SQLUpdateCursorStatement {
-                        is_blob,
-                        table,
-                        set,
-                        cursor,
-                    })),
+                    statement_type: StatementType::SQL(SQLStatement::UPDATE_OF_CURSOR(
+                        SQLUpdateCursorStatement {
+                            is_blob,
+                            table,
+                            set,
+                            cursor,
+                        },
+                    )),
                     range,
                 },
                 err,

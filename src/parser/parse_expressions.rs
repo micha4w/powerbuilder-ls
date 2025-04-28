@@ -597,9 +597,10 @@ impl Parser {
                         return Some(Err((err, previous)));
                     }
                 }
-                (TokenType::ID, _) => {
+                _ => {
+                    let mut range = Range::default();
                     let var = VariableAccess {
-                        name: self.tokens.next()?,
+                        name: self.id_or_invalid(&None, &mut range)?,
                         is_write: false,
                     };
 
@@ -613,15 +614,6 @@ impl Parser {
                             lvalue_type: LValueType::Variable(var),
                         }),
                     };
-                }
-                _ => {
-                    let range = self.tokens.peek()?.range;
-                    return self.fatal_res(
-                        &"Unexpected Token for LValue".into(),
-                        range,
-                        true,
-                        previous,
-                    );
                 }
             }
         }

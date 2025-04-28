@@ -193,7 +193,7 @@ impl<'a> Linter<'a> {
                                             if call.dynamic.is_none() {
                                                 self.diagnostic_error(
                                                     "Method not found".into(),
-                                                    lvalue.range.clone(),
+                                                    call.name.range.clone(),
                                                 );
                                             }
                                             parser::DataTypeType::Unknown
@@ -210,7 +210,7 @@ impl<'a> Linter<'a> {
                             Some(Complex::Enum(_)) => {
                                 self.diagnostic_error(
                                     "Cannot get a method of an Enum".into(),
-                                    lvalue.range.clone(),
+                                    call.name.range.clone(),
                                 );
                                 parser::DataTypeType::Unknown
                             }
