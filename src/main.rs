@@ -4,40 +4,60 @@ mod parser;
 mod tokenizer;
 mod types;
 
-// use std::panic::PanicHookInfo;
+use std::{panic::PanicHookInfo, time::Duration};
 
-// fn panic_hook(info: &PanicHookInfo) {
-//     if let Err(err) = std::fs::write(
-//         "/home/micha4w/Code/Rust/powerbuilder-ls/res/log.txt",
-//         info.to_string(),
-//     ) {
-//         eprintln!("{}", err);
-//     };
-// }
+use tokio::time::sleep;
+
+fn panic_hook(info: &PanicHookInfo) {
+    eprintln!("{}", info);
+    if let Err(err) = std::fs::write("powerbuilder-log.txt", info.to_string()) {
+        eprintln!("{}", err);
+    };
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // std::panic::set_hook(Box::new(panic_hook));
+    std::panic::set_hook(Box::new(panic_hook));
 
     let creator = ls::PowerBuilderLSCreator::new().await?;
+    // sleep(Duration::from_secs(3)).await;
 
     // creator
     //     .proj
     //     .write()
     //     .await
-    //     .add_file(&"res/test.sru".into(), linter::LintProgress::Complete)
+    //     .add_file(
+    //         &"res/2025-Solution/pfc libs/pfcapsrv.pbl/pfc_n_cst_conversion.sru".into(),
+    //         linter::LintProgress::Complete,
+    //     )
     //     .await?;
 
-    // for (x,y) in &creator.proj.read().await.files {
-    //     for diagnostic in &y.read().await.diagnostics {
-    //         println!("{:?}", diagnostic)
-    //     }
+    // for (path, file) in &creator.proj.read().await.files {
+    //     println!(
+    //         "{:?}: diagnostics count {:?}",
+    //         path,
+    //         file.read().await.diagnostics.len()
+    //     );
     // }
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let (service, socket) = tower_lsp::LspService::new(move |client| creator.create(client));
+    // println!("{:?}", service
+    //     .inner()
+    //     .hover_impl(tower_lsp::lsp_types::HoverParams {
+    //         text_document_position_params: tower_lsp::lsp_types::TextDocumentPositionParams {
+    //             text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: tower_lsp::lsp_types::Url::parse("file:///home/micha4w/Code/Rust/powerbuilder-ls/res/2025-Solution/pfc libs/pfcapsrv.pbl/pfc_n_cst_conversion.sru")? },
+    //             position: tower_lsp::lsp_types::Position {
+    //                 line: 26303,
+    //                 character: 12,
+    //             },
+    //         },
+    //         work_done_progress_params: tower_lsp::lsp_types::WorkDoneProgressParams {
+    //             work_done_token: None,
+    //         },
+    //     }).await);
     tower_lsp::Server::new(stdin, stdout, socket)
         .serve(service)
         .await;

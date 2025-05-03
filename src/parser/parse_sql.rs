@@ -4,38 +4,7 @@ use crate::{
     types::*,
 };
 
-impl Parser {
-    pub(crate) fn id_or_invalid(
-        &mut self,
-        err: &Option<ParseError>,
-        range: &mut Range,
-    ) -> EOFOr<Token> {
-        if err.is_none() {
-            match self.optional(TokenType::ID)? {
-                Some(token) => {
-                    range.end = token.range.end;
-                    return Some(token);
-                }
-                None => {
-                    let token = self.tokens.peek()?;
-                    self.error(&"Expected an ID".into(), token.range.clone());
-                }
-            }
-        }
-
-        Some(Token {
-            range: self.tokens.peek()?.range.expanded(
-                self.tokens
-                    .prev()
-                    .as_ref()
-                    .map_or(&Position::default(), |token| &token.range.end),
-            ),
-            token_type: TokenType::INVALID,
-            content: String::new(),
-            error: None,
-        })
-    }
-
+impl<I: Iterator<Item = char>> Parser<I> {
     fn expression_list(
         &mut self,
         err: &mut Option<ParseError>,

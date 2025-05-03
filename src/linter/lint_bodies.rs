@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use super::{linter::Linter, types::*};
 use crate::{
     parser::{self, GroupedName},
-    tokenizer,
+    tokenizer, types::*,
 };
 
 impl<'a> Linter<'a> {
@@ -32,18 +32,22 @@ impl<'a> Linter<'a> {
             tokenizer::Literal::STRING => parser::DataTypeType::String,
             tokenizer::Literal::BOOLEAN => parser::DataTypeType::Boolean,
             tokenizer::Literal::ENUM => {
-                for enumerated_mut in self.proj.builtin_enums.values() {
-                    let enumerated = enumerated_mut.lock().await;
-                    if enumerated.values.contains(&(literal.content.clone() + "!")) {
+                match self
+                    .proj
+                    .builtin_enums_value_cache
+                    .get(&(&literal.content).into())
+                {
+                    Some(enumerated) => {
                         return parser::DataTypeType::Complex(GroupedName::new(
                             None,
-                            enumerated.name.clone(),
+                            enumerated.lock().await.name.clone(),
                         ));
                     }
+                    None => {
+                        self.diagnostic_error("Unknown Enum Literal".into(), literal.range.clone());
+                        parser::DataTypeType::Unknown
+                    }
                 }
-
-                self.diagnostic_error("Unknown Enum Literal".into(), literal.range.clone());
-                parser::DataTypeType::Unknown
             }
         }
     }
@@ -115,7 +119,10 @@ impl<'a> Linter<'a> {
                             }
                             None => {
                                 if call.dynamic.is_none() {
-                                    self.diagnostic_error("Event not found".into(), lvalue.range.clone());
+                                    self.diagnostic_error(
+                                        "Event not found".into(),
+                                        lvalue.range.clone(),
+                                    );
                                 }
                                 parser::DataTypeType::Unknown
                             }
@@ -234,27 +241,31 @@ impl<'a> Linter<'a> {
                     match data_type {
                         parser::DataTypeType::Complex(name) => match self.find_class(&name).await {
                             Some(Complex::Class(class)) => {
-                                match class
-                                    .lock()
-                                    .await
-                                    .find_variable(
-                                        self,
-                                        &member,
-                                        &tokenizer::AccessType::PUBLIC,
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    Some(var) => {
-                                        // var.uses.push(member.range);
-                                        var.lock().await.data_type.clone()
-                                    }
-                                    None => {
-                                        self.diagnostic_error(
-                                            "Member not found".into(),
-                                            member.name.range.clone(),
-                                        );
-                                        parser::DataTypeType::Unknown
+                                if member.name.token_type == tokenizer::TokenType::INVALID {
+                                    parser::DataTypeType::Unknown
+                                } else {
+                                    match class
+                                        .lock()
+                                        .await
+                                        .find_variable(
+                                            self,
+                                            &member,
+                                            &tokenizer::AccessType::PUBLIC,
+                                            false,
+                                        )
+                                        .await
+                                    {
+                                        Some(var) => {
+                                            // var.uses.push(member.range);
+                                            var.lock().await.data_type.clone()
+                                        }
+                                        None => {
+                                            self.diagnostic_error(
+                                                "Member not found".into(),
+                                                member.name.range.clone(),
+                                            );
+                                            parser::DataTypeType::Unknown
+                                        }
                                     }
                                 }
                             }
@@ -266,7 +277,10 @@ impl<'a> Linter<'a> {
                                 parser::DataTypeType::Unknown
                             }
                             None => {
-                                self.diagnostic_error("Class not found".into(), lvalue.range.clone());
+                                self.diagnostic_error(
+                                    "Class not found".into(),
+                                    lvalue.range.clone(),
+                                );
                                 parser::DataTypeType::Unknown
                             }
                         },
@@ -354,15 +368,15 @@ impl<'a> Linter<'a> {
 
                     match op {
                         tokenizer::Operator::AND | tokenizer::Operator::OR => {
-                            if self
+                            if !self
                                 .is_convertible(&left_type, &parser::DataTypeType::Boolean)
                                 .await
-                                || self
+                                || !self
                                     .is_convertible(&right_type, &parser::DataTypeType::Boolean)
                                     .await
                             {
                                 self.diagnostic_error(
-                                    "Invalid types for Operation, expected booleans".into(),
+                                    format!("Invalid types for Operation, expected booleans, got {} and {}", left_type, right_type),
                                     expression.range.clone(),
                                 );
                             }
@@ -371,7 +385,7 @@ impl<'a> Linter<'a> {
                         }
                         tokenizer::Operator::EQ | tokenizer::Operator::GTLT => {
                             if !(self.is_convertible(&left_type, &right_type).await
-                                || self.is_convertible(&left_type, &right_type).await)
+                                || self.is_convertible(&right_type, &left_type).await)
                             {
                                 self.diagnostic_error(
                                     "Types do not match".into(),
@@ -387,7 +401,7 @@ impl<'a> Linter<'a> {
                         | tokenizer::Operator::LTE => {
                             if !(left_type.is_numeric() && right_type.is_numeric()) {
                                 self.diagnostic_error(
-                                    "Invalid types for Operation, expected numeric".into(),
+                                    format!("Invalid types for Operation, expected numeric, got {} and {}", left_type, right_type),
                                     expression.range.clone(),
                                 );
                             }
@@ -462,11 +476,20 @@ impl<'a> Linter<'a> {
                 parser::ExpressionType::Create(name) => match &name.data_type_type {
                     parser::DataTypeType::Complex(grouped_name) => {
                         match self.find_class(&grouped_name).await {
-                            Some(Complex::Class(_)) => {
+                            Some(Complex::Class(class)) => {
+                                if class.lock().await.parsed.autoinstantiate.is_some() {
+                                    self.diagnostic_error(
+                                        "Cannot create an Autoinstantiated Class".into(),
+                                        name.range.clone(),
+                                    );
+                                }
                                 parser::DataTypeType::Complex(grouped_name.clone())
                             }
                             Some(Complex::Enum(_)) => {
-                                self.diagnostic_error("Cannot create an Enum".into(), name.range.clone());
+                                self.diagnostic_error(
+                                    "Cannot create an Enum".into(),
+                                    name.range.clone(),
+                                );
                                 parser::DataTypeType::Unknown
                             }
                             None => {
@@ -490,7 +513,10 @@ impl<'a> Linter<'a> {
                         .is_convertible(&class_type, &parser::DataTypeType::String)
                         .await
                     {
-                        self.diagnostic_error("Invalid type, expected String".into(), class.range.clone());
+                        self.diagnostic_error(
+                            "Invalid type, expected String".into(),
+                            class.range.clone(),
+                        );
                     }
 
                     parser::DataTypeType::Unknown
@@ -561,11 +587,10 @@ impl<'a> Linter<'a> {
                     //         );
                     //         file.sql_procedures.insert(
                     //             iname,
-                    //             Mutex::new(SQLProcedure {
+                    //             arc_mut(SQLProcedure {
                     //                 definitions: vec![],
                     //                 references: vec![cursor_token.clone()],
-                    //             })
-                    //             .into(),
+                    //             }),
                     //         );
                     //     }
                     // }
@@ -587,11 +612,10 @@ impl<'a> Linter<'a> {
                     //     } else {
                     //         file.sql_cursors.insert(
                     //             iname,
-                    //             Mutex::new(SQLThing {
+                    //             arc_mut(SQLThing {
                     //                 definitions: vec![(token.clone(), select.clone())],
                     //                 references: vec![],
-                    //             })
-                    //             .into(),
+                    //             }),
                     //         );
                     //     }
                     // }
@@ -605,11 +629,10 @@ impl<'a> Linter<'a> {
                     //     } else {
                     //         file.sql_procedures.insert(
                     //             iname,
-                    //             Mutex::new(SQLProcedure {
+                    //             arc_mut(SQLProcedure {
                     //                 definitions: vec![procedure.clone()],
                     //                 references: vec![],
-                    //             })
-                    //             .into(),
+                    //             }),
                     //         );
                     //     }
                     // }
@@ -627,11 +650,10 @@ impl<'a> Linter<'a> {
                     //         );
                     //         file.sql_procedures.insert(
                     //             iname,
-                    //             Mutex::new(SQLProcedure {
+                    //             arc_mut(SQLProcedure {
                     //                 definitions: vec![],
                     //                 references: vec![procedure.clone()],
-                    //             })
-                    //             .into(),
+                    //             }),
                     //         );
                     //     }
                     // }
@@ -700,42 +722,46 @@ impl<'a> Linter<'a> {
                         parser::DataTypeType::Any => {}
                         parser::DataTypeType::Unknown => {}
                         _ => {
-                            self.diagnostic_error("Can only destroy Objects".into(), object.range.clone());
+                            self.diagnostic_error(
+                                "Can only destroy Objects".into(),
+                                object.range.clone(),
+                            );
                         }
                     }
                 }
-                parser::StatementType::Declaration(var) => {
-                    let data_type = var.variable.data_type.data_type_type.clone();
+                parser::StatementType::Declaration(vars) => {
+                    let data_type = vars[0].variable.data_type.data_type_type.clone();
 
                     if let parser::DataTypeType::Complex(name) = &data_type {
                         if self.find_class(&name).await.is_none() {
                             self.diagnostic_error(
                                 "Class not found".into(),
-                                var.variable.data_type.range.clone(),
+                                vars[0].variable.data_type.range.clone(),
                             );
                         }
                     }
 
-                    if let Some(initial_value) = &var.variable.initial_value {
-                        let initial_type = self.lint_expression(initial_value).await;
+                    for var in vars {
+                        if let Some(initial_value) = &var.variable.initial_value {
+                            let initial_type = self.lint_expression(initial_value).await;
 
-                        if !self.is_convertible(&initial_type, &data_type).await {
-                            self.diagnostic_error(
-                                "Type's are not convertible".into(),
-                                initial_value.range.clone(),
-                            );
+                            if !self.is_convertible(&initial_type, &data_type).await {
+                                self.diagnostic_error(
+                                    "Type's are not convertible".into(),
+                                    initial_value.range.clone(),
+                                );
+                            }
                         }
-                    }
 
-                    self.variables.insert(
-                        (&var.variable.access.name.content).into(),
-                        Mutex::new(Variable {
-                            variable_type: VariableType::Local(var.variable.clone()),
-                            data_type,
-                            // uses: Vec::new(),
-                        })
-                        .into(),
-                    );
+                        self.variables.insert(
+                            (&var.variable.access.name.content).into(),
+                            arc_mut(Variable {
+                                variable_type: VariableType::Local(var.variable.clone()),
+                                data_type: data_type.clone(),
+                                // uses: Vec::new(),
+                            })
+                        );
+                    }
                 }
                 parser::StatementType::Assignment(lvalue, operator, expression) => {
                     let lvalue_type = self.lint_lvalue(lvalue).await;
@@ -821,7 +847,10 @@ impl<'a> Linter<'a> {
 
                     for (data_type, range) in to_check {
                         if !data_type.is_numeric() {
-                            self.diagnostic_error("Needs to be a Numeric Type".into(), range.clone());
+                            self.diagnostic_error(
+                                "Needs to be a Numeric Type".into(),
+                                range.clone(),
+                            );
                         }
                     }
 
@@ -877,8 +906,14 @@ impl<'a> Linter<'a> {
 
                         for (literal, range) in literals {
                             let literal_type = self.lint_literal(literal).await;
-                            if self.is_convertible(&choose_type, &literal_type).await {
-                                self.diagnostic_error("Wrong Literal Type".into(), range.clone());
+                            if !self.is_convertible(&choose_type, &literal_type).await {
+                                self.diagnostic_error(
+                                    format!(
+                                        "Wrong Literal Type, got {}, expected {}",
+                                        literal_type, choose_type
+                                    ),
+                                    range.clone(),
+                                );
                             }
                         }
 
@@ -961,7 +996,10 @@ impl<'a> Linter<'a> {
                             );
                         }
                         None => {
-                            self.diagnostic_error("Ancestor not found".into(), statement.range.clone());
+                            self.diagnostic_error(
+                                "Ancestor not found".into(),
+                                statement.range.clone(),
+                            );
                         }
                     }
                 }
@@ -985,7 +1023,7 @@ impl<'a> Linter<'a> {
         types
     }
 
-    pub(crate) async fn lint_statements(&mut self, statements: &Vec<parser::Statement>) {
+    pub(super) async fn lint_statements(&mut self, statements: &Vec<parser::Statement>) {
         for statement in statements {
             self.lint_statement(statement).await;
         }

@@ -1,12 +1,8 @@
-use std::{
-    backtrace::Backtrace,
-    cell::RefCell,
-    path::{Path, PathBuf}, sync::Arc,
-};
+use std::{backtrace::Backtrace, sync::Arc};
 
 use super::{token_iter::TokenIter, types::*};
 use crate::{
-    tokenizer::{self, tokenize, tokenize_file, FileTokenizer, Token, TokenType},
+    tokenizer::{self, Token, TokenType, Tokenizer},
     types::*,
 };
 
@@ -65,36 +61,42 @@ macro_rules! quick_exit_simple_opt {
     };
 }
 
-pub(crate) use quick_exit;
-pub(crate) use quick_exit_opt;
-pub(crate) use quick_exit_simple;
-pub(crate) use quick_exit_simple_opt;
+pub(super) use quick_exit;
+pub(super) use quick_exit_opt;
+pub(super) use quick_exit_simple;
+pub(super) use quick_exit_simple_opt;
 
-pub struct Parser {
-    pub(crate) tokens: TokenIter<FileTokenizer>,
+pub struct Parser<I>
+where
+    I: Iterator<Item = char>,
+{
+    pub(super) tokens: TokenIter<Tokenizer<I>>,
 
     syntax_errors: Vec<Diagnostic>,
 }
 
-impl Parser {
-    pub fn new(tokenizer: FileTokenizer) -> Parser {
+impl<I: Iterator<Item = char>> Parser<I> {
+    pub fn new(iter: I, uri: Url) -> Self {
+        Parser {
+            tokens: TokenIter::new(Tokenizer::new(iter, uri)),
+            syntax_errors: Vec::new(),
+        }
+    }
+
+    pub fn new_file(iter: I, uri: Url) -> Self {
+        let mut tokenizer = Tokenizer::new(iter, uri);
+        tokenizer.skip_headers();
         Parser {
             tokens: TokenIter::new(tokenizer),
             syntax_errors: Vec::new(),
         }
     }
-    pub fn new_from_file(file: &Path) -> anyhow::Result<Parser> {
-        Ok(Parser::new(tokenize_file(file)?))
-    }
-    pub fn new_from_string(buf: &String, uri: PathBuf) -> anyhow::Result<Parser> {
-        Ok(Parser::new(tokenize(buf, uri)))
-    }
 
-    pub(crate) fn uri(&self) -> Arc<PathBuf> {
+    pub(super) fn uri(&self) -> Arc<Url> {
         self.tokens.underlying().uri.clone()
     }
 
-    pub(crate) fn consume_line(&mut self) -> EOFOr<()> {
+    pub(super) fn consume_line(&mut self) -> EOFOr<()> {
         loop {
             match self.tokens.next()?.token_type {
                 TokenType::NEWLINE | TokenType::Symbol(tokenizer::Symbol::SEMICOLON) => {
@@ -105,7 +107,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn hint(&mut self, error: &String, range: Range) {
+    pub(super) fn hint(&mut self, error: &String, range: Range) {
         self.syntax_errors.push(Diagnostic {
             severity: Severity::Hint,
             message: format!("[Parser] {}\n{}", error, Backtrace::capture()),
@@ -113,7 +115,7 @@ impl Parser {
         });
     }
 
-    pub(crate) fn error(&mut self, error: &String, range: Range) {
+    pub(super) fn error(&mut self, error: &String, range: Range) {
         self.syntax_errors.push(Diagnostic {
             severity: Severity::Error,
             // message: format!("[Parser] {}", error),
@@ -123,7 +125,7 @@ impl Parser {
         // panic!("[Parser] {} {:?}\n", error, range);
     }
 
-    pub(crate) fn fatal<T>(
+    pub(super) fn fatal<T>(
         &mut self,
         error: &String,
         range: Range,
@@ -136,7 +138,7 @@ impl Parser {
         Some(Err(ParseError::UnexpectedToken))
     }
 
-    pub(crate) fn fatal_res<T>(
+    pub(super) fn fatal_res<T>(
         &mut self,
         error: &String,
         range: Range,
@@ -147,7 +149,7 @@ impl Parser {
         Some(Err((ParseError::UnexpectedToken, value)))
     }
 
-    pub(crate) fn optional(&mut self, token_type: TokenType) -> EOFOr<Option<Token>> {
+    pub(super) fn optional(&mut self, token_type: TokenType) -> EOFOr<Option<Token>> {
         if self.tokens.peek()?.token_type == token_type {
             Some(Some(self.tokens.next()?))
         } else {
@@ -155,7 +157,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn expect(&mut self, token_type: TokenType) -> EOFOr<Result<Token, ParseError>> {
+    pub(super) fn expect(&mut self, token_type: TokenType) -> EOFOr<Result<Token, ParseError>> {
         let token = self.tokens.next()?;
         if token.token_type == token_type {
             Some(Ok(token))
@@ -171,7 +173,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn optional_newline(&mut self) -> EOFOr<Option<Token>> {
+    pub(super) fn optional_newline(&mut self) -> EOFOr<Option<Token>> {
         if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
             self.tokens.peek()?.token_type
         {
@@ -181,7 +183,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn expect_newline(&mut self) -> EOFOr<Result<Token, ParseError>> {
+    pub(super) fn expect_newline(&mut self) -> EOFOr<Result<Token, ParseError>> {
         let token = self.tokens.next()?;
         if let TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON) =
             token.token_type
@@ -194,6 +196,37 @@ impl Parser {
                 token.token_type != TokenType::NEWLINE,
             )
         }
+    }
+
+    pub(super) fn id_or_invalid(
+        &mut self,
+        err: &Option<ParseError>,
+        range: &mut Range,
+    ) -> EOFOr<Token> {
+        if err.is_none() {
+            match self.optional(TokenType::ID)? {
+                Some(token) => {
+                    range.end = token.range.end;
+                    return Some(token);
+                }
+                None => {
+                    let token = self.tokens.peek()?;
+                    self.error(&"Expected an ID".into(), token.range.clone());
+                }
+            }
+        }
+
+        Some(Token {
+            range: self.tokens.peek()?.range.expanded(
+                self.tokens
+                    .prev()
+                    .as_ref()
+                    .map_or(&Position::default(), |token| &token.range.end),
+            ),
+            token_type: TokenType::INVALID,
+            content: String::new(),
+            error: None,
+        })
     }
 
     pub fn parse_tokens(&mut self) -> Vec<TopLevel> {

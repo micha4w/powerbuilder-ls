@@ -38,7 +38,11 @@ impl<'a> Linter<'a> {
 
     pub fn push_diagnostic(&mut self, mut diagnostic: parser::Diagnostic) {
         if let MaybeMut::Mut(file) = &mut self.file {
-            diagnostic.message += format!("\n {}", Backtrace::capture()).as_str();
+            if cfg!(debug_assertions) {
+                diagnostic.message += "\n";
+                diagnostic.message += Backtrace::capture().to_string().as_str();
+            }
+
             file.diagnostics.push(diagnostic);
         }
     }
@@ -108,7 +112,7 @@ impl<'a> Linter<'a> {
         }
 
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().path == *path {
+            if self.file.as_ref().uri == *path {
                 continue;
             }
 
@@ -171,7 +175,7 @@ impl<'a> Linter<'a> {
                 .map(|(name, var)| (name.clone(), var.clone(), None)),
         );
 
-        let current_path = self.file.as_ref().path.clone();
+        let current_path = self.file.as_ref().uri.clone();
         let variables = variables.chain(
             stream::once(async move {
                 let mut variables: Pin<Box<dyn Stream<Item = _> + Send>> =
@@ -262,7 +266,7 @@ impl<'a> Linter<'a> {
         }
 
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().path == *path {
+            if self.file.as_ref().uri == *path {
                 continue;
             }
 
@@ -312,7 +316,7 @@ impl<'a> Linter<'a> {
         }
 
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().path == *path {
+            if self.file.as_ref().uri == *path {
                 continue;
             }
 
@@ -476,7 +480,7 @@ impl<'a> Linter<'a> {
                 Box::pin(stream::empty())
             };
 
-        let current_path = self.file.as_ref().path.clone();
+        let current_path = self.file.as_ref().uri.clone();
         let functions = functions.chain(
             stream::once(async move {
                 let mut functions: Pin<Box<dyn Stream<Item = _> + Send>> =
@@ -574,7 +578,7 @@ impl<'a> Linter<'a> {
         }
 
         for (path, file_lock) in &self.proj.files {
-            if self.file.as_ref().path == *path {
+            if self.file.as_ref().uri == *path {
                 continue;
             }
 

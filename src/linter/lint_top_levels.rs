@@ -10,7 +10,6 @@ use tokio::sync::Mutex;
 use super::{linter::Linter, types::*};
 use crate::{
     parser::{self, GroupedName},
-    tokenizer,
     types::*,
 };
 
@@ -52,7 +51,7 @@ impl<'a> Linter<'a> {
             }
         }
 
-        let new_class_mut = Arc::new(Mutex::new(Class::new(decl.class.clone())));
+        let new_class_mut = arc_mut(Class::new(decl.class.clone()));
 
         {
             let mut new_class = new_class_mut.lock().await;
@@ -60,22 +59,21 @@ impl<'a> Linter<'a> {
             for var in &decl.variables {
                 new_class.instance_variables.insert(
                     (&var.variable.access.name.content).into(),
-                    Mutex::new(Variable {
+                    arc_mut(Variable {
                         variable_type: VariableType::Instance((
                             Arc::downgrade(&new_class_mut),
                             var.clone(),
                         )),
                         data_type: var.variable.data_type.data_type_type.clone(),
                         // uses: Vec::new(),
-                    })
-                    .into(),
+                    }),
                 );
             }
 
             for event in &decl.events {
                 new_class.events.insert(
                     (&event.name.content).into(),
-                    Mutex::new(Event::new_declaration(event.clone())).into(),
+                    arc_mut(Event::new_declaration(event.clone(), None)),
                 );
             }
         }
@@ -109,7 +107,7 @@ impl<'a> Linter<'a> {
 
                         classes.insert(
                             (&datatype.class.name.data_type_type.to_string()).into(),
-                            Mutex::new(new_class).into(),
+                            arc_mut(new_class),
                         );
                     }
                     self.file.unwrap_mut().classes.extend(classes.clone());
@@ -118,10 +116,10 @@ impl<'a> Linter<'a> {
                 parser::TopLevelType::ScopedVariablesDecl(vec) => {
                     let mut new_vars = HashMap::new();
                     for var in &vec {
-                        let new_var = Arc::new(Mutex::new(Variable {
+                        let new_var = arc_mut(Variable {
                             data_type: var.variable.data_type.data_type_type.clone(),
                             variable_type: VariableType::Scoped(var.clone()),
-                        }));
+                        });
                         new_vars
                             .insert((&var.variable.access.name.content).into(), new_var.clone());
                     }
@@ -129,16 +127,22 @@ impl<'a> Linter<'a> {
                     self.file.unwrap_mut().variables.extend(new_vars.clone());
                     TopLevelType::ScopedVariablesDecl((vec, new_vars))
                 }
-                parser::TopLevelType::ScopedVariableDecl(var) => {
-                    let new_var = Arc::new(Mutex::new(Variable {
-                        data_type: var.variable.data_type.data_type_type.clone(),
-                        variable_type: VariableType::Scoped(var.clone()),
-                    }));
-                    self.file
-                        .unwrap_mut()
-                        .variables
-                        .insert((&var.variable.access.name.content).into(), new_var.clone());
-                    TopLevelType::ScopedVariableDecl((var, new_var))
+                parser::TopLevelType::ScopedVariableDecl(vars) => {
+                    let mut new_vars = Vec::new();
+                    for var in &vars {
+                        let new_var = arc_mut(Variable {
+                            data_type: var.variable.data_type.data_type_type.clone(),
+                            variable_type: VariableType::Scoped(var.clone()),
+                        });
+                        // TODO scoped vars and initial values?
+                        self.file
+                            .unwrap_mut()
+                            .variables
+                            .insert((&var.variable.access.name.content).into(), new_var.clone());
+
+                        new_vars.push(new_var);
+                    }
+                    TopLevelType::ScopedVariableDecl((vars, new_vars))
                 }
                 parser::TopLevelType::DatatypeDecl(datatype_decl) => {
                     TopLevelType::DatatypeDecl(datatype_decl)
@@ -163,66 +167,103 @@ impl<'a> Linter<'a> {
         )
     }
 
+    async fn add_function_declaration(
+        &mut self,
+        function_mut: &Arc<Mutex<Function>>,
+        class: &mut Class,
+        is_external: bool,
+    ) {
+        let new_func = function_mut.lock().await;
+
+        match class.find_conflicting_function(&new_func).await {
+            Some(func) => {
+                let mut func = func.lock().await;
+                if func.returns != (&new_func.parsed().returns).into() {
+                    self.diagnostic_error(
+                        "Same function with different return type already exists".into(),
+                        new_func.parsed().range.clone(),
+                    );
+                    if let Some(declaration) = &func.declaration {
+                        self.diagnostic_hint(
+                            "Function with different return type declared here".into(),
+                            declaration.range.clone(),
+                        );
+                    }
+                }
+
+                if let Some(declaration) = &func.declaration {
+                    self.diagnostic_error(
+                        "Function already forward declared".into(),
+                        new_func.parsed().range.clone(),
+                    );
+                    self.diagnostic_hint(
+                        "Already forward declared here".into(),
+                        declaration.range.clone(),
+                    );
+                } else {
+                    func.declaration = new_func.declaration.clone();
+                }
+            }
+            None => {
+                let functions = if is_external {
+                    &mut class.external_functions
+                } else {
+                    &mut class.functions
+                };
+
+                let iname = IString::from(&new_func.parsed().name.content);
+                match functions.get_mut(&iname) {
+                    Some(funcs) => funcs.push(function_mut.clone()),
+                    None => {
+                        functions.insert(iname, vec![function_mut.clone()]);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn add_function_declarations(
+        &mut self,
+        top_level_range: &Range,
+        functions: &Vec<parser::Function>,
+        is_external: bool,
+    ) -> HashMap<IString, Vec<Arc<Mutex<Function>>>> {
+        let mut new_functions = HashMap::new();
+        for function in functions {
+            let iname = (&function.name.content).into();
+            let func_arc = arc_mut(Function::new_declaration(function.clone(), None));
+            match new_functions.get_mut(&iname) {
+                None => {
+                    new_functions.insert(iname, vec![func_arc]);
+                }
+                Some(funcs) => funcs.push(func_arc),
+            }
+        }
+
+        let top_level_name = if is_external {
+            "Function Forward Declarations"
+        } else {
+            "External Functions"
+        };
+        if let Some(class_arc) = self.require_class(top_level_name.into(), top_level_range.clone())
+        {
+            let mut class = class_arc.lock().await;
+            for (_, funcs) in &new_functions {
+                for func in funcs {
+                    self.add_function_declaration(func, &mut class, is_external)
+                        .await;
+                }
+            }
+        }
+
+        new_functions
+    }
+
     pub async fn lint_top_level_shallow(
         &mut self,
         range: &Range,
         top_level: TopLevelType<LintProgressOnlyTypes>,
     ) -> TopLevelType<LintProgressShallow> {
-        async fn add_function(
-            linter: &mut Linter<'_>,
-            function_mut: &Arc<Mutex<Function>>,
-            class: &mut Class,
-            is_external: bool,
-        ) {
-            let new_func = function_mut.lock().await;
-
-            match class.find_conflicting_function(&new_func).await {
-                Some(func) => {
-                    let mut func = func.lock().await;
-                    if func.returns != (&new_func.parsed().returns).into() {
-                        linter.diagnostic_error(
-                            "Same function with different return type already exists".into(),
-                            new_func.parsed().range.clone(),
-                        );
-                        if let Some(declaration) = &func.declaration {
-                            linter.diagnostic_hint(
-                                "Function with different return type declared here".into(),
-                                declaration.range.clone(),
-                            );
-                        }
-                    }
-
-                    if let Some(declaration) = &func.declaration {
-                        linter.diagnostic_error(
-                            "Function already forward declared".into(),
-                            new_func.parsed().range.clone(),
-                        );
-                        linter.diagnostic_hint(
-                            "Already forward declared here".into(),
-                            declaration.range.clone(),
-                        );
-                    } else {
-                        func.declaration = new_func.declaration.clone();
-                    }
-                }
-                None => {
-                    let functions = if is_external {
-                        &mut class.external_functions
-                    } else {
-                        &mut class.functions
-                    };
-
-                    let iname = IString::from(&new_func.parsed().name.content);
-                    match functions.get_mut(&iname) {
-                        Some(funcs) => funcs.push(function_mut.clone()),
-                        None => {
-                            functions.insert(iname, vec![function_mut.clone()]);
-                        }
-                    }
-                }
-            }
-        }
-
         match top_level {
             TopLevelType::DatatypeDecl(datatype) => {
                 let new_class_mut = self.lint_datatype_decl(&datatype).await;
@@ -322,7 +363,7 @@ impl<'a> Linter<'a> {
 
                         new_vars.insert(
                             (&var.variable.access.name.content).into(),
-                            Mutex::new(Variable {
+                            arc_mut(Variable {
                                 variable_type: VariableType::Instance((
                                     self.class
                                         .as_ref()
@@ -331,8 +372,7 @@ impl<'a> Linter<'a> {
                                 )),
                                 data_type,
                                 // uses: Vec::new(),
-                            })
-                            .into(),
+                            }),
                         );
                     }
 
@@ -349,48 +389,15 @@ impl<'a> Linter<'a> {
                 }
             }
             TopLevelType::FunctionsForwardDecl(functions) => {
-                let mut new_functions = HashMap::new();
-                for function in &functions {
-                    new_functions.insert(
-                        (&function.name.content).into(),
-                        Arc::new(Mutex::new(Function::new_declaration(
-                            function.clone(),
-                            None,
-                        ))),
-                    );
-                }
-
-                if let Some(class_arc) =
-                    self.require_class("Function Forward Declarations".into(), range.clone())
-                {
-                    let mut class = class_arc.lock().await;
-                    for (_, function) in &new_functions {
-                        add_function(self, function, &mut class, false).await;
-                    }
-                }
-
+                let new_functions = self
+                    .add_function_declarations(&range, &functions, false)
+                    .await;
                 TopLevelType::FunctionsForwardDecl((functions, (self.class.clone(), new_functions)))
             }
             TopLevelType::ExternalFunctions(functions) => {
-                let mut new_functions = HashMap::new();
-                for function in &functions {
-                    new_functions.insert(
-                        (&function.name.content).into(),
-                        Arc::new(Mutex::new(Function::new_declaration(
-                            function.clone(),
-                            None,
-                        ))),
-                    );
-                }
-
-                if let Some(class_arc) =
-                    self.require_class("External Functions".into(), range.clone())
-                {
-                    let mut class = class_arc.lock().await;
-                    for (_, function) in &new_functions {
-                        add_function(self, &function, &mut class, true).await;
-                    }
-                }
+                let new_functions = self
+                    .add_function_declarations(&range, &functions, true)
+                    .await;
                 TopLevelType::ExternalFunctions((functions, (self.class.clone(), new_functions)))
             }
             TopLevelType::ForwardDecl(prev) => TopLevelType::ForwardDecl(prev),
@@ -430,7 +437,7 @@ impl<'a> Linter<'a> {
 
                 let new_function = match self.require_class("Function Bodies".into(), range.clone())
                 {
-                    None => Mutex::new(new_func).into(),
+                    None => arc_mut(new_func),
                     Some(class_arc) => {
                         let mut class = class_arc.lock().await;
                         let new_func_mut = match class.find_conflicting_function(&new_func).await {
@@ -463,7 +470,7 @@ impl<'a> Linter<'a> {
 
                         new_func_mut.unwrap_or_else(|| {
                             let iname = IString::from(&new_func.parsed().name.content);
-                            let new_func_mut = Arc::new(Mutex::new(new_func));
+                            let new_func_mut = arc_mut(new_func);
                             match class.functions.get_mut(&iname) {
                                 Some(funcs) => funcs.push(new_func_mut.clone()),
                                 None => {
@@ -488,9 +495,8 @@ impl<'a> Linter<'a> {
                 self.lint_statements(&statements).await;
                 swap(&mut self.variables, &mut definition.variables);
 
-
                 let event_mut = match self.require_class("Event Bodies".into(), range.clone()) {
-                    None => Arc::new(Mutex::new(new_event)),
+                    None => arc_mut(new_event),
                     Some(class_arc) => {
                         let mut class = class_arc.lock().await;
                         let new_event_mut = match class.find_conflicting_event(&new_event).await {
@@ -523,7 +529,7 @@ impl<'a> Linter<'a> {
 
                         new_event_mut.unwrap_or_else(|| {
                             let iname = IString::from(&new_event.parsed().name.content);
-                            let new_event_mut = Arc::new(Mutex::new(new_event));
+                            let new_event_mut = arc_mut(new_event);
                             class.events.insert(iname, new_event_mut.clone());
                             new_event_mut
                         })

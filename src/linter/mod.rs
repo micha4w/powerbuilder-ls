@@ -2,6 +2,7 @@ mod lint_bodies;
 mod linter;
 mod lint_top_levels;
 mod project;
+mod load_builtins;
 mod types;
 
 pub use linter::*;

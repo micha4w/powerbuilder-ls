@@ -4,7 +4,7 @@ use crate::{
     types::*,
 };
 
-impl Parser {
+impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_argument_list_declaration(
         &mut self,
     ) -> EOFOrParserResult<(Range, Vec<Argument>, Option<Token>)> {
@@ -555,37 +555,41 @@ impl Parser {
             None
         };
 
+        let autoinstantiate =
+            self.optional(TokenType::Keyword(tokenizer::Keyword::AUTOINSTANTIATE))?;
+
         if err.is_none() {
             self.expect_newline()?.ok();
         }
 
-        let mut end;
+        let end;
         let mut variables = Vec::new();
         let mut events = Vec::new();
         loop {
             match self.tokens.peek()?.token_type {
-                TokenType::Keyword(tokenizer::Keyword::END) => match self
-                    .tokens
-                    .peek_nth(1)?
-                    .token_type
-                {
-                    TokenType::Keyword(tokenizer::Keyword::TYPE) => {
-                        self.tokens.next()?;
-                        let close = self.tokens.next()?;
-                        end = close.range.end;
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    match self.tokens.peek_nth(1)?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::TYPE) => {
+                            self.tokens.next()?;
+                            let close = self.tokens.next()?;
+                            end = close.range.end;
 
-                        self.expect_newline()?.ok();
-                        break;
-                    }
-                    _ => {
-                        let range = self.tokens.next()?.range;
-                        self.error(&"Dangling END keyword, did you mean END TYPE".into(), range.clone());
-                        end = range.end;
+                            self.expect_newline()?.ok();
+                            break;
+                        }
+                        _ => {
+                            let range = self.tokens.next()?.range;
+                            self.error(
+                                &"Dangling END keyword, did you mean END TYPE".into(),
+                                range.clone(),
+                            );
+                            end = range.end;
 
-                        self.consume_line()?;
-                        break;
+                            self.consume_line()?;
+                            break;
+                        }
                     }
-                },
+                }
                 TokenType::Keyword(tokenizer::Keyword::EVENT) => {
                     if let Some(event) = self.parse_event_header()?.value() {
                         events.push(event);
@@ -594,8 +598,8 @@ impl Parser {
                 _ => {
                     if let Some(statement) = self.parse_statement()? {
                         match statement.statement_type {
-                            StatementType::Declaration(var) => {
-                                variables.push(var);
+                            StatementType::Declaration(vars) => {
+                                variables.extend(vars);
                             }
                             _ => {
                                 self.error(
@@ -616,6 +620,7 @@ impl Parser {
                     name,
                     base,
                     within,
+                    autoinstantiate,
                 },
                 variables,
                 events,
@@ -642,11 +647,11 @@ impl Parser {
         };
         let variable = quick_exit_opt!(self.parse_variable_declaration()?);
 
-        if let StatementType::Declaration(var) = variable.statement_type {
-            if var.access.read.is_some() || var.access.write.is_some() {
+        if let StatementType::Declaration(vars) = variable.statement_type {
+            if vars[0].access.read.is_some() || vars[0].access.write.is_some() {
                 self.error(
                     &"Global variable cannot specify Access Rights".into(),
-                    var.variable.range.clone(),
+                    variable.range.clone(),
                 );
             }
 
@@ -656,10 +661,14 @@ impl Parser {
                     end: variable.range.end,
                     uri: self.uri(),
                 },
-                top_level_type: TopLevelType::ScopedVariableDecl(ScopedVariable {
-                    scope,
-                    variable: var.variable,
-                }),
+                top_level_type: TopLevelType::ScopedVariableDecl(
+                    vars.into_iter()
+                        .map(|var| ScopedVariable {
+                            scope,
+                            variable: var.variable,
+                        })
+                        .collect(),
+                ),
             }))
         } else {
             unreachable!();
@@ -715,11 +724,20 @@ impl Parser {
                 }
                 _ => {
                     if let Some(statement) = self.parse_variable_declaration()?.value() {
-                        if let StatementType::Declaration(var) = statement.statement_type {
-                            declarations.push(ScopedVariable {
-                                scope,
-                                variable: var.variable,
-                            });
+                        if let StatementType::Declaration(vars) = statement.statement_type {
+                            if vars[0].access.read.is_some() || vars[0].access.write.is_some() {
+                                self.error(
+                                    &"Global variable cannot specify Access Rights".into(),
+                                    statement.range.clone(),
+                                );
+                            }
+
+                            for var in vars {
+                                declarations.push(ScopedVariable {
+                                    scope,
+                                    variable: var.variable,
+                                });
+                            }
                         } else {
                             unreachable!();
                         }
@@ -790,14 +808,16 @@ impl Parser {
                 }
                 _ => {
                     if let Some(statement) = self.parse_variable_declaration()?.value() {
-                        if let StatementType::Declaration(var) = statement.statement_type {
-                            declarations.push(InstanceVariable {
-                                access: Access {
-                                    read: var.access.read.clone().or(access),
-                                    write: var.access.write.clone().or(access),
-                                },
-                                variable: var.variable,
-                            });
+                        if let StatementType::Declaration(vars) = statement.statement_type {
+                            for var in vars {
+                                declarations.push(InstanceVariable {
+                                    access: Access {
+                                        read: var.access.read.clone().or(access),
+                                        write: var.access.write.clone().or(access),
+                                    },
+                                    variable: var.variable,
+                                });
+                            }
                         } else {
                             unreachable!();
                         }
@@ -1021,11 +1041,15 @@ impl Parser {
                 self.tokens.next();
                 Some(None)
             }
-            _ => {
+            token_type => {
                 let range = self.tokens.peek()?.range;
                 return Some(
-                    self.fatal(&"Unexpected Token for Top Level".into(), range, true)?
-                        .ok(),
+                    self.fatal(
+                        &format!("Unexpected Token for Top Level: {}", token_type),
+                        range,
+                        true,
+                    )?
+                    .ok(),
                 );
             }
         }

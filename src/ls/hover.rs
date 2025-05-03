@@ -8,16 +8,15 @@ use crate::{linter, parser, tokenizer, types::MaybeMut};
 use super::ls::PowerBuilderLS;
 
 impl PowerBuilderLS {
-    pub(crate) fn hover_capabilities(&self, caps: &mut ServerCapabilities) {
+    pub(super) fn hover_capabilities(&self, caps: &mut ServerCapabilities) {
         caps.hover_provider = Some(HoverProviderCapability::Simple(true));
     }
 
-    pub(crate) async fn hover_impl(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
-        let path = self
-            .get_file(&params.text_document_position_params.text_document.uri)
-            .await?;
+    pub(super) async fn hover_impl(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        self.get_file(&uri).await?;
         let proj = self.m.proj.read().await;
-        let file_lock = proj.files.get(&path).unwrap();
+        let file_lock = proj.files.get(&uri).unwrap();
         let file = file_lock.read().await;
 
         let pos = params.text_document_position_params.position.into();

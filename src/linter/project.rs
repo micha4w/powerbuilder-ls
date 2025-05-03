@@ -1,17 +1,15 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs, sync::Arc};
 
-use anyhow::anyhow;
-use prost::{bytes::Bytes, Message as _};
-use tokio::sync::{Mutex, RwLock};
-
-use super::{
-    powerbuilder_proto::{self, variable},
-    types::*,
-    Linter,
+use encoding_rs_io::DecodeReaderBytes;
+use ropey::Rope;
+use tokio::{
+    sync::{Mutex, RwLock},
+    time::Instant,
 };
+
+use super::{types::*, Linter};
 use crate::{
-    parser::{self, GroupedName, Parser, VariableAccess},
-    tokenizer::{self, Token, TokenType},
+    parser::{self, Parser},
     types::*,
 };
 
@@ -27,48 +25,96 @@ pub struct File {
     pub diagnostics: Vec<parser::Diagnostic>,
 
     pub top_levels: ProgressedTopLevels,
-    pub path: PathBuf,
+    pub uri: Url,
+    pub content: Rope,
+
+    pub content_changed: bool,
+    pub diagnostics_changed: bool,
 }
 
 impl File {
-    pub fn new(path: PathBuf) -> anyhow::Result<File> {
-        let mut file = Parser::new_from_file(&path)?;
+    pub fn new(uri: Url) -> anyhow::Result<File> {
+        let path = uri.path();
+        let decoded_path = urlencoding::decode(&path)?;
+        eprintln!("Reading File {:?}", decoded_path);
 
-        Ok(File {
+        let content = Rope::from_reader(DecodeReaderBytes::new(fs::File::open(&*decoded_path)?))?;
+
+        let mut file = File {
             classes: HashMap::new(),
             variables: HashMap::new(),
 
             sql_cursors: HashMap::new(),
             sql_procedures: HashMap::new(),
 
-            top_levels: ProgressedTopLevels::None(file.parse_tokens()),
-            diagnostics: file.get_syntax_errors(),
+            top_levels: ProgressedTopLevels::None(Vec::new()),
+            diagnostics: Vec::new(),
 
-            path,
-        })
+            uri,
+            content,
+            content_changed: true,
+            diagnostics_changed: false,
+        };
+
+        file.reparse();
+        Ok(file)
+    }
+
+    pub fn reparse(&mut self) {
+        if !self.content_changed {
+            return;
+        }
+
+        let start = Instant::now();
+        let mut parser = Parser::new_file(self.content.chars(), self.uri.clone());
+        let top_levels = parser.parse_tokens();
+
+        eprintln!(
+            "Parsed File {:?} in {:?}",
+            self.uri.path_segments().unwrap().last(),
+            start.elapsed()
+        );
+
+        self.classes.clear();
+        self.variables.clear();
+        self.sql_cursors.clear();
+        self.sql_procedures.clear();
+
+        self.top_levels = ProgressedTopLevels::None(top_levels);
+        self.diagnostics = parser.get_syntax_errors();
+
+        self.content_changed = false;
+        self.diagnostics_changed = true;
     }
 }
 
 #[derive(Debug)]
 pub struct Project {
     // Keep the writing of RwLock to the minimal
-    pub files: HashMap<PathBuf, RwLock<File>>,
+    pub files: HashMap<Url, RwLock<File>>,
 
     pub builtin_enums: HashMap<IString, Arc<Mutex<Enum>>>,
+    pub builtin_enums_value_cache: HashMap<IString, Arc<Mutex<Enum>>>,
     pub builtin_functions: HashMap<IString, Vec<Arc<Mutex<Function>>>>,
     pub builtin_classes: HashMap<IString, Arc<Mutex<Class>>>,
+
+    pub builtin_url: Url,
 }
 
 impl Project {
     pub async fn new() -> anyhow::Result<Project> {
         let mut proj = Project {
             files: HashMap::new(),
+
             builtin_enums: HashMap::new(),
+            builtin_enums_value_cache: HashMap::new(),
             builtin_functions: HashMap::new(),
             builtin_classes: HashMap::new(),
+
+            builtin_url: Url::from_file_path("/builtins.pb").unwrap()
         };
 
-        proj.load_enums()?;
+        proj.load_enums().await?;
         proj.load_builtin_classes().await?;
         proj.load_builtin_functions()?;
 
@@ -76,6 +122,10 @@ impl Project {
     }
 
     pub async fn lint_file_to(&self, file_lock: &RwLock<File>, lint_progress: LintProgress) {
+        // eprintln!("Linting {}", Backtrace::capture());
+
+        file_lock.write().await.reparse();
+
         let mut current_progress = file_lock.read().await.top_levels.get_progress();
         if current_progress >= lint_progress {
             return;
@@ -84,12 +134,19 @@ impl Project {
         let mut file = file_lock.write().await;
 
         while current_progress < lint_progress {
+            let start = Instant::now();
             match current_progress.next() {
                 Some(progress) => {
                     Linter::new(self, MaybeMut::Mut(&mut file))
                         .lint_file()
                         .await;
                     current_progress = progress;
+                    eprintln!(
+                        "Linted File {:?} to stage {:?} in {:?}",
+                        file.uri.path_segments().unwrap().last(),
+                        current_progress,
+                        start.elapsed()
+                    );
                 }
                 None => break,
             }
@@ -98,15 +155,15 @@ impl Project {
 
     pub async fn add_file(
         &mut self,
-        path: &PathBuf,
+        uri: &Url,
         lint_progress: LintProgress,
     ) -> anyhow::Result<&RwLock<File>> {
-        if !self.files.contains_key(path) {
+        if !self.files.contains_key(uri) {
             self.files
-                .insert(path.clone(), RwLock::new(File::new(path.clone())?));
+                .insert(uri.clone(), RwLock::new(File::new(uri.clone())?));
         }
 
-        let _file_lock = self.files.get(path).unwrap();
+        let _file_lock = self.files.get(uri).unwrap();
 
         self.lint_file_to(&_file_lock, lint_progress).await;
 
@@ -115,265 +172,6 @@ impl Project {
         // }
 
         Ok(_file_lock)
-    }
-
-    fn parse_type(mut name: String) -> anyhow::Result<parser::DataType> {
-        name += "\n";
-
-        let mut parser = Parser::new_from_string(&(name + "\n"), "builtins.pb".into())?;
-        if let Some(Ok(dt) | Err((_, Some(dt)))) = parser.parse_type() {
-            return Ok(dt);
-        }
-
-        let errors = parser.get_syntax_errors();
-        if errors.is_empty() {
-            Err(anyhow::Error::msg(
-                errors
-                    .into_iter()
-                    .map(|err| err.message)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ))
-        } else {
-            Err(anyhow!("Unexpected Error while Parsing DataType"))
-        }
-    }
-
-    fn load_proto_function(
-        func: powerbuilder_proto::Function,
-    ) -> anyhow::Result<(Option<parser::DataType>, Vec<parser::Argument>, bool)> {
-        let mut has_vararg = false;
-        let mut returns = None;
-        let mut arguments = Vec::new();
-
-        if let Some(ret) = func.ret {
-            if ret != "\u{1}void" {
-                returns = Some(Project::parse_type(ret)?);
-            }
-        }
-
-        for arg in func.argument {
-            let flags = arg.flags.unwrap_or(0);
-
-            if flags & variable::Flag::IsVarlist as u32 > 0 {
-                has_vararg = true;
-            } else {
-                arguments.push(parser::Argument {
-                    is_ref: flags & variable::Flag::IsRef as u32 > 0,
-                    variable: parser::Variable {
-                        constant: flags & variable::Flag::NoWrite as u32 > 0,
-                        data_type: Project::parse_type(arg.r#type.unwrap())?,
-                        access: VariableAccess {
-                            name: Token {
-                                token_type: TokenType::ID,
-                                content: arg.name.clone().unwrap(),
-                                range: Range::default(),
-                                error: None,
-                            },
-                            is_write: true,
-                        },
-                        initial_value: None,
-                        range: Default::default(),
-                    },
-                })
-            }
-        }
-
-        Ok((returns, arguments, has_vararg))
-    }
-
-    pub fn load_enums(&mut self) -> anyhow::Result<()> {
-        let enums = powerbuilder_proto::Enums::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/enums.pb")
-        )))?;
-
-        self.builtin_enums
-            .extend(enums.r#enum.into_iter().map(|en| {
-                (
-                    (&en.name).into(),
-                    Mutex::new(Enum {
-                        name: en.name,
-                        help: en.help,
-                        values: en.value,
-                    })
-                    .into(),
-                )
-            }));
-
-        Ok(())
-    }
-
-    pub async fn load_builtin_classes(&mut self) -> anyhow::Result<()> {
-        let classes = powerbuilder_proto::Classes::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/classes.pb")
-        )))?;
-
-        for class in classes.class {
-            let iname = (&class.name).into();
-            let new_class_mut = Arc::new(Mutex::new(Class::new(parser::Class {
-                scope: None,
-                name: parser::DataType {
-                    data_type_type: parser::DataTypeType::Complex(GroupedName::simple(class.name)),
-                    range: Range::default(),
-                },
-                base: parser::DataType {
-                    data_type_type: parser::DataTypeType::Complex(GroupedName::simple(class.base)),
-                    range: Range::default(),
-                },
-                within: None,
-            })));
-
-            {
-                let mut new_class = new_class_mut.lock().await;
-                new_class.help = class.help;
-
-                for var in class.variable {
-                    let iname = var.name.as_ref().unwrap().into();
-                    let parsed = parser::Variable {
-                        constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
-                        data_type: Project::parse_type(var.r#type.unwrap())?,
-                        access: VariableAccess {
-                            name: Token {
-                                token_type: TokenType::ID,
-                                content: var.name.unwrap(),
-                                range: Range::default(),
-                                error: None,
-                            },
-                            is_write: true,
-                        },
-                        initial_value: None,
-                        range: Default::default(),
-                    };
-                    new_class.instance_variables.insert(
-                        iname,
-                        Mutex::new(Variable {
-                            data_type: parsed.data_type.data_type_type.clone(),
-                            variable_type: VariableType::Instance((
-                                Arc::downgrade(&new_class_mut),
-                                parser::InstanceVariable {
-                                    variable: parsed,
-                                    access: parser::Access {
-                                        read: None,
-                                        write: None,
-                                    },
-                                },
-                            )),
-                        })
-                        .into(),
-                    );
-                }
-
-                for func in class.function {
-                    let help = func.help.clone();
-                    let name = func.name.clone();
-                    let iname = (&func.name).into();
-                    let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
-
-                    let new_func = Mutex::new(Function::new_declaration(
-                        parser::Function {
-                            returns,
-                            scope_modif: None,
-                            access: None,
-                            name: Token {
-                                token_type: TokenType::ID,
-                                content: name,
-                                range: Range::default(),
-                                error: None,
-                            },
-                            arguments,
-                            vararg: has_vararg.then(|| Token {
-                                token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
-                                content: "...".into(),
-                                range: Range::default(),
-                                error: None,
-                            }),
-                            range: Default::default(),
-                        },
-                        help,
-                    ))
-                    .into();
-
-                    match new_class.functions.get_mut(&iname) {
-                        Some(funcs) => funcs.push(new_func),
-                        None => {
-                            new_class.functions.insert(iname, vec![new_func]);
-                        }
-                    };
-                }
-
-                for event in class.event {
-                    let name = event.name.clone();
-                    let (returns, arguments, has_vararg) = Self::load_proto_function(event)?;
-                    if has_vararg {
-                        todo!();
-                    }
-                    new_class.events.insert(
-                        (&name).into(),
-                        Mutex::new(Event::new_declaration(parser::Event {
-                            name: Token {
-                                token_type: TokenType::ID,
-                                content: name,
-                                range: Range::default(),
-                                error: None,
-                            },
-                            range: Default::default(),
-                            event_type: parser::EventType::User(returns, arguments),
-                        }))
-                        .into(),
-                    );
-                }
-            }
-
-            self.builtin_classes.insert(iname, new_class_mut);
-        }
-
-        Ok(())
-    }
-
-    pub fn load_builtin_functions(&mut self) -> anyhow::Result<()> {
-        let funcs = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/system_functions.pb")
-        )))?;
-
-        for func in funcs.function {
-            let help = func.help.clone();
-            let name = func.name.clone();
-            let iname = (&func.name).into();
-            let (returns, arguments, has_vararg) = Self::load_proto_function(func)?;
-
-            let new_func = Mutex::new(Function::new_declaration(
-                parser::Function {
-                    returns,
-                    scope_modif: None,
-                    access: None,
-                    name: Token {
-                        token_type: TokenType::ID,
-                        content: name,
-                        range: Range::default(),
-                        error: None,
-                    },
-                    arguments,
-                    vararg: has_vararg.then(|| Token {
-                        token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
-                        content: "...".into(),
-                        range: Range::default(),
-                        error: None,
-                    }),
-                    range: Default::default(),
-                },
-                help,
-            ))
-            .into();
-
-            match self.builtin_functions.get_mut(&iname) {
-                Some(funcs) => funcs.push(new_func),
-                None => {
-                    self.builtin_functions.insert(iname, vec![new_func]);
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub fn get_node_at<'a>(

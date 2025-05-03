@@ -8,19 +8,18 @@ use crate::{linter, parser, tokenizer, types::MaybeMut};
 use super::ls::PowerBuilderLS;
 
 impl PowerBuilderLS {
-    pub(crate) fn goto_definition_capabilities(&self, caps: &mut ServerCapabilities) {
+    pub(super) fn goto_definition_capabilities(&self, caps: &mut ServerCapabilities) {
         caps.definition_provider = Some(OneOf::Left(true));
     }
 
-    pub(crate) async fn goto_definition_impl(
+    pub(super) async fn goto_definition_impl(
         &self,
         params: GotoDefinitionParams,
     ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
-        let path = self
-            .get_file(&params.text_document_position_params.text_document.uri)
-            .await?;
+        let uri = params.text_document_position_params.text_document.uri;
+        self.get_file(&uri).await?;
         let proj = self.m.proj.read().await;
-        let file_lock = proj.files.get(&path).unwrap();
+        let file_lock = proj.files.get(&uri).unwrap();
         let file = file_lock.read().await;
 
         let pos = params.text_document_position_params.position.into();
@@ -175,10 +174,10 @@ impl PowerBuilderLS {
                         }
                     }
                 }
-                index @ parser::LValueType::Index(..) => {}
-                parser::LValueType::SQLAccess(_, access) => {}
+                _index @ parser::LValueType::Index(..) => {}
+                parser::LValueType::SQLAccess(_, _access) => {}
             },
-            linter::Node::Expression(expr) => {}
+            linter::Node::Expression(_expr) => {}
             linter::Node::Statement(_) => {}
             linter::Node::DataType(dt) => {
                 if let parser::DataTypeType::Complex(grouped_name) = &dt.data_type_type {
@@ -192,18 +191,9 @@ impl PowerBuilderLS {
         }
 
         let Some(range) = range else { return Ok(None) };
-        let uri = match Url::from_file_path(range.uri.as_path()) {
-            Ok(uri) => uri,
-            Err(_) => {
-                return Err(jsonrpc::Error::invalid_params(format!(
-                    "Invalid path: {:?}",
-                    range.uri.to_str()
-                )))
-            }
-        };
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri,
+            uri: (*range.uri).clone(),
             range: range.into(),
         })))
     }

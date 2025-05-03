@@ -1,9 +1,5 @@
-use std::{
-    cell::RefCell, fs::File, io::Read, path::{Path, PathBuf}, str::FromStr, sync::Arc
-};
+use std::{str::FromStr, sync::Arc};
 
-use anyhow::Result;
-use encoding_rs_io::DecodeReaderBytesBuilder;
 use multipeek::{multipeek, MultiPeek};
 use strum::Display;
 
@@ -37,43 +33,37 @@ pub struct Token {
     pub error: Option<String>,
 }
 
-pub struct FileTokenizer {
-    chars: MultiPeek<std::vec::IntoIter<char>>,
+pub struct Tokenizer<I>
+where
+    I: Iterator<Item = char>,
+{
+    chars: MultiPeek<I>,
 
     buildup: String,
-    pub uri: Arc<PathBuf>,
+    pub uri: Arc<Url>,
 
     pos: Position,
     next: Option<Token>,
     previous: Token,
 }
 
-impl FileTokenizer {
-    pub fn new(buf: String, uri: PathBuf) -> Self {
+impl<I: Iterator<Item = char>> Tokenizer<I> {
+    pub fn new(iter: I, uri: Url) -> Self {
         let uri = Arc::new(uri);
         Self {
-            chars: multipeek(buf.chars().collect::<Vec<_>>().into_iter()),
+            chars: multipeek(iter),
             buildup: String::new(),
             pos: Position { line: 0, column: 0 },
             next: None,
-            uri,
+            uri: uri.clone(),
 
             previous: Token {
                 token_type: TokenType::INVALID,
                 content: String::new(),
-                range: Range::default(),
+                range: Range::empty(uri),
                 error: None,
             },
         }
-    }
-
-    pub fn open_file(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = DecodeReaderBytesBuilder::new().build(file);
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf)?;
-
-        Ok(Self::new(buf, path.into()))
     }
 
     pub fn skip_headers(&mut self) -> Option<()> {
@@ -200,9 +190,7 @@ impl FileTokenizer {
                         _ => Some(TokenType::Symbol(Symbol::DOT)),
                     }
                 } else {
-                    let next = |this: &mut FileTokenizer, n: usize| {
-                        *this.chars.peek_nth(n).unwrap_or(&'\0')
-                    };
+                    let next = |this: &mut Self, n: usize| *this.chars.peek_nth(n).unwrap_or(&'\0');
                     if ('0'..='9').contains(&next(self, 0))
                         && ('0'..='9').contains(&next(self, 1))
                         && ('0'..='9').contains(&next(self, 2))
@@ -447,7 +435,7 @@ impl FileTokenizer {
     }
 }
 
-impl Iterator for FileTokenizer {
+impl<I: Iterator<Item = char>> Iterator for Tokenizer<I> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {

@@ -1,4 +1,5 @@
 use std::{cell::RefCell, cmp::min, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum EitherOr<Left, Right> {
@@ -43,24 +44,26 @@ impl From<tower_lsp::lsp_types::Position> for Position {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Default)]
+pub type Url = tower_lsp::lsp_types::Url;
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
-    pub uri: Arc<PathBuf>,
+    pub uri: Arc<Url>,
 }
 
 impl Range {
-    pub(crate) fn new(start: Position, end: Position, uri: Arc<PathBuf>) -> Self {
+    pub(super) fn new(start: Position, end: Position, uri: Arc<Url>) -> Self {
         Self { start, end, uri }
     }
 
-    pub(crate) fn merged(mut self, b: &Range) -> Self {
+    pub(super) fn merged(mut self, b: &Range) -> Self {
         self.merge(b);
         self
     }
 
-    pub(crate) fn merge(&mut self, b: &Range) -> &Self {
+    pub(super) fn merge(&mut self, b: &Range) -> &Self {
         assert!(self.uri == b.uri, "Merging Ranges from 2 different files");
 
         if b.start < self.start {
@@ -73,12 +76,12 @@ impl Range {
         self
     }
 
-    pub(crate) fn expanded(mut self, pos: &Position) -> Self {
+    pub(super) fn expanded(mut self, pos: &Position) -> Self {
         self.expand(pos);
         self
     }
 
-    pub(crate) fn expand(&mut self, pos: &Position) -> &Self {
+    pub(super) fn expand(&mut self, pos: &Position) -> &Self {
         if pos < &self.start {
             self.start = pos.clone()
         }
@@ -88,12 +91,16 @@ impl Range {
         self
     }
 
-    pub(crate) fn new_point(base_pos: Position, uri: Arc<PathBuf>) -> Self {
+    pub(super) fn new_point(base_pos: Position, uri: Arc<Url>) -> Self {
         Self {
             start: base_pos,
             end: base_pos,
             uri,
         }
+    }
+
+    pub(super) fn empty(uri: Arc<Url>) -> Self {
+        Self::new_point(Position::default(), uri)
     }
 
     pub fn contains(&self, pos: &Position) -> bool {
@@ -172,4 +179,8 @@ impl std::ops::Deref for IString {
     fn deref(&self) -> &Self::Target {
         &self._str
     }
+}
+
+pub fn arc_mut<T>(t: T) -> Arc<Mutex<T>> {
+    Arc::new(Mutex::new(t))
 }

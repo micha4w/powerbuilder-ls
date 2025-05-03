@@ -7,13 +7,22 @@
 Currently working features:
  - Parsing most parts of PowerScript
  - Linting Statements and complaining about type Errors
+ - LSP Features (only for the most basic cases):
+   - Go to definition
+   - Completion (only with objects)
+   - Hover
 
 TODOs:
- - Finish parser (SQL, throws)
+ - Finish parser (SQL, throws, pbni library)
  - Add smarter linting (loops, try catch)
- - Better Autocomplete (context based, types)
- - Hover Diagnostics
- - Keeping track of file changes without having to wait for a save
+ - Make comments not be ignored (Help String, autocomplete inside comments)
+ - Make the LSP Features work in more cases
+
+## Building
+Best to build this in release mode because speed matters:
+```rust
+cargo build --release
+```
 
 
 ## NeoVim Testing

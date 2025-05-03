@@ -8,7 +8,7 @@ use crate::{linter, parser, tokenizer, types::MaybeMut};
 use super::ls::PowerBuilderLS;
 
 impl PowerBuilderLS {
-    pub(crate) fn completion_capabilities(&self, caps: &mut ServerCapabilities) {
+    pub(super) fn completion_capabilities(&self, caps: &mut ServerCapabilities) {
         caps.completion_provider = Some(CompletionOptions {
             completion_item: Some(CompletionOptionsCompletionItem {
                 label_details_support: Some(true),
@@ -17,15 +17,14 @@ impl PowerBuilderLS {
         });
     }
 
-    pub(crate) async fn completion_impl(
+    pub(super) async fn completion_impl(
         &self,
         params: CompletionParams,
     ) -> jsonrpc::Result<Option<CompletionResponse>> {
-        let path = self
-            .get_file(&params.text_document_position.text_document.uri)
-            .await?;
+        let uri = params.text_document_position.text_document.uri;
+        self.get_file(&uri).await?;
         let proj = self.m.proj.read().await;
-        let file_lock = proj.files.get(&path).unwrap();
+        let file_lock = proj.files.get(&uri).unwrap();
         let file = file_lock.read().await;
 
         self.client
@@ -64,7 +63,7 @@ impl PowerBuilderLS {
             var: &linter::Variable,
             err: Option<String>,
         ) {
-            let name = var.parsed().access.name.clone();
+            let name = var.parsed().access.name.content.clone();
             let data_type = var.data_type.to_string();
             let variable_type = match &var.variable_type {
                 linter::VariableType::Local(_) => "Local Variable".into(),
@@ -83,10 +82,10 @@ impl PowerBuilderLS {
 
             let unavailable = err.as_ref().map(|_| true);
 
-            let detail = format!("{} {} : {}", name.content, data_type, variable_type);
+            let detail = format!("{} {} // {}", name, data_type, variable_type);
 
             items.push(CompletionItem {
-                label: name.content,
+                label: name,
                 label_details: Some(CompletionItemLabelDetails {
                     detail: None,
                     description: Some(data_type),
@@ -95,6 +94,45 @@ impl PowerBuilderLS {
                 deprecated: unavailable,
                 documentation: err.map(Documentation::String),
                 kind: Some(CompletionItemKind::VARIABLE),
+                ..Default::default()
+            });
+        }
+
+        async fn add_function(
+            items: &mut Vec<CompletionItem>,
+            func: &linter::Function,
+            err: Option<String>,
+        ) {
+            let mut name = func.parsed().name.content.clone() + "(";
+            let mut insert = name.clone();
+            let has_args = func.parsed().arguments.len() > 0 || func.parsed().vararg.is_some();
+            if has_args {
+                name += "…";
+            } else {
+                insert += ")";
+            }
+            name += ")";
+            let unavailable = err.as_ref().map(|_| true);
+
+            let mut documentation = format!("```powerbuilder\n{}\n```", func);
+            if let Some(help) = &func.help {
+                if !help.trim().is_empty() {
+                    documentation += "\n---\n";
+                    documentation += help;
+                }
+            }
+
+            items.push(CompletionItem {
+                label: name,
+                label_details: None,
+                detail: None,
+                deprecated: unavailable,
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: documentation,
+                })),
+                kind: Some(CompletionItemKind::VARIABLE),
+                insert_text: Some(insert),
                 ..Default::default()
             });
         }
@@ -160,16 +198,28 @@ impl PowerBuilderLS {
                                 let mut vars = Box::pin(
                                     linter
                                         .get_variables_in_class(
-                                            class_mut,
+                                            class_mut.clone(),
                                             &tokenizer::AccessType::PRIVATE,
                                             access.is_write,
                                         )
                                         .await,
                                 );
-
-                                while let Some((name, var)) = vars.next().await {
+                                while let Some((_, var)) = vars.next().await {
                                     let lock = var.lock().await;
                                     add_variable(&mut items, &lock, None).await;
+                                }
+
+                                let mut funcs = Box::pin(
+                                    linter
+                                        .get_functions_in_class(
+                                            class_mut,
+                                            &tokenizer::AccessType::PRIVATE,
+                                        )
+                                        .await,
+                                );
+                                while let Some((_, func)) = funcs.next().await {
+                                    let lock = func.lock().await;
+                                    add_function(&mut items, &lock, None).await;
                                 }
                             }
                         }

@@ -4,7 +4,7 @@ use crate::{
     types::*,
 };
 
-impl Parser {
+impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_throw(&mut self) -> EOFOr<Option<Statement>> {
         let throw = self.tokens.next()?;
         let mut err = None;
@@ -65,6 +65,7 @@ impl Parser {
         }))
     }
 
+    // TODO make a parse_instance_variable_declaration instead?
     pub fn parse_variable_declaration(&mut self) -> EOFOrParserResult<Statement> {
         let start = self.tokens.peek()?.range.start;
 
@@ -160,108 +161,126 @@ impl Parser {
         let mut data_type = quick_exit!(self.parse_type()?);
         let var_start = var_start.unwrap_or(data_type.range.start);
 
-        let name = quick_exit_simple!(self.expect(TokenType::ID)?);
-
-        let mut end = name.range.end;
+        let mut vars = Vec::new();
+        let mut end;
         let mut err = None;
-        if self
-            .optional(TokenType::Symbol(tokenizer::Symbol::LBRACE))?
-            .is_some()
-        {
-            let mut first = true;
-            loop {
-                match self.tokens.peek()?.token_type {
-                    TokenType::Symbol(tokenizer::Symbol::RBRACE) => {
-                        end = self.tokens.next()?.range.end;
-                        break;
-                    }
-                    TokenType::Symbol(tokenizer::Symbol::COMMA) if !first => {
-                        end = self.tokens.next()?.range.end;
-                    }
-                    TokenType::Literal(tokenizer::Literal::NUMBER) if first => {}
-                    _ => {
-                        let range = self.tokens.peek()?.range;
-                        err = self
-                            .fatal::<()>(
-                                &if first {
-                                    "Expected ']' or a Number Literal"
-                                } else {
-                                    "Expected ']' or ','"
-                                }
-                                .into(),
-                                range,
-                                true,
-                            )?
-                            .err();
-                        break;
-                    }
-                }
-                first = false;
 
-                err = self
-                    .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
-                    .err();
-                if err.is_some() {
-                    break;
-                }
+        loop {
+            let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+            end = name.range.end;
 
-                if self
-                    .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
-                    .is_some()
-                {
+            if self
+                .optional(TokenType::Symbol(tokenizer::Symbol::LBRACE))?
+                .is_some()
+            {
+                let mut first = true;
+                loop {
+                    match self.tokens.peek()?.token_type {
+                        TokenType::Symbol(tokenizer::Symbol::RBRACE) => {
+                            end = self.tokens.next()?.range.end;
+                            break;
+                        }
+                        TokenType::Symbol(tokenizer::Symbol::COMMA) if !first => {
+                            end = self.tokens.next()?.range.end;
+                        }
+                        TokenType::Literal(tokenizer::Literal::NUMBER) if first => {}
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            err = self
+                                .fatal::<()>(
+                                    &if first {
+                                        "Expected ']' or a Number Literal"
+                                    } else {
+                                        "Expected ']' or ','"
+                                    }
+                                    .into(),
+                                    range,
+                                    true,
+                                )?
+                                .err();
+                            break;
+                        }
+                    }
+                    first = false;
+
                     err = self
                         .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
                         .err();
                     if err.is_some() {
                         break;
                     }
+
+                    if self
+                        .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
+                        .is_some()
+                    {
+                        err = self
+                            .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
+                            .err();
+                        if err.is_some() {
+                            break;
+                        }
+                    }
+                }
+
+                data_type = DataType {
+                    range: data_type.range.expanded(&end),
+                    data_type_type: DataTypeType::Array(Box::new(data_type.data_type_type.clone())),
                 }
             }
 
-            data_type = DataType {
-                range: data_type.range.expanded(&end),
-                data_type_type: DataTypeType::Array(Box::new(data_type.data_type_type)),
-            }
-        }
+            let expression = if err.is_none()
+                && self
+                    .optional(TokenType::Operator(tokenizer::Operator::EQ))?
+                    .is_some()
+            {
+                let expression;
+                (expression, err) = self.parse_expression(false)?.split();
+                if let Some(ex) = &expression {
+                    end = ex.range.end;
+                }
+                expression
+            } else {
+                None
+            };
 
-        let expression = if err.is_none()
-            && self
-                .optional(TokenType::Operator(tokenizer::Operator::EQ))?
-                .is_some()
-        {
-            let expression;
-            (expression, err) = self.parse_expression(false)?.split();
-            if let Some(ex) = &expression {
-                end = ex.range.end;
-            }
-            expression
-        } else {
-            None
-        };
+            vars.push(InstanceVariable {
+                access: access.clone(),
+                variable: Variable {
+                    range: Range {
+                        start: var_start,
+                        end,
+                        uri: self.uri(),
+                    },
+                    data_type: data_type.clone(),
+                    access: VariableAccess {
+                        name,
+                        is_write: true,
+                    },
+                    constant,
+                    initial_value: expression,
+                },
+            });
 
-        if err.is_none() {
-            err = self.expect(TokenType::NEWLINE)?.err();
+            if err.is_some() {
+                break;
+            }
+
+            if self.optional(TokenType::NEWLINE)?.is_some() {
+                break;
+            }
+
+            err = self
+                .expect(TokenType::Symbol(tokenizer::Symbol::COMMA))?
+                .err();
+            if err.is_some() {
+                break;
+            }
         }
 
         Some(ParseResult::new(
             Statement {
-                statement_type: StatementType::Declaration(InstanceVariable {
-                    access,
-                    variable: Variable {
-                        range: Range {
-                            start: var_start,
-                            end,
-                            uri: self.uri(),
-                        },
-                        data_type,
-                        access: VariableAccess {
-                            name,
-                            is_write: true,
-                        },
-                        constant,
-                        initial_value: expression,
-                    },
-                }),
+                statement_type: StatementType::Declaration(vars),
                 range: Range {
                     start,
                     end,
@@ -712,22 +731,24 @@ impl Parser {
                         let range = data_type.range.clone().merged(&name.range);
                         catches.push((
                             Statement {
-                                statement_type: StatementType::Declaration(InstanceVariable {
-                                    access: Access {
-                                        read: None,
-                                        write: None,
-                                    },
-                                    variable: Variable {
-                                        range: range.clone(),
-                                        constant: false,
-                                        data_type,
-                                        access: VariableAccess {
-                                            name,
-                                            is_write: true,
+                                statement_type: StatementType::Declaration(vec![
+                                    InstanceVariable {
+                                        access: Access {
+                                            read: None,
+                                            write: None,
                                         },
-                                        initial_value: None,
+                                        variable: Variable {
+                                            range: range.clone(),
+                                            constant: false,
+                                            data_type,
+                                            access: VariableAccess {
+                                                name,
+                                                is_write: true,
+                                            },
+                                            initial_value: None,
+                                        },
                                     },
-                                }),
+                                ]),
                                 range,
                             },
                             statements,

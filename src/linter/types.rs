@@ -8,9 +8,9 @@ use std::{
 use futures::future::{self};
 use tokio::sync::Mutex;
 
-use super::{File, Linter};
+use super::Linter;
 use crate::{
-    parser::{self, GroupedName, SQLDeclareProcedureStatement, SQLSelectStatement, VariableAccess},
+    parser::{self, GroupedName, SQLDeclareProcedureStatement, SQLSelectStatement},
     tokenizer::{self, Token},
     types::*,
 };
@@ -91,6 +91,7 @@ pub struct EventDefinition {
 #[derive(Clone, Debug)]
 pub struct Event {
     pub returns: parser::DataTypeType,
+    pub help: Option<String>,
 
     pub arguments: Vec<Arc<Mutex<Variable>>>,
     pub declaration: Option<parser::Event>,
@@ -136,7 +137,7 @@ impl Event {
         );
     }
 
-    pub fn new_declaration(parsed: parser::Event) -> Self {
+    pub fn new_declaration(parsed: parser::Event, help: Option<String>) -> Self {
         let (returns, arguments) = Event::get_types(&parsed);
 
         Event {
@@ -145,10 +146,8 @@ impl Event {
             uses: Vec::new(),
 
             returns,
-            arguments: arguments
-                .into_iter()
-                .map(|var| Mutex::new(var).into())
-                .collect(),
+            help,
+            arguments: arguments.into_iter().map(arc_mut).collect(),
         }
     }
 
@@ -160,7 +159,7 @@ impl Event {
 
         for arg in arguments {
             let iname = (&arg.parsed().access.name.content).into();
-            let arg_mut = Arc::new(Mutex::new(arg));
+            let arg_mut = arc_mut(arg);
 
             argument_muts.push(arg_mut.clone());
             variables.insert(iname, arg_mut);
@@ -170,6 +169,7 @@ impl Event {
             declaration: None,
             definition: Some(EventDefinition { variables, parsed }),
             uses: Vec::new(),
+            help: None,
 
             returns,
             arguments: argument_muts,
@@ -218,12 +218,11 @@ impl FunctionDefinition {
                 .map(|arg| {
                     (
                         (&arg.variable.access.name.content).into(),
-                        Mutex::new(Variable {
+                        arc_mut(Variable {
                             variable_type: VariableType::Argument(arg.clone()),
                             data_type: arg.variable.data_type.data_type_type.clone(),
                             // uses: Vec::new(),
-                        })
-                        .into(),
+                        }),
                     )
                 })
                 .collect(),
@@ -255,11 +254,11 @@ impl Function {
         }
     }
 
-    pub async fn equals(&self, other: &Function) -> bool {
-        self.returns == other.returns && self.conflicts(other).await
+    pub fn equals(&self, other: &Function) -> bool {
+        self.returns == other.returns && self.conflicts(other)
     }
 
-    pub async fn conflicts(&self, other: &Function) -> bool {
+    pub fn conflicts(&self, other: &Function) -> bool {
         self.parsed().arguments.len() == other.parsed().arguments.len()
             && self.parsed().vararg.is_some() == other.parsed().vararg.is_some()
             && {
@@ -268,7 +267,8 @@ impl Function {
                     .iter()
                     .zip(&other.parsed().arguments)
                     .all(|(self_arg, other_arg)| {
-                        self_arg.variable.data_type == other_arg.variable.data_type
+                        self_arg.variable.data_type.data_type_type
+                            == other_arg.variable.data_type.data_type_type
                     })
             }
     }
@@ -436,7 +436,7 @@ impl Class {
         for functions in [&self.functions, &self.external_functions] {
             if let Some(funcs) = functions.get(&(&function.parsed().name.content).into()) {
                 for func in funcs {
-                    if func.lock().await.conflicts(function).await {
+                    if func.lock().await.conflicts(function) {
                         return Some(func.clone());
                     }
                 }
@@ -523,7 +523,8 @@ pub type LintedInComplete<A, B> = (A, A, (A, B));
 
 pub type ForwardDecl =
     LintedInOnlyTypes<Vec<parser::DatatypeDecl>, HashMap<IString, Arc<Mutex<Class>>>>;
-pub type ScopedVariableDecl = LintedInOnlyTypes<parser::ScopedVariable, Arc<Mutex<Variable>>>;
+pub type ScopedVariableDecl =
+    LintedInOnlyTypes<Vec<parser::ScopedVariable>, Vec<Arc<Mutex<Variable>>>>;
 pub type ScopedVariablesDecl =
     LintedInOnlyTypes<Vec<parser::ScopedVariable>, HashMap<IString, Arc<Mutex<Variable>>>>;
 
@@ -539,14 +540,14 @@ pub type FunctionsForwardDecl = LintedInShallow<
     Vec<parser::Function>,
     (
         Option<Arc<Mutex<Class>>>,
-        HashMap<IString, Arc<Mutex<Function>>>,
+        HashMap<IString, Vec<Arc<Mutex<Function>>>>,
     ),
 >;
 pub type ExternalFunctions = LintedInShallow<
     Vec<parser::Function>,
     (
         Option<Arc<Mutex<Class>>>,
-        HashMap<IString, Arc<Mutex<Function>>>,
+        HashMap<IString, Vec<Arc<Mutex<Function>>>>,
     ),
 >;
 
@@ -664,10 +665,8 @@ impl TopLevelType<LintProgressComplete> {
                 statements.search(pos, &mut nodes);
             }
 
-            TopLevelType::ScopedVariableDecl((var, _)) => {
-                var.variable.search(pos, &mut nodes);
-            }
-            TopLevelType::ScopedVariablesDecl((vars, _)) => {
+            TopLevelType::ScopedVariableDecl((vars, _))
+            | TopLevelType::ScopedVariablesDecl((vars, _)) => {
                 for var in vars {
                     var.variable.search(pos, &mut nodes);
                 }

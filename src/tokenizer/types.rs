@@ -226,6 +226,7 @@ pub enum Operator {
 }
 
 impl Operator {
+    // The lower the higher the priority
     pub fn precedence(&self) -> u8 {
         match self {
             Operator::CARAT => 1,

@@ -4,7 +4,7 @@ use crate::{
     types::*,
 };
 
-impl Parser {
+impl<I: Iterator<Item = char>> Parser<I> {
     // TODO why is this function included inside parse_type
     pub fn parse_class_id(&mut self) -> EOFOrParserResult<(Option<Token>, Token)> {
         let name = self.tokens.next()?;
@@ -333,13 +333,13 @@ impl Parser {
             let range = expression.range.clone().merged(&right_side.range);
             expression = match right_side.expression_type {
                 ExpressionType::Operation(sub_left, sub_operator, sub_right)
-                    if operator.precedence() > sub_operator.precedence() =>
+                    if operator.precedence() < sub_operator.precedence() =>
                 {
                     Expression {
-                        range: range.clone(),
+                        range,
                         expression_type: ExpressionType::Operation(
                             Box::new(Expression {
-                                range,
+                                range: expression.range.clone().merged(&sub_left.range),
                                 expression_type: ExpressionType::Operation(
                                     Box::new(expression),
                                     operator,
@@ -598,7 +598,7 @@ impl Parser {
                     }
                 }
                 _ => {
-                    let mut range = Range::default();
+                    let mut range = Range::empty(self.uri());
                     let var = VariableAccess {
                         name: self.id_or_invalid(&None, &mut range)?,
                         is_write: false,

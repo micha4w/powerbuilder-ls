@@ -487,6 +487,7 @@ pub struct Class {
     pub name: DataType,
     pub base: DataType,
     pub within: Option<DataType>,
+    pub autoinstantiate: Option<Token>,
 }
 
 #[derive(Debug)]
@@ -867,7 +868,7 @@ pub enum StatementType {
     Destroy(Expression),
     Assignment(LValue, Option<tokenizer::SpecialAssignment>, Expression),
     TryCatch(TryCatchStatement),
-    Declaration(InstanceVariable),
+    Declaration(Vec<InstanceVariable>),
     ForLoop(ForLoopStatement),
     WhileLoop(WhileLoopStatement),
     Choose(ChooseCaseStatement),
@@ -897,7 +898,7 @@ pub struct DatatypeDecl {
 pub enum TopLevelType {
     ForwardDecl(Vec<DatatypeDecl>),
 
-    ScopedVariableDecl(ScopedVariable),
+    ScopedVariableDecl(Vec<ScopedVariable>),
     ScopedVariablesDecl(Vec<ScopedVariable>),
 
     DatatypeDecl(DatatypeDecl),
