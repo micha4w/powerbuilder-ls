@@ -6,66 +6,6 @@ use crate::{
     types::*,
 };
 
-macro_rules! quick_exit {
-    ( $func:expr, $err:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err((err, Some(ret))) => {
-                $err = Some(err);
-                ret
-            }
-            Err((err, None)) => return Some(Err((err, None))),
-        }
-    };
-    ( $func:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err((err, _)) => return Some(Err((err, None))),
-        }
-    };
-}
-macro_rules! quick_exit_opt {
-    ( $func:expr, $err:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err((err, Some(ret))) => {
-                $err = Some(err);
-                ret
-            }
-            Err(_) => return Some(None),
-        }
-    };
-    ( $func:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err((_, _)) => return Some(None),
-        }
-    };
-}
-
-macro_rules! quick_exit_simple {
-    ( $func:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err(err) => return Some(Err((err, None))),
-        }
-    };
-}
-
-macro_rules! quick_exit_simple_opt {
-    ( $func:expr ) => {
-        match $func {
-            Ok(ret) => ret,
-            Err(_) => return Some(None),
-        }
-    };
-}
-
-pub(super) use quick_exit;
-pub(super) use quick_exit_opt;
-pub(super) use quick_exit_simple;
-pub(super) use quick_exit_simple_opt;
-
 pub struct Parser<I>
 where
     I: Iterator<Item = char>,
@@ -165,7 +105,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             self.fatal(
                 &format!("Expected {:?}", token_type),
                 token.range,
-                matches!(
+                !matches!(
                     token.token_type,
                     TokenType::NEWLINE | TokenType::Symbol(crate::tokenizer::Symbol::SEMICOLON)
                 ),

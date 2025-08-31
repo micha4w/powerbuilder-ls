@@ -1,4 +1,7 @@
-use std::fmt::{self, Debug};
+use std::{
+    fmt::{self, Debug},
+    vec,
+};
 
 use anyhow::anyhow;
 
@@ -53,6 +56,68 @@ impl<T> ParseResultT<T> for ParseResult<T> {
         }
     }
 }
+
+
+pub trait IntoParseResult<T> {
+    fn into(self) -> ParseResult<T>;
+}
+
+impl<T> IntoParseResult<T> for ParseResult<T> {
+    fn into(self) -> ParseResult<T> {
+        return self
+    }
+}
+
+impl<T> IntoParseResult<T> for Result<T, ParseError> {
+    fn into(self) -> ParseResult<T> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(err) => Err((err, None)),
+        }
+    }
+}
+
+macro_rules! ret_res {
+    ( $func:expr, $err:expr ) => {
+        match IntoParseResult::into($func) {
+            Ok(ret) => ret,
+            Err((err, Some(ret))) => {
+                $err = Some(err);
+                ret
+            }
+            Err((err, None)) => return Some(Err((err, None))),
+        }
+    };
+    ( $func:expr ) => {
+        match IntoParseResult::into($func) {
+            Ok(ret) => ret,
+            Err((err, _)) => return Some(Err((err, None))),
+        }
+    };
+}
+macro_rules! ret_opt {
+    ( $func:expr, $err:expr ) => {
+        match IntoParseResult::into($func) {
+            Ok(ret) => ret,
+            Err((err, Some(ret))) => {
+                $err = Some(err);
+                ret
+            }
+            Err(_) => return Some(None),
+        }
+    };
+    ( $func:expr ) => {
+        match IntoParseResult::into($func) {
+            Ok(ret) => ret,
+            Err((_, _)) => return Some(None),
+        }
+    };
+}
+
+
+pub(super) use ret_res;
+pub(super) use ret_opt;
+
 
 // pub trait KeepEOF<T> {
 //     fn split_eof(self) -> ParseResult<ParseResult<T>>;
@@ -246,6 +311,12 @@ pub struct DataType {
 pub struct Access {
     pub read: Option<tokenizer::AccessType>,
     pub write: Option<tokenizer::AccessType>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Descriptor {
+    pub key: Token,
+    pub value: Token,
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +559,7 @@ pub struct Class {
     pub base: DataType,
     pub within: Option<DataType>,
     pub autoinstantiate: Option<Token>,
+    pub native: Option<Token>,
 }
 
 #[derive(Debug)]
@@ -738,9 +810,9 @@ pub struct Literal {
 
 #[derive(Debug)]
 pub enum CaseSpecifierType {
-    Literals(Literal),
-    To(Literal, Literal),
-    Is(tokenizer::Operator, Literal),
+    Literals(Expression),
+    To(Expression, Expression),
+    Is(tokenizer::Operator, Expression),
     Else,
 }
 
@@ -748,6 +820,17 @@ pub enum CaseSpecifierType {
 pub struct CaseSpecifier {
     pub specifier_type: CaseSpecifierType,
     pub range: Range,
+}
+
+impl CaseSpecifier {
+    pub fn get_expressions(&self) -> Vec<&Expression> {
+        match &self.specifier_type {
+            CaseSpecifierType::Literals(expression) => vec![expression],
+            CaseSpecifierType::To(from, to) => vec![from, to],
+            CaseSpecifierType::Is(_, is) => vec![is],
+            CaseSpecifierType::Else => vec![],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -890,13 +973,14 @@ pub struct DatatypeDecl {
     pub class: Class,
     pub variables: Vec<InstanceVariable>,
     pub events: Vec<Event>,
+    pub functions: Vec<Function>,
 
     pub range: Range,
 }
 
 #[derive(Debug)]
 pub enum TopLevelType {
-    ForwardDecl(Vec<DatatypeDecl>),
+    ForwardDecl(Vec<ScopedVariable>, Vec<DatatypeDecl>),
 
     ScopedVariableDecl(Vec<ScopedVariable>),
     ScopedVariablesDecl(Vec<ScopedVariable>),

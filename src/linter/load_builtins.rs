@@ -141,6 +141,7 @@ impl Project {
                 },
                 within: None,
                 autoinstantiate: None,
+                native: None,
             }));
 
             {

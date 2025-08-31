@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use futures::StreamExt;
 use tower_lsp::{jsonrpc, lsp_types::*};
 
-use crate::{linter, parser, tokenizer, types::MaybeMut};
+use crate::{linter, parser, tokenizer};
 
 use super::ls::PowerBuilderLS;
 
@@ -38,7 +37,8 @@ impl PowerBuilderLS {
                 .await
                 .unwrap_or_else(HashMap::new),
             return_type: parser::DataTypeType::Void,
-            file: MaybeMut::No(&file),
+            file: file_lock,
+            diagnose: false,
         };
 
         let mut range = None;
@@ -95,17 +95,14 @@ impl PowerBuilderLS {
                             if let Some(linter::Complex::Class(class_mut)) =
                                 linter.find_class(&grouped_name).await
                             {
-                                let mut vars = Box::pin(
-                                    linter
-                                        .get_variables_in_class(
-                                            class_mut,
-                                            &tokenizer::AccessType::PRIVATE,
-                                            access.is_write,
-                                        )
-                                        .await,
-                                );
-
-                                while let Some((name, var)) = vars.next().await {
+                                for (name, var) in linter
+                                    .get_variables_in_class(
+                                        class_mut,
+                                        &tokenizer::AccessType::PRIVATE,
+                                        access.is_write,
+                                    )
+                                    .await
+                                {
                                     if name == (&access.name.content).into() {
                                         range = Some(
                                             var.lock().await.parsed().access.name.range.clone(),
@@ -120,9 +117,8 @@ impl PowerBuilderLS {
                 }
                 parser::LValueType::Function(call) => {
                     let arg_types = linter.lint_expressions(&call.arguments).await;
-                    let mut funcs = Box::pin(linter.get_functions().await);
 
-                    while let Some((name, func)) = funcs.next().await {
+                    for (name, func) in linter.get_functions().await {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
                             && linter
@@ -152,13 +148,10 @@ impl PowerBuilderLS {
                         return Ok(None);
                     };
 
-                    let mut funcs = Box::pin(
-                        linter
-                            .get_functions_in_class(class_mut, &tokenizer::AccessType::PRIVATE)
-                            .await,
-                    );
-
-                    while let Some((name, func)) = funcs.next().await {
+                    for (name, func) in linter
+                        .get_functions_in_class(class_mut, &tokenizer::AccessType::PRIVATE)
+                        .await
+                    {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
                             && linter

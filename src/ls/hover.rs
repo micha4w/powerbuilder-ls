@@ -1,9 +1,8 @@
-use std::{collections::HashMap, pin::Pin};
+use std::collections::HashMap;
 
-use futures::StreamExt;
 use tower_lsp::{jsonrpc, lsp_types::*};
 
-use crate::{linter, parser, tokenizer, types::MaybeMut};
+use crate::{linter, parser, tokenizer};
 
 use super::ls::PowerBuilderLS;
 
@@ -35,11 +34,12 @@ impl PowerBuilderLS {
                 .await
                 .unwrap_or_else(HashMap::new),
             return_type: parser::DataTypeType::Void,
-            file: MaybeMut::No(&file),
+            file: file_lock,
+            diagnose: false,
         };
 
         let mut title = None;
-        // let mut description = None;
+        let mut description = None;
         let range = node.get_range();
         match node {
             linter::Node::InstanceVariableDeclaration(var) => {
@@ -52,13 +52,10 @@ impl PowerBuilderLS {
             }
             linter::Node::ScopedVariableDeclaration(var) => title = Some(var.to_string()),
             linter::Node::VariableAccess(access) => {
-                let mut vars: Pin<Box<dyn futures::Stream<Item = _> + Send>> = Box::pin(
-                    linter
-                        .get_variables(&access.name.range.end, access.is_write)
-                        .await,
-                );
-
-                while let Some((name, var)) = vars.next().await {
+                for (name, var) in linter
+                    .get_variables(&access.name.range.end, access.is_write)
+                    .await
+                {
                     if name == (&access.name.content).into() {
                         let lock = var.lock().await;
                         if let linter::VariableType::Instance((class_wk, _)) = &lock.variable_type {
@@ -115,17 +112,14 @@ impl PowerBuilderLS {
                             if let Some(linter::Complex::Class(class_mut)) =
                                 linter.find_class(&grouped_name).await
                             {
-                                let mut vars = Box::pin(
-                                    linter
-                                        .get_variables_in_class(
-                                            class_mut,
-                                            &tokenizer::AccessType::PRIVATE,
-                                            access.is_write,
-                                        )
-                                        .await,
-                                );
-
-                                while let Some((name, var)) = vars.next().await {
+                                for (name, var) in linter
+                                    .get_variables_in_class(
+                                        class_mut,
+                                        &tokenizer::AccessType::PRIVATE,
+                                        access.is_write,
+                                    )
+                                    .await
+                                {
                                     if name == (&access.name.content).into() {
                                         title = Some(format!(
                                             "type {}\n{}",
@@ -142,9 +136,8 @@ impl PowerBuilderLS {
                 }
                 parser::LValueType::Function(call) => {
                     let arg_types = linter.lint_expressions(&call.arguments).await;
-                    let mut funcs = Box::pin(linter.get_functions().await);
 
-                    while let Some((name, func)) = funcs.next().await {
+                    for (name, func) in linter.get_functions().await {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
                             && linter
@@ -156,6 +149,7 @@ impl PowerBuilderLS {
                                 .await
                         {
                             title = Some(lock.to_string());
+                            description = lock.help.clone();
                             break;
                         }
                     }
@@ -174,13 +168,10 @@ impl PowerBuilderLS {
                         return Ok(None);
                     };
 
-                    let mut funcs = Box::pin(
-                        linter
-                            .get_functions_in_class(class_mut, &tokenizer::AccessType::PRIVATE)
-                            .await,
-                    );
-
-                    while let Some((name, func)) = funcs.next().await {
+                    for (name, func) in linter
+                        .get_functions_in_class(class_mut, &tokenizer::AccessType::PRIVATE)
+                        .await
+                    {
                         let lock = func.lock().await;
                         if name == (&call.name.content).into()
                             && linter
@@ -192,6 +183,7 @@ impl PowerBuilderLS {
                                 .await
                         {
                             title = Some(format!("type {}\n{}", grouped_name, lock));
+                            description = lock.help.clone();
                             break;
                         }
                     }
@@ -209,12 +201,15 @@ impl PowerBuilderLS {
                     parser::DataTypeType::Complex(grouped_name) => {
                         match linter.find_class(&grouped_name).await {
                             Some(linter::Complex::Class(class_mut)) => {
-                                class_mut.lock().await.to_string()
+                                let lock = class_mut.lock().await;
+                                description = lock.help.clone();
+                                lock.to_string()
                             }
-                            Some(linter::Complex::Enum(_)) => {
+                            Some(linter::Complex::Enum(en)) => {
+                                description = en.lock().await.help.clone();
                                 format!("type {} from enumerated", dt_name)
                             }
-                            None => format!("type {} from class_not_found", dt_name),
+                            None => format!("type {}", dt_name),
                         }
                     }
                     _ => format!("type {} from primitives", dt_name),
@@ -227,7 +222,14 @@ impl PowerBuilderLS {
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```powerbuilder\n{}\n```", title),
+                value: {
+                    let mut content = format!("```powerbuilder\n{}\n```", title);
+                    if let Some(desc) = description {
+                        content += "\n---\n";
+                        content += &desc;
+                    }
+                    content
+                }
             }),
             range: Some(range.clone().into()),
         }))

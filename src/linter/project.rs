@@ -1,17 +1,22 @@
-use std::{collections::HashMap, fs, sync::Arc};
+use core::str;
+use std::{collections::HashMap, ffi::OsStr, fs, io::Read, path::PathBuf, str::FromStr, sync::Arc};
+
+use anyhow::anyhow;
 
 use encoding_rs_io::DecodeReaderBytes;
 use ropey::Rope;
-use tokio::{
-    sync::{Mutex, RwLock},
-    time::Instant,
-};
+use tokio::time::Instant;
 
 use super::{types::*, Linter};
 use crate::{
     parser::{self, Parser},
     types::*,
 };
+
+fn uri_to_path(uri: &Url) -> anyhow::Result<PathBuf> {
+    uri.to_file_path()
+        .map_err(|_| anyhow!("Failed to convert Url to PathBuf {:?}", uri))
+}
 
 #[derive(Debug)]
 pub struct File {
@@ -34,11 +39,10 @@ pub struct File {
 
 impl File {
     pub fn new(uri: Url) -> anyhow::Result<File> {
-        let path = uri.path();
-        let decoded_path = urlencoding::decode(&path)?;
+        let decoded_path = uri_to_path(&uri)?;
         eprintln!("Reading File {:?}", decoded_path);
 
-        let content = Rope::from_reader(DecodeReaderBytes::new(fs::File::open(&*decoded_path)?))?;
+        let content = Rope::from_reader(DecodeReaderBytes::new(fs::File::open(&decoded_path)?))?;
 
         let mut file = File {
             classes: HashMap::new(),
@@ -111,7 +115,7 @@ impl Project {
             builtin_functions: HashMap::new(),
             builtin_classes: HashMap::new(),
 
-            builtin_url: Url::from_file_path("/builtins.pb").unwrap()
+            builtin_url: Url::from_file_path("/builtins.pb").unwrap(),
         };
 
         proj.load_enums().await?;
@@ -131,19 +135,15 @@ impl Project {
             return;
         }
 
-        let mut file = file_lock.write().await;
-
         while current_progress < lint_progress {
             let start = Instant::now();
             match current_progress.next() {
                 Some(progress) => {
-                    Linter::new(self, MaybeMut::Mut(&mut file))
-                        .lint_file()
-                        .await;
+                    Linter::new(self, file_lock, true).lint_file().await;
                     current_progress = progress;
                     eprintln!(
                         "Linted File {:?} to stage {:?} in {:?}",
-                        file.uri.path_segments().unwrap().last(),
+                        file_lock.read().await.uri.path_segments().unwrap().last(),
                         current_progress,
                         start.elapsed()
                     );
@@ -172,6 +172,108 @@ impl Project {
         // }
 
         Ok(_file_lock)
+    }
+
+    async fn add_directory(&mut self, folder: &Url) -> anyhow::Result<()> {
+        for file in std::fs::read_dir(&uri_to_path(folder)?)? {
+            let path = file?.path();
+
+            let extensions =
+                ["sra", "srf", "srm", "srs", "sru", "srw"].map(|f| Some(OsStr::new(f)));
+            if extensions.contains(&path.extension()) {
+                self.add_file(
+                    &folder.join(&path.file_name().unwrap().to_string_lossy())?,
+                    LintProgress::OnlyTypes,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn add_project(&mut self, folder: &Url, project: &str) -> anyhow::Result<()> {
+        let mut content = String::new();
+
+        eprintln!("Adding project at: {}", folder.join(project)?);
+        DecodeReaderBytes::new(fs::File::open(&uri_to_path(&folder.join(project)?)?)?)
+            .read_to_string(&mut content)?;
+
+        let mut folder = folder.clone();
+        if let Some(parent) = PathBuf::from_str(project)?.parent() {
+            if let Some(dir) = parent.file_name() {
+                folder = folder.join(
+                    &(dir
+                        .to_str()
+                        .ok_or_else(|| {
+                            anyhow!("Failed to turn path into str {}", parent.display())
+                        })?
+                        .to_owned()
+                        + "/"),
+                )?;
+            }
+        }
+
+        let doc = roxmltree::Document::parse(content.as_str())?;
+        if let Some(libs) = doc
+            .root_element()
+            .children()
+            .find(|node| node.has_tag_name("Libraries"))
+        {
+            for lib in libs.children() {
+                if lib.has_tag_name("Library") {
+                    if let Some(lib_path) = lib.attribute("Path") {
+                        let lib_path = lib_path.replace('\\', std::path::MAIN_SEPARATOR_STR) + "/";
+                        self.add_directory(&folder.join(&lib_path)?).await?;
+                    }
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    pub async fn add_default_project(&mut self, folder: &Url) -> anyhow::Result<()> {
+        let mut solution = None;
+        for file in std::fs::read_dir(uri_to_path(&folder)?)? {
+            let path = file?.path();
+            if path.extension().is_some_and(|ext| ext == "pbsln") {
+                solution = Some(path);
+            }
+        }
+
+        let Some(solution) = solution else {
+            return Err(anyhow!("No *.pbsln found in {}", folder));
+        };
+
+        eprintln!("Found Solution file: {}", solution.display());
+
+        let mut folder = folder.clone();
+        folder.set_path(&(folder.path().to_owned() + "/"));
+
+        let mut content = String::new();
+        DecodeReaderBytes::new(fs::File::open(&solution)?).read_to_string(&mut content)?;
+        let doc = roxmltree::Document::parse(content.as_str())?;
+        if let Some(projects) = doc
+            .root_element()
+            .children()
+            .find(|node| node.has_tag_name("Projects"))
+        {
+            if let Some(default) = projects.attribute("Default") {
+                return self
+                    .add_project(
+                        &folder,
+                        default
+                            .replace('\\', std::path::MAIN_SEPARATOR_STR)
+                            .as_str(),
+                    )
+                    .await;
+            }
+        };
+
+        Err(anyhow!(
+            "XML Format Invalid (Solution.Projects[Default] not found in {})",
+            solution.display()
+        ))
     }
 
     pub fn get_node_at<'a>(

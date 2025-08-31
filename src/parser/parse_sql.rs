@@ -205,9 +205,9 @@ impl<I: Iterator<Item = char>> Parser<I> {
         match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CURSOR) => {
                 self.tokens.next()?;
-                quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
+                ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
 
-                let stmt = quick_exit!(self.parse_sql_select()?, err);
+                let stmt = ret_res!(self.parse_sql_select()?, err);
                 let select = match stmt.statement_type {
                     StatementType::SQL(SQLStatement::SELECT(select)) => select,
                     _ => unreachable!(),
@@ -225,7 +225,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
             TokenType::Keyword(tokenizer::Keyword::PROCEDURE) => {
                 self.tokens.next()?;
-                quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
+                ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
                 let stored_procedure_name = self.id_or_invalid(&err, &mut range)?;
 
                 let mut params = Vec::new();
@@ -250,7 +250,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     }
 
                     if err.is_none() {
-                        params.push((param_name, quick_exit!(self.parse_expression(true)?, err)));
+                        params.push((param_name, ret_res!(self.parse_expression(true)?, err)));
                     }
 
                     if err.is_some()
@@ -310,7 +310,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut err = None;
 
         let cursor_or_procedure = self.id_or_invalid(&err, &mut range)?;
-        let into = quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
+        let into = ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
         range.merge(&into.range);
 
         let intos = self.lvalue_list(&mut err, &mut range, true)?;
@@ -342,16 +342,16 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut range = self.tokens.next()?.range;
         let mut err = None;
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?);
         let table = self.id_or_invalid(&err, &mut range)?;
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::WHERE))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::WHERE))?);
 
         if self
             .optional(TokenType::Keyword(tokenizer::Keyword::CURRENT))?
             .is_some()
         {
-            quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
+            ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
             let cursor = self.id_or_invalid(&err, &mut range)?;
 
             Some(ParseResult::new(
@@ -364,7 +364,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 err,
             ))
         } else {
-            let clause = quick_exit!(self.parse_expression(true)?, err);
+            let clause = ret_res!(self.parse_expression(true)?, err);
             range.merge(&clause.range);
 
             let transaction = self.optional_using(&mut err, &mut range)?;
@@ -400,10 +400,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
         }
 
         if lparen.is_some() {
-            quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
+            ret_res!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
         }
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
 
         // let lparen = self.optional(TokenType::Symbol(tokenizer::Symbol::LPAREN))?;
 
@@ -413,11 +413,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
         }
 
         // if lparen.is_some() {
-        //     quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
+        //     ret_res!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
         // }
 
         range.merge(
-            &quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?).range,
+            &ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?).range,
         );
         let mut err = None;
         let table = self.id_or_invalid(&err, &mut range)?;
@@ -427,7 +427,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 .optional(TokenType::Keyword(tokenizer::Keyword::WHERE))?
                 .is_some()
         {
-            let clause = quick_exit!(self.parse_expression(true)?, err);
+            let clause = ret_res!(self.parse_expression(true)?, err);
             range.merge(&clause.range);
 
             Some(clause)
@@ -457,21 +457,21 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut range = self.tokens.next()?.range;
         let mut err = None;
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
 
         let table = self.id_or_invalid(&err, &mut range)?;
         if let Some(err) = err {
             return Some(Err((err, None)));
         }
 
-        quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?);
+        ret_res!(self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?);
         let fields = self.lvalue_list(&mut err, &mut range, false)?;
         if let Some(err) = err {
             return Some(Err((err, None)));
         }
-        quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
+        ret_res!(self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))?);
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::VALUES))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::VALUES))?);
 
         let mut values = Vec::new();
         loop {
@@ -535,15 +535,15 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         let table = self.id_or_invalid(&err, &mut range)?;
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::SET))?);
-        let set = quick_exit!(self.parse_expression(true)?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::SET))?);
+        let set = ret_res!(self.parse_expression(true)?);
 
-        quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::WHERE))?);
+        ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::WHERE))?);
         if self
             .optional(TokenType::Keyword(tokenizer::Keyword::CURRENT))?
             .is_some()
         {
-            quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
+            ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
             let cursor = self.id_or_invalid(&err, &mut range)?;
 
             Some(ParseResult::new(
@@ -561,7 +561,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 err,
             ))
         } else {
-            let clause = quick_exit!(self.parse_expression(true)?, err);
+            let clause = ret_res!(self.parse_expression(true)?, err);
 
             let transaction = self.optional_using(&mut err, &mut range)?;
 
@@ -609,7 +609,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         };
 
         let mut err = None;
-        let mut token = quick_exit_opt!(ret?, err);
+        let mut token = ret_opt!(ret?, err);
         if err.is_none() {
             if let Ok(semi) = self.expect(TokenType::Symbol(tokenizer::Symbol::SEMICOLON))? {
                 token.range.end = semi.range.end;

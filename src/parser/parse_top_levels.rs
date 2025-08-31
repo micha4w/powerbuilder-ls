@@ -5,10 +5,46 @@ use crate::{
 };
 
 impl<I: Iterator<Item = char>> Parser<I> {
+    fn parse_descriptors(&mut self) -> EOFOrParserResult<Vec<Descriptor>> {
+        let mut descriptors = Vec::new();
+        loop {
+            if !self
+                .optional(TokenType::Keyword(tokenizer::Keyword::DESCRIPTOR))?
+                .is_some()
+            {
+                return Some(Ok(descriptors));
+            }
+
+            let mut err = None;
+            let key = ret_res!(
+                self.expect(TokenType::Literal(tokenizer::Literal::STRING))?,
+                err
+            );
+            if err.is_none() {
+                ret_res!(
+                    self.expect(TokenType::Operator(tokenizer::Operator::EQ))?,
+                    err
+                );
+            }
+            if err.is_none() {
+                let value = ret_res!(
+                    self.expect(TokenType::Literal(tokenizer::Literal::STRING))?,
+                    err
+                );
+
+                if err.is_some() {
+                    return Some(ParseResultT::new(descriptors, err));
+                }
+
+                descriptors.push(Descriptor { key, value });
+            }
+        }
+    }
+
     pub fn parse_argument_list_declaration(
         &mut self,
     ) -> EOFOrParserResult<(Range, Vec<Argument>, Option<Token>)> {
-        let start = quick_exit_simple!(self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?)
+        let start = ret_res!(self.expect(TokenType::Symbol(tokenizer::Symbol::LPAREN))?)
             .range
             .start;
 
@@ -40,51 +76,23 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 _ => {}
             };
 
-            let var_start = self.tokens.peek()?.range.end;
             let is_ref = self
                 .optional(TokenType::Keyword(tokenizer::Keyword::REF))?
                 .is_some();
-            let is_readonly = self
-                .optional(TokenType::Keyword(tokenizer::Keyword::READONLY))?
-                .is_some();
+            let readonly = self.optional(TokenType::Keyword(tokenizer::Keyword::READONLY))?;
 
-            let data_type = match self.parse_type()? {
-                Ok(data_type) => data_type,
-                Err((res_err, _)) => {
-                    err = Some(res_err);
-                    break;
-                }
-            };
-            end = data_type.range.end;
+            let vars;
+            (vars, err) = self.parse_variable_declaration(readonly, false)?.split();
 
-            let name = match self.expect(TokenType::ID)? {
-                Ok(token) => {
-                    end = token.range.end;
-                    token
+            if let Some(variables) = vars {
+                for variable in variables {
+                    arguments.push(Argument { is_ref, variable });
                 }
-                Err(res_err) => {
-                    err = Some(res_err);
-                    break;
-                }
-            };
+            }
 
-            arguments.push(Argument {
-                is_ref,
-                variable: Variable {
-                    constant: is_readonly,
-                    data_type,
-                    access: VariableAccess {
-                        name,
-                        is_write: true,
-                    },
-                    initial_value: None,
-                    range: Range {
-                        start: var_start,
-                        end,
-                        uri: self.uri(),
-                    },
-                },
-            });
+            if err.is_some() {
+                break;
+            }
 
             match self.tokens.peek()?.token_type {
                 TokenType::Symbol(tokenizer::Symbol::COMMA) => {
@@ -118,7 +126,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_event_header(&mut self) -> EOFOrParserResult<Event> {
-        let start = quick_exit_simple!(self.expect(TokenType::Keyword(tokenizer::Keyword::EVENT))?)
+        let start = ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::EVENT))?)
             .range
             .start;
 
@@ -126,12 +134,12 @@ impl<I: Iterator<Item = char>> Parser<I> {
             .optional(TokenType::Keyword(tokenizer::Keyword::TYPE))?
             .is_some()
         {
-            Some(quick_exit!(self.parse_type()?))
+            Some(ret_res!(self.parse_type()?))
         } else {
             None
         };
 
-        let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+        let name = ret_res!(self.expect(TokenType::ID)?);
 
         let mut end;
         let mut err = None;
@@ -228,7 +236,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let returns = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::FUNCTION) => {
                 self.tokens.next()?;
-                Some(quick_exit!(self.parse_type()?))
+                Some(ret_res!(self.parse_type()?))
             }
             TokenType::Keyword(tokenizer::Keyword::SUBROUTINE) => {
                 self.tokens.next()?;
@@ -245,7 +253,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
         };
 
-        let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+        let name = ret_res!(self.expect(TokenType::ID)?);
         let mut end = name.range.end;
 
         let (list, mut err) = self.parse_argument_list_declaration()?.split();
@@ -332,7 +340,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_event(&mut self) -> EOFOr<Option<TopLevel>> {
-        let event = quick_exit_opt!(self.parse_event_header()?);
+        let event = ret_opt!(self.parse_event_header()?);
 
         let mut statements = Vec::new();
         let end;
@@ -378,7 +386,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_function(&mut self) -> EOFOr<Option<TopLevel>> {
-        let function = quick_exit_opt!(self.parse_function_header()?);
+        let function = ret_opt!(self.parse_function_header()?);
 
         let mut statements = Vec::new();
         let end;
@@ -447,12 +455,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_on(&mut self) -> EOFOr<Option<TopLevel>> {
-        let start =
-            quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::ON))?)
-                .range
-                .start;
-        let class = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
-        quick_exit_simple_opt!(self.expect(TokenType::Symbol(tokenizer::Symbol::DOT))?);
+        let start = ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::ON))?)
+            .range
+            .start;
+        let class = ret_opt!(self.expect(TokenType::ID)?);
+        ret_opt!(self.expect(TokenType::Symbol(tokenizer::Symbol::DOT))?);
 
         let name = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CREATE | tokenizer::Keyword::DESTROY) => {
@@ -523,8 +530,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
             None
         };
 
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
-        let id = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
+        let id = ret_opt!(self.expect(TokenType::ID)?);
         let name = DataType {
             data_type_type: DataTypeType::Complex(GroupedName::new(None, id.content)),
             range: id.range,
@@ -555,8 +562,23 @@ impl<I: Iterator<Item = char>> Parser<I> {
             None
         };
 
-        let autoinstantiate =
-            self.optional(TokenType::Keyword(tokenizer::Keyword::AUTOINSTANTIATE))?;
+        let autoinstantiate = if err.is_none() {
+            self.optional(TokenType::Keyword(tokenizer::Keyword::AUTOINSTANTIATE))?
+        } else {
+            None
+        };
+
+        let mut native = None;
+        if err.is_none()
+            && self
+                .optional(TokenType::Keyword(tokenizer::Keyword::NATIVE))?
+                .is_some()
+        {
+            match self.expect(TokenType::Literal(tokenizer::Literal::STRING))? {
+                Ok(literal) => native = Some(literal),
+                Err(e) => err = Some(e),
+            }
+        };
 
         if err.is_none() {
             self.expect_newline()?.ok();
@@ -565,6 +587,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let end;
         let mut variables = Vec::new();
         let mut events = Vec::new();
+        let mut functions = Vec::new();
         loop {
             match self.tokens.peek()?.token_type {
                 TokenType::Keyword(tokenizer::Keyword::END) => {
@@ -595,6 +618,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         events.push(event);
                     }
                 }
+                TokenType::AccessType(_) | TokenType::Keyword(tokenizer::Keyword::FUNCTION) => {
+                    if let Some(function) = self.parse_function_header()?.value() {
+                        functions.push(function);
+                    }
+                }
                 _ => {
                     if let Some(statement) = self.parse_statement()? {
                         match statement.statement_type {
@@ -621,9 +649,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     base,
                     within,
                     autoinstantiate,
+                    native,
                 },
                 variables,
                 events,
+                functions,
                 range: Range {
                     start,
                     end,
@@ -645,7 +675,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             Some(_) => tokenizer::ScopeModif::GLOBAL,
             None => tokenizer::ScopeModif::SHARED,
         };
-        let variable = quick_exit_opt!(self.parse_variable_declaration()?);
+        let variable = ret_opt!(self.parse_instance_variable_declaration()?);
 
         if let StatementType::Declaration(vars) = variable.statement_type {
             if vars[0].access.read.is_some() || vars[0].access.write.is_some() {
@@ -679,7 +709,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let start = self.tokens.peek()?.range.start;
 
         let scope = match self.tokens.peek()?.token_type {
-            TokenType::ScopeModif(scope) => scope,
+            TokenType::ScopeModif(scope) => {
+                self.tokens.next()?;
+                scope
+            }
             _ => {
                 let range = self.tokens.peek()?.range;
                 return Some(
@@ -692,7 +725,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 );
             }
         };
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
         self.expect_newline()?.ok();
 
         let end;
@@ -723,7 +756,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     }
                 }
                 _ => {
-                    if let Some(statement) = self.parse_variable_declaration()?.value() {
+                    if let Some(statement) = self.parse_instance_variable_declaration()?.value() {
                         if let StatementType::Declaration(vars) = statement.statement_type {
                             if vars[0].access.read.is_some() || vars[0].access.write.is_some() {
                                 self.error(
@@ -758,8 +791,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
     pub fn parse_type_variables_decl(&mut self) -> EOFOr<Option<TopLevel>> {
         let start = self.tokens.peek()?.range.start;
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?);
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::VARIABLES))?);
         self.expect_newline()?.ok();
 
         let end;
@@ -807,7 +840,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     self.expect_newline()?.ok();
                 }
                 _ => {
-                    if let Some(statement) = self.parse_variable_declaration()?.value() {
+                    if let Some(statement) = self.parse_instance_variable_declaration()?.value() {
                         if let StatementType::Declaration(vars) = statement.statement_type {
                             for var in vars {
                                 declarations.push(InstanceVariable {
@@ -837,11 +870,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_functions_forward_decl(&mut self) -> EOFOr<Option<TopLevel>> {
-        let start =
-            quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::FORWARD))?)
-                .range
-                .start;
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
+        let start = ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::FORWARD))?)
+            .range
+            .start;
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
         self.expect_newline()?.ok();
 
         let mut functions = Vec::new();
@@ -888,11 +920,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_external_functions(&mut self) -> EOFOr<Option<TopLevel>> {
-        let start =
-            quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?)
-                .range
-                .start;
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
+        let start = ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TYPE))?)
+            .range
+            .start;
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::PROTOTYPES))?);
         self.expect_newline()?.ok();
 
         let mut functions = Vec::new();
@@ -939,13 +970,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
     }
 
     pub fn parse_forward_decl(&mut self) -> EOFOr<Option<TopLevel>> {
-        let start =
-            quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::FORWARD))?)
-                .range
-                .start;
+        let start = ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::FORWARD))?)
+            .range
+            .start;
         self.expect_newline()?.ok();
 
         let mut types = Vec::new();
+        let mut vars = Vec::new();
         let end;
         loop {
             match self.tokens.peek()?.token_type.clone() {
@@ -967,19 +998,36 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         }
                     }
                 }
-                _ => match self.parse_datatype_decl()? {
-                    Some(TopLevel {
-                        top_level_type: TopLevelType::DatatypeDecl(datatype),
-                        ..
-                    }) => types.push(datatype),
-                    Some(_) => unreachable!(),
-                    None => {}
-                },
+                mut peeked => {
+                    if let TokenType::ScopeModif(_) = peeked {
+                        peeked = self.tokens.peek_nth(1)?.token_type.clone();
+                    };
+
+                    if let TokenType::Keyword(tokenizer::Keyword::TYPE) = peeked {
+                        match self.parse_datatype_decl()? {
+                            Some(TopLevel {
+                                top_level_type: TopLevelType::DatatypeDecl(datatype),
+                                ..
+                            }) => types.push(datatype),
+                            Some(_) => unreachable!(),
+                            None => {}
+                        };
+                    } else {
+                        match self.parse_scoped_variable_decl()? {
+                            Some(TopLevel {
+                                top_level_type: TopLevelType::ScopedVariableDecl(var),
+                                ..
+                            }) => vars.extend(var),
+                            Some(_) => unreachable!(),
+                            None => {}
+                        }
+                    }
+                }
             }
         }
 
         Some(Some(TopLevel {
-            top_level_type: TopLevelType::ForwardDecl(types),
+            top_level_type: TopLevelType::ForwardDecl(vars, types),
             range: Range {
                 start,
                 end,

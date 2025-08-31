@@ -2,11 +2,14 @@ use core::panic;
 use std::{
     collections::HashMap,
     fmt::{self},
+    ops::{FromResidual, Try},
+    path::PathBuf,
+    process::Output,
+    str::FromStr,
     sync::{Arc, Weak},
 };
 
 use futures::future::{self};
-use tokio::sync::Mutex;
 
 use super::Linter;
 use crate::{
@@ -521,10 +524,15 @@ pub type LintedInOnlyTypes<A, B> = ((A, B), (A, B), (A, B));
 pub type LintedInShallow<A, B> = (A, (A, B), (A, B));
 pub type LintedInComplete<A, B> = (A, A, (A, B));
 
-pub type ForwardDecl =
-    LintedInOnlyTypes<Vec<parser::DatatypeDecl>, HashMap<IString, Arc<Mutex<Class>>>>;
+pub type ForwardDecl = LintedInOnlyTypes<
+    (Vec<parser::ScopedVariable>, Vec<parser::DatatypeDecl>),
+    (
+        HashMap<IString, Arc<Mutex<Variable>>>,
+        HashMap<IString, Arc<Mutex<Class>>>,
+    ),
+>;
 pub type ScopedVariableDecl =
-    LintedInOnlyTypes<Vec<parser::ScopedVariable>, Vec<Arc<Mutex<Variable>>>>;
+    LintedInOnlyTypes<Vec<parser::ScopedVariable>, HashMap<IString, Arc<Mutex<Variable>>>>;
 pub type ScopedVariablesDecl =
     LintedInOnlyTypes<Vec<parser::ScopedVariable>, HashMap<IString, Arc<Mutex<Variable>>>>;
 
@@ -638,11 +646,13 @@ impl TopLevelType<LintProgressComplete> {
         let mut nodes = vec![];
 
         match self {
-            TopLevelType::ForwardDecl((forwards, _)) => {
-                for forward in forwards {
-                    forward.class.search(pos, &mut nodes);
-                    forward.events.search(pos, &mut nodes);
-                    forward.variables.search(pos, &mut nodes);
+            TopLevelType::ForwardDecl(((vars, types), _)) => {
+                vars.search(pos, &mut nodes);
+                for datatype in types {
+                    datatype.class.search(pos, &mut nodes);
+                    datatype.events.search(pos, &mut nodes);
+                    datatype.functions.search(pos, &mut nodes);
+                    datatype.variables.search(pos, &mut nodes);
                 }
             }
             TopLevelType::TypeVariablesDecl((vars, _)) => {
@@ -675,6 +685,7 @@ impl TopLevelType<LintProgressComplete> {
                 decl.class.search(pos, &mut nodes);
 
                 decl.events.search(pos, &mut nodes);
+                decl.functions.search(pos, &mut nodes);
                 decl.variables.search(pos, &mut nodes);
             }
         }
@@ -767,56 +778,83 @@ impl<'a> fmt::Display for Node<'a> {
     }
 }
 
+enum NodeFound {
+    Found,
+    No,
+}
+
+impl Try for NodeFound {
+    type Output = ();
+    type Residual = ();
+
+    fn from_output(_: Self::Output) -> Self {
+        NodeFound::No
+    }
+
+    fn branch(self) -> std::ops::ControlFlow<Self::Residual, Self::Output> {
+        match self {
+            NodeFound::Found => std::ops::ControlFlow::Break(()),
+            NodeFound::No => std::ops::ControlFlow::Continue(()),
+        }
+    }
+}
+
+impl FromResidual for NodeFound {
+    fn from_residual(_: <Self as Try>::Residual) -> Self {
+        NodeFound::Found
+    }
+}
+
 trait NodeSearcher {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()>;
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound;
 }
 
 impl<T: NodeSearcher> NodeSearcher for Option<T> {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if let Some(val) = self {
             val.search(pos, nodes)?;
         }
 
-        Some(())
+        NodeFound::No
     }
 }
 
 impl<T: NodeSearcher> NodeSearcher for Vec<T> {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         for val in self {
             val.search(pos, nodes)?;
         }
 
-        Some(())
+        NodeFound::No
     }
 }
 
 impl NodeSearcher for parser::DataType {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::DataType(self));
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::VariableAccess {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.name.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::VariableAccess(self));
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::Variable {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::VariableDeclaration(self));
@@ -824,38 +862,38 @@ impl NodeSearcher for parser::Variable {
         self.data_type.search(pos, nodes)?;
         self.initial_value.search(pos, nodes)?;
 
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::InstanceVariable {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.variable.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::InstanceVariableDeclaration(self));
         self.variable.search(pos, nodes)?;
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::ScopedVariable {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.variable.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::ScopedVariableDeclaration(self));
         self.variable.search(pos, nodes)?;
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::LValue {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::LValue(self));
@@ -881,14 +919,14 @@ impl NodeSearcher for parser::LValue {
             parser::LValueType::SQLAccess(_, lvalue) => lvalue.search(pos, nodes)?,
         }
 
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::Expression {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::Expression(self));
@@ -915,7 +953,7 @@ impl NodeSearcher for parser::Expression {
             parser::ExpressionType::Error => {}
         };
 
-        None
+        NodeFound::Found
     }
 }
 
@@ -923,9 +961,9 @@ fn search_lvalue_sql<'a, T: NodeSearcher>(
     t: &'a T,
     pos: &Position,
     nodes: &mut Vec<Node<'a>>,
-) -> Option<()> {
+) -> NodeFound {
     let mut new_nodes = Vec::new();
-    if t.search(pos, &mut new_nodes).is_none() {
+    if let NodeFound::Found = t.search(pos, &mut new_nodes) {
         if new_nodes.iter().any(|node| {
             matches!(
                 node,
@@ -936,16 +974,16 @@ fn search_lvalue_sql<'a, T: NodeSearcher>(
             )
         }) {
             nodes.extend(new_nodes);
-            return None;
+            return NodeFound::Found;
         }
     }
-    Some(())
+    NodeFound::No
 }
 
 impl NodeSearcher for parser::Statement {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::Statement(self));
@@ -1051,29 +1089,26 @@ impl NodeSearcher for parser::Statement {
             parser::StatementType::Choose(choose_case) => {
                 choose_case.choose.search(pos, nodes)?;
 
-                for (_specifiers, statements) in &choose_case.cases {
-                    // for specifier in specifiers {
-                    //     match specifier.specifier_type {
-                    //         parser::CaseSpecifierType::Literals(literal) => todo!(),
-                    //         parser::CaseSpecifierType::To(literal, literal) => todo!(),
-                    //         parser::CaseSpecifierType::Is(operator, literal) => todo!(),
-                    //         parser::CaseSpecifierType::Else => todo!(),
-                    //     }
-                    // }
+                for (specifiers, statements) in &choose_case.cases {
+                    for specifier in specifiers {
+                        for expr in specifier.get_expressions() {
+                            expr.search(pos, nodes)?;
+                        }
+                    }
 
                     statements.search(pos, nodes)?;
                 }
             },
         };
 
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::Function {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::FunctionDeclaration(self));
@@ -1084,14 +1119,14 @@ impl NodeSearcher for parser::Function {
             arg.variable.search(pos, nodes)?;
         }
 
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::Event {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         if !self.range.contains(pos) {
-            return Some(());
+            return NodeFound::No;
         }
 
         nodes.push(Node::EventDeclaration(self));
@@ -1108,16 +1143,16 @@ impl NodeSearcher for parser::Event {
             parser::EventType::System(_) => todo!(),
         }
 
-        None
+        NodeFound::Found
     }
 }
 
 impl NodeSearcher for parser::Class {
-    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> Option<()> {
+    fn search<'a>(&'a self, pos: &Position, nodes: &mut Vec<Node<'a>>) -> NodeFound {
         self.name.search(pos, nodes)?;
         self.base.search(pos, nodes)?;
         self.within.search(pos, nodes)?;
 
-        Some(())
+        NodeFound::No
     }
 }

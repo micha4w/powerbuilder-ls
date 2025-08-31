@@ -1,8 +1,8 @@
 mod lint_bodies;
-mod linter;
 mod lint_top_levels;
-mod project;
+mod linter;
 mod load_builtins;
+mod project;
 mod types;
 
 pub use linter::*;

@@ -25,7 +25,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
     pub fn parse_type(&mut self) -> EOFOrParserResult<DataType> {
         let mut err = None;
-        let (group, name) = quick_exit!(self.parse_class_id()?, err);
+        let (group, name) = ret_res!(self.parse_class_id()?, err);
         if let Some(group) = group {
             return Some(ParseResult::new(
                 DataType {
@@ -115,7 +115,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         starting_token: TokenType,
         ending_token: TokenType,
     ) -> EOFOrParserResult<(Vec<Expression>, Range)> {
-        let mut range = quick_exit_simple!(self.expect(starting_token)?).range;
+        let mut range = ret_res!(self.expect(starting_token)?).range;
 
         let mut expressions = Vec::new();
         let mut err = None;
@@ -179,7 +179,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
     pub fn parse_array_declaration(&mut self) -> EOFOrParserResult<Expression> {
         let mut err = None;
-        let (expressions, range) = quick_exit!(
+        let (expressions, range) = ret_res!(
             self.parse_expression_list(
                 false,
                 TokenType::Symbol(tokenizer::Symbol::LCURLY),
@@ -205,7 +205,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let expression_type = match self.tokens.peek()?.token_type {
             TokenType::Symbol(tokenizer::Symbol::LPAREN) => {
                 self.tokens.next()?;
-                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
+                let expression = ret_res!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 if err.is_none() {
                     match self.expect(TokenType::Symbol(tokenizer::Symbol::RPAREN))? {
@@ -216,13 +216,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 ExpressionType::Parenthesized(Box::new(expression))
             }
             TokenType::Symbol(tokenizer::Symbol::LCURLY) if !is_sql => {
-                let array = quick_exit!(self.parse_array_declaration()?, err);
+                let array = ret_res!(self.parse_array_declaration()?, err);
                 end = array.range.end;
                 array.expression_type
             }
             TokenType::Keyword(tokenizer::Keyword::NOT) => {
                 self.tokens.next()?;
-                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
+                let expression = ret_res!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::BooleanNot(Box::new(expression))
             }
@@ -230,7 +230,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 operator @ (tokenizer::Operator::PLUS | tokenizer::Operator::MINUS),
             ) => {
                 self.tokens.next()?;
-                let expression = quick_exit!(self.parse_expression(is_sql)?, err);
+                let expression = ret_res!(self.parse_expression(is_sql)?, err);
                 end = expression.range.end;
                 ExpressionType::UnaryOperation(operator, Box::new(expression))
             }
@@ -238,7 +238,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             | TokenType::Keyword(tokenizer::Keyword::SUPER)
             | TokenType::Keyword(tokenizer::Keyword::PARENT)
             | TokenType::ID => {
-                let lvalue = quick_exit!(self.parse_lvalue(is_sql)?, err);
+                let lvalue = ret_res!(self.parse_lvalue(is_sql)?, err);
                 end = lvalue.range.end;
                 ExpressionType::LValue(lvalue)
             }
@@ -247,7 +247,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
                 match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::USING) => {
-                        let class = quick_exit!(self.parse_expression(is_sql)?, err);
+                        let class = ret_res!(self.parse_expression(is_sql)?, err);
                         end = class.range.end;
                         ExpressionType::CreateUsing(Box::new(class))
                     }
@@ -311,24 +311,18 @@ impl<I: Iterator<Item = char>> Parser<I> {
             return Some(Err((err, Some(expression))));
         }
 
-        match self.tokens.peek()?.token_type {
-            TokenType::IncrDecrOperator(operator) => {
-                let token = self.tokens.next()?;
+        if let TokenType::IncrDecrOperator(operator) = self.tokens.peek()?.token_type {
+            let token = self.tokens.next()?;
 
-                expression = Expression {
-                    range: expression.range.clone().merged(&token.range),
-                    expression_type: ExpressionType::IncrementDecrement(
-                        Box::new(expression),
-                        operator,
-                    ),
-                }
+            expression = Expression {
+                range: expression.range.clone().merged(&token.range),
+                expression_type: ExpressionType::IncrementDecrement(Box::new(expression), operator),
             }
-            _ => {}
         }
 
         if let TokenType::Operator(operator) = self.tokens.peek()?.token_type {
             self.tokens.next()?;
-            let right_side = quick_exit!(self.parse_expression(is_sql)?, err);
+            let right_side = ret_res!(self.parse_expression(is_sql)?, err);
 
             let range = expression.range.clone().merged(&right_side.range);
             expression = match right_side.expression_type {
@@ -519,7 +513,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         }
                     }
 
-                    let name = quick_exit_simple!(self.expect(TokenType::ID)?);
+                    let name = ret_res!(self.expect(TokenType::ID)?);
 
                     if !dynamics.is_empty() && !statics.is_empty() {
                         self.error(

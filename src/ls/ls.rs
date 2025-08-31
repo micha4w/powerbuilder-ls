@@ -1,8 +1,11 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
-use crate::linter::{self, File};
+use crate::{
+    linter::{self, File},
+    types::{Mutex, RwLock},
+};
 use ropey::Rope;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::oneshot;
 
 use tower_lsp::{jsonrpc, lsp_types::*, Client, LanguageServer};
 
@@ -14,7 +17,7 @@ pub struct PowerBuilderLS {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for PowerBuilderLS {
-    async fn initialize(&self, _: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
         let mut capabilities = ServerCapabilities {
             workspace: Some(WorkspaceServerCapabilities {
                 workspace_folders: Some(WorkspaceFoldersServerCapabilities {
@@ -35,10 +38,25 @@ impl LanguageServer for PowerBuilderLS {
             )),
             ..Default::default()
         };
+
         self.hover_capabilities(&mut capabilities);
         self.completion_capabilities(&mut capabilities);
         self.goto_definition_capabilities(&mut capabilities);
         self.diagnostics_capabilities(&mut capabilities);
+
+        if let Some(root) = params.root_uri {
+            if let Err(err) = self.m.proj.write().await.add_default_project(&root).await {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!(
+                            "Failed to open Default Project of Root URI ({}) {:?}",
+                            root, err
+                        ),
+                    )
+                    .await;
+            }
+        }
 
         Ok(InitializeResult {
             server_info: None,
@@ -157,7 +175,7 @@ impl PowerBuilderLS {
 
 #[derive(Debug)]
 pub struct PowerBuilderLSCreator {
-    pub(super) proj: Arc<RwLock<linter::Project>>,
+    pub proj: Arc<RwLock<linter::Project>>,
     pub(super) change_timeouts: Mutex<HashMap<Url, oneshot::Sender<()>>>,
 }
 

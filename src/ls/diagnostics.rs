@@ -1,12 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use tokio::{sync::oneshot, time::timeout};
 use tower_lsp::{jsonrpc, lsp_types::*};
 
-use crate::{
-    linter::{self, LintProgress},
-    parser,
-};
+use crate::{linter, parser};
 
 use super::ls::PowerBuilderLS;
 
@@ -41,8 +38,13 @@ impl PowerBuilderLS {
 
     pub(super) async fn send_diagnostics(&self, uri: Url) {
         match self.get_file_diagnostics(&uri).await {
-            Ok(Some(items)) => self.client.publish_diagnostics(uri, items, None).await,
-            Ok(None) => {}
+            Ok(Some(items)) => {
+                eprintln!("Sending diagnostics");
+                self.client.publish_diagnostics(uri, items, None).await;
+            }
+            Ok(None) => {
+                eprintln!("Skipping send diagnostics because they didn't change");
+            }
             Err(err) => {
                 self.client
                     .log_message(

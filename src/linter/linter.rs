@@ -1,10 +1,9 @@
-use std::{backtrace::Backtrace, collections::HashMap, pin::Pin, sync::Arc};
+use std::{backtrace::Backtrace, collections::HashMap, sync::Arc};
 
 use futures::{
     future::{self, BoxFuture},
-    stream, FutureExt, Stream, StreamExt,
+    FutureExt,
 };
-use tokio::sync::Mutex;
 
 use super::{
     project::{File, Project},
@@ -18,7 +17,9 @@ use crate::{
 
 pub struct Linter<'a> {
     pub proj: &'a Project,
-    pub file: MaybeMut<'a, File>,
+    pub file: &'a RwLock<File>,
+    pub diagnose: bool,
+
     pub class: Option<Arc<Mutex<Class>>>,
 
     pub variables: HashMap<IString, Arc<Mutex<Variable>>>,
@@ -26,54 +27,59 @@ pub struct Linter<'a> {
 }
 
 impl<'a> Linter<'a> {
-    pub fn new(proj: &'a Project, file: MaybeMut<'a, File>) -> Self {
+    pub fn new(proj: &'a Project, file: &'a RwLock<File>, diagnose: bool) -> Self {
         Self {
             proj,
             file,
+            diagnose,
             class: None,
             variables: HashMap::new(),
             return_type: parser::DataTypeType::Void,
         }
     }
 
-    pub fn push_diagnostic(&mut self, mut diagnostic: parser::Diagnostic) {
-        if let MaybeMut::Mut(file) = &mut self.file {
+    pub async fn push_diagnostic(&self, mut diagnostic: parser::Diagnostic) {
+        if self.diagnose {
             if cfg!(debug_assertions) {
                 diagnostic.message += "\n";
                 diagnostic.message += Backtrace::capture().to_string().as_str();
             }
 
-            file.diagnostics.push(diagnostic);
+            self.file.write().await.diagnostics.push(diagnostic);
         }
     }
 
-    pub fn diagnostic_error(&mut self, message: String, range: Range) {
+    pub async fn diagnostic_error(&self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Error,
             message,
             range,
-        });
+        })
+        .await
     }
-    pub fn diagnostic_warning(&mut self, message: String, range: Range) {
+    pub async fn diagnostic_warning(&self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Warning,
             message,
             range,
-        });
+        })
+        .await
     }
-    pub fn diagnostic_info(&mut self, message: String, range: Range) {
+    pub async fn diagnostic_info(&self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Info,
             message,
             range,
-        });
+        })
+        .await
     }
-    pub fn diagnostic_hint(&mut self, message: String, range: Range) {
+    pub async fn diagnostic_hint(&self, message: String, range: Range) {
         self.push_diagnostic(parser::Diagnostic {
             severity: parser::Severity::Hint,
             message,
             range,
-        });
+        })
+        .await
     }
 
     pub async fn get_accessible_data_types(
@@ -104,15 +110,16 @@ impl<'a> Linter<'a> {
             parser::DataTypeType::Ulong,
         ];
 
-        for class in self.file.as_ref().classes.values() {
+        for class in self.file.read().await.classes.values() {
             data_types.push(parser::DataTypeType::Complex(GroupedName::new(
                 None,
                 class.lock().await.name.clone(),
             )));
         }
 
+        let current_path = self.file.read().await.uri.clone();
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().uri == *path {
+            if current_path == *path {
                 continue;
             }
 
@@ -140,99 +147,79 @@ impl<'a> Linter<'a> {
         local_before: &'b Position,
         write: bool,
         accessible: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, Option<String>)> + Send + 'b {
-        let wants_accessible = accessible;
-        let variables = stream::iter(&self.variables).filter_map(move |(name, var)| async move {
+    ) -> Vec<(IString, Arc<Mutex<Variable>>, Option<String>)> {
+        let mut out = Vec::new();
+
+        for (name, var) in &self.variables {
             let is_accessible = &var.lock().await.parsed().range.end <= local_before;
 
-            if is_accessible == wants_accessible {
+            if is_accessible == accessible {
                 let err = (!accessible).then(|| "Variable has not been defined yet".to_string());
-                Some((name.clone(), var.clone(), err))
-            } else {
-                None
+                out.push((name.clone(), var.clone(), err));
             }
-        });
+        }
 
-        let variables: Pin<Box<dyn Stream<Item = _> + Send>> =
-            if let Some(current_class) = &self.class {
-                Box::pin(
-                    variables.chain(
-                        self.get_variables_in_class_helper(
-                            current_class.clone(),
-                            &tokenizer::AccessType::PRIVATE,
-                            write,
-                            accessible,
-                        )
-                        .await,
-                    ),
+        if let Some(current_class) = &self.class {
+            out.extend(
+                self.get_variables_in_class_helper(
+                    current_class.clone(),
+                    &tokenizer::AccessType::PRIVATE,
+                    write,
+                    accessible,
                 )
-            } else {
-                Box::pin(variables)
-            };
+                .await,
+            );
+        };
 
-        let variables = variables.chain(
-            stream::iter(&self.file.as_ref().variables)
-                .map(|(name, var)| (name.clone(), var.clone(), None)),
-        );
+        for (name, var) in &self.file.read().await.variables {
+            out.push((name.clone(), var.clone(), None));
+        }
 
-        let current_path = self.file.as_ref().uri.clone();
-        let variables = variables.chain(
-            stream::once(async move {
-                let mut variables: Pin<Box<dyn Stream<Item = _> + Send>> =
-                    Box::pin(stream::empty());
+        let current_path = self.file.read().await.uri.clone();
+        for (path, file) in &self.proj.files {
+            if current_path == *path {
+                continue;
+            }
 
-                for (path, file) in &self.proj.files {
-                    if &current_path == path {
-                        continue;
-                    }
+            for (name, var) in file.read().await.variables.clone() {
+                let is_accessible = match var.lock().await.unwrap_scoped().scope {
+                    tokenizer::ScopeModif::GLOBAL => true,
+                    tokenizer::ScopeModif::SHARED => false,
+                };
 
-                    let accessible = accessible;
-                    variables = Box::pin(variables.chain(
-                        stream::iter(file.read().await.variables.clone()).filter_map(
-                            move |(name, var)| async move {
-                                let is_accessible = match var.lock().await.unwrap_scoped().scope {
-                                    tokenizer::ScopeModif::GLOBAL => true,
-                                    tokenizer::ScopeModif::SHARED => false,
-                                };
-
-                                if is_accessible == accessible {
-                                    let err = (!accessible)
-                                        .then(|| "Variable is not defined as Global".to_string());
-                                    Some((name.clone(), var.clone(), err))
-                                } else {
-                                    None
-                                }
-                            },
-                        ),
-                    ));
+                if is_accessible == accessible {
+                    let err =
+                        (!accessible).then(|| "Variable is not defined as Global".to_string());
+                    out.push((name.clone(), var.clone(), err));
                 }
+            }
+        }
 
-                variables
-            })
-            .flatten(),
-        );
-
-        variables
+        out
     }
 
     pub async fn get_variables<'b>(
         &'b self,
         local_before: &'b Position,
         write: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>)> + Send + 'b {
+    ) -> Vec<(IString, Arc<Mutex<Variable>>)> {
         self.get_variables_helper(local_before, write, true)
             .await
+            .into_iter()
             .map(|(name, var, _)| (name, var))
+            .collect()
     }
 
     pub async fn get_inaccessible_variables<'b>(
         &'b self,
         local_before: &'b Position,
         write: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, String)> + Send + 'b {
+    ) -> Vec<(IString, Arc<Mutex<Variable>>, String)> {
         self.get_variables_helper(local_before, write, true)
             .await
+            .into_iter()
             .map(|(name, var, err)| (name, var, err.unwrap()))
+            .collect()
     }
 
     pub async fn find_variable(
@@ -258,15 +245,17 @@ impl<'a> Linter<'a> {
 
         if let Some(found) = self
             .file
-            .as_ref()
+            .read()
+            .await
             .variables
             .get(&(&variable.name.content).into())
         {
             return Some(found.clone());
         }
 
+        let current_path = self.file.read().await.uri.clone();
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().uri == *path {
+            if current_path == *path {
                 continue;
             }
 
@@ -315,8 +304,9 @@ impl<'a> Linter<'a> {
             }
         }
 
+        let current_path = self.file.read().await.uri.clone();
         for (path, _file_lock) in &self.proj.files {
-            if self.file.as_ref().uri == *path {
+            if current_path == *path {
                 continue;
             }
 
@@ -356,187 +346,132 @@ impl<'a> Linter<'a> {
 
     pub async fn get_functions_in_class_helper(
         &self,
-        class_mut: Arc<Mutex<Class>>,
+        mut class_mut: Arc<Mutex<Class>>,
         access: &tokenizer::AccessType,
         accessible: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, Option<String>)> + Send + '_ {
-        let funcs_iter = class_mut.lock().await.functions.clone().into_iter();
+    ) -> Vec<(IString, Arc<Mutex<Function>>, Option<String>)> {
+        let mut strictness = access.strictness();
+        let mut out = Vec::new();
 
-        stream::unfold(
-            (class_mut, funcs_iter, None, false, access.strictness()),
-            move |(
-                mut class_mut,
-                mut funcs_iter,
-                mut func_iter,
-                mut is_external,
-                mut strictness,
-            )| async move {
-                loop {
-                    loop {
-                        let (name, mut iter) = match func_iter {
-                            Some(func_iter) => func_iter,
-                            None => {
-                                if let Some((name, functions)) = funcs_iter.next() {
-                                    func_iter = Some((name, functions.into_iter()));
-                                    func_iter.unwrap()
-                                } else {
-                                    break;
-                                }
-                            }
-                        };
-
-                        while let Some(func_mut) = iter.next() {
-                            let is_accessible = func_mut
-                                .lock()
-                                .await
-                                .parsed()
-                                .access
-                                .map_or(0, |acc| acc.strictness())
-                                <= strictness;
-
-                            if is_accessible == accessible {
-                                let err = (!accessible)
-                                    .then(|| "Cannot access Private Function".to_string());
-                                return Some((
-                                    (name.clone(), func_mut, err),
-                                    (
-                                        class_mut,
-                                        funcs_iter,
-                                        Some((name, iter)),
-                                        is_external,
-                                        strictness,
-                                    ),
-                                ));
-                            }
-                        }
-                        func_iter = None;
-                    }
-
-                    func_iter = None;
-                    is_external = !is_external;
-
-                    if is_external {
-                        funcs_iter = class_mut
+        loop {
+            let class = class_mut.lock().await;
+            for functions in [&class.functions, &class.external_functions] {
+                for (name, funcs) in functions {
+                    for func_mut in funcs {
+                        let is_accessible = func_mut
                             .lock()
                             .await
-                            .external_functions
-                            .clone()
-                            .into_iter();
-                        continue;
-                    }
+                            .parsed()
+                            .access
+                            .map_or(0, |acc| acc.strictness())
+                            <= strictness;
 
-                    let complex = self.find_class(&class_mut.lock().await.base).await;
-                    class_mut = match complex {
-                        Some(Complex::Class(cls)) => cls.clone(),
-                        Some(Complex::Enum(_)) | None => break,
-                    };
-                    funcs_iter = class_mut.lock().await.functions.clone().into_iter();
-
-                    if strictness < tokenizer::AccessType::PRIVATE.strictness() {
-                        strictness = tokenizer::AccessType::PROTECTED.strictness();
+                        if is_accessible == accessible {
+                            let err =
+                                (!accessible).then(|| "Cannot access Private Function".to_string());
+                            out.push((name.clone(), func_mut.clone(), err));
+                        }
                     }
                 }
+            }
 
-                None
-            },
-        )
+            let complex = self.find_class(&class.base).await;
+            drop(class);
+
+            class_mut = match complex {
+                Some(Complex::Class(cls)) => cls.clone(),
+                Some(Complex::Enum(_)) | None => break,
+            };
+
+            if strictness < tokenizer::AccessType::PRIVATE.strictness() {
+                strictness = tokenizer::AccessType::PROTECTED.strictness();
+            }
+        }
+
+        out
     }
 
     pub async fn get_functions_in_class(
         &self,
         class_mut: Arc<Mutex<Class>>,
         access: &tokenizer::AccessType,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>)> + Send + '_ {
+    ) -> Vec<(IString, Arc<Mutex<Function>>)> {
         self.get_functions_in_class_helper(class_mut, access, true)
             .await
+            .into_iter()
             .map(|(name, var, _)| (name, var))
+            .collect()
     }
 
     pub async fn get_inaccessible_functions_in_class(
         &self,
         class_mut: Arc<Mutex<Class>>,
         access: &tokenizer::AccessType,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, String)> + Send + '_ {
+    ) -> Vec<(IString, Arc<Mutex<Function>>, String)> {
         self.get_functions_in_class_helper(class_mut, access, false)
             .await
+            .into_iter()
             .map(|(name, var, err)| (name, var, err.unwrap()))
+            .collect()
     }
 
     pub async fn get_functions_helper(
         &self,
         accessible: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, Option<String>)> + Send + '_ {
-        let functions: Pin<Box<dyn Stream<Item = _> + Send>> =
-            if let Some(current_class) = &self.class {
-                Box::pin(
-                    self.get_functions_in_class_helper(
-                        current_class.clone(),
-                        &tokenizer::AccessType::PRIVATE,
-                        accessible,
-                    )
-                    .await,
+    ) -> Vec<(IString, Arc<Mutex<Function>>, Option<String>)> {
+        let mut out = Vec::new();
+
+        if let Some(current_class) = &self.class {
+            out = self
+                .get_functions_in_class_helper(
+                    current_class.clone(),
+                    &tokenizer::AccessType::PRIVATE,
+                    accessible,
                 )
-            } else {
-                Box::pin(stream::empty())
-            };
+                .await;
+        }
 
-        let current_path = self.file.as_ref().uri.clone();
-        let functions = functions.chain(
-            stream::once(async move {
-                let mut functions: Pin<Box<dyn Stream<Item = _> + Send>> =
-                    Box::pin(stream::empty());
+        let current_path = self.file.read().await.uri.clone();
+        for (path, file) in &self.proj.files {
+            if &current_path == path {
+                continue;
+            }
 
-                for (path, file) in &self.proj.files {
-                    if &current_path == path {
-                        continue;
+            for (name, class_mut) in file.read().await.classes.clone() {
+                let class = class_mut.lock().await;
+                if class.base.to_string().to_lowercase() == "function_object" {
+                    if let Some(funcs) = class.functions.get(&name) {
+                        for func in funcs {
+                            out.push((name.clone(), func.clone(), None));
+                        }
                     }
-
-                    functions = Box::pin(
-                        functions.chain(
-                            stream::iter(file.read().await.classes.clone())
-                                .filter_map(move |(name, class_mut)| async move {
-                                    let class = class_mut.lock().await;
-                                    if class.base.to_string().to_lowercase() == "function_object" {
-                                        if let Some(funcs) = class.functions.get(&name) {
-                                            return Some(
-                                                stream::iter(funcs.clone())
-                                                    .map(move |func| (name.clone(), func, None)),
-                                            );
-                                        }
-                                    }
-                                    None
-                                })
-                                .flatten(),
-                        ),
-                    );
                 }
+            }
+        }
 
-                functions.chain(stream::iter(self.proj.builtin_functions.clone()).flat_map(
-                    |(name, functions)| {
-                        stream::iter(functions).map(move |func| (name.clone(), func, None))
-                    },
-                ))
-            })
-            .flatten(),
-        );
+        for (name, funcs) in &self.proj.builtin_functions {
+            for func in funcs {
+                out.push((name.clone(), func.clone(), None));
+            }
+        }
 
-        functions
+        out
     }
 
-    pub async fn get_functions(
-        &self,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>)> + Send + '_ {
+    pub async fn get_functions(&self) -> Vec<(IString, Arc<Mutex<Function>>)> {
         self.get_functions_helper(true)
             .await
+            .into_iter()
             .map(|(name, var, _)| (name, var))
+            .collect()
     }
 
-    pub async fn get_inaccessible_functions(
-        &self,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Function>>, String)> + Send + '_ {
+    pub async fn get_inaccessible_functions(&self) -> Vec<(IString, Arc<Mutex<Function>>, String)> {
         self.get_functions_helper(false)
             .await
+            .into_iter()
             .map(|(name, var, err)| (name, var, err.unwrap()))
+            .collect()
     }
 
     pub async fn find_class_dt(&self, data_type: &parser::DataType) -> Option<Complex> {
@@ -549,7 +484,7 @@ impl<'a> Linter<'a> {
     pub async fn find_class(&self, grouped_name: &GroupedName) -> Option<Complex> {
         let GroupedName { group, name } = grouped_name;
 
-        if let Some(class_arc) = self.file.as_ref().classes.get(&name.into()) {
+        if let Some(class_arc) = self.file.read().await.classes.get(&name.into()) {
             let class = class_arc.lock().await;
             if group.is_none() || class.within.as_ref().map(|w| &w.name) == group.as_ref() {
                 return Some(Complex::Class(class_arc.clone()));
@@ -577,8 +512,9 @@ impl<'a> Linter<'a> {
             }
         }
 
+        let current_path = self.file.read().await.uri.clone();
         for (path, file_lock) in &self.proj.files {
-            if self.file.as_ref().uri == *path {
+            if &current_path == path {
                 continue;
             }
 
@@ -639,7 +575,8 @@ impl<'a> Linter<'a> {
                 .map(|access| access.strictness())
                 .unwrap_or(0)
             && (func.parsed().arguments.len() == arguments.len()
-                || (func.parsed().arguments.len() < arguments.len() && func.parsed().vararg.is_some()))
+                || (func.parsed().arguments.len() < arguments.len()
+                    && func.parsed().vararg.is_some()))
             && future::join_all(
                 func.parsed()
                     .arguments
@@ -655,54 +592,48 @@ impl<'a> Linter<'a> {
 
     async fn get_variables_in_class_helper<'b>(
         &'b self,
-        class_mut: Arc<Mutex<Class>>,
+        mut class_mut: Arc<Mutex<Class>>,
         access: &'b tokenizer::AccessType,
         write: bool,
         accessible: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, Option<String>)> + Send + 'b {
-        let var_iter = class_mut
-            .lock()
-            .await
-            .instance_variables
-            .clone()
-            .into_iter();
+    ) -> Vec<(IString, Arc<Mutex<Variable>>, Option<String>)> {
+        let mut out = Vec::new();
 
-        stream::unfold(
-            (class_mut, var_iter, access.strictness()),
-            move |(mut class_mut, mut var_iter, mut strictness)| async move {
-                loop {
-                    while let Some((name, var)) = var_iter.next() {
-                        let access = var.lock().await.unwrap_instance().1.access.clone();
-                        let is_accessible = write
-                            .then_some(&access.write)
-                            .unwrap_or(&access.read)
-                            .map_or(0, |acc| acc.strictness())
-                            <= strictness;
+        let mut strictness = access.strictness();
 
-                        if is_accessible == accessible {
-                            let err =
-                                (!accessible).then(|| "Cannot access Private Variable".to_string());
-                            return Some(((name, var, err), (class_mut, var_iter, strictness)));
-                        }
-                    }
+        loop {
+            let class = class_mut.lock().await;
 
-                    let complex = self.find_class(&class_mut.lock().await.base).await;
-                    match complex {
-                        Some(Complex::Class(cls)) => {
-                            var_iter = cls.lock().await.instance_variables.clone().into_iter();
-                            class_mut = cls.clone();
-                        }
-                        Some(Complex::Enum(_)) | None => break,
-                    }
+            for (name, var) in &class.instance_variables {
+                let access = var.lock().await.unwrap_instance().1.access.clone();
+                let is_accessible = write
+                    .then_some(&access.write)
+                    .unwrap_or(&access.read)
+                    .map_or(0, |acc| acc.strictness())
+                    <= strictness;
 
-                    if strictness < tokenizer::AccessType::PRIVATE.strictness() {
-                        strictness = tokenizer::AccessType::PROTECTED.strictness();
-                    }
+                if is_accessible == accessible {
+                    let err = (!accessible).then(|| "Cannot access Private Variable".to_string());
+                    out.push((name.clone(), var.clone(), err));
                 }
+            }
 
-                None
-            },
-        )
+            let complex = self.find_class(&class.base).await;
+            drop(class);
+
+            match complex {
+                Some(Complex::Class(cls)) => {
+                    class_mut = cls.clone();
+                }
+                Some(Complex::Enum(_)) | None => break,
+            }
+
+            if strictness < tokenizer::AccessType::PRIVATE.strictness() {
+                strictness = tokenizer::AccessType::PROTECTED.strictness();
+            }
+        }
+
+        out
     }
 
     pub async fn get_variables_in_class<'b>(
@@ -710,10 +641,12 @@ impl<'a> Linter<'a> {
         class_mut: Arc<Mutex<Class>>,
         access: &'b tokenizer::AccessType,
         write: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>)> + Send + 'b {
+    ) -> Vec<(IString, Arc<Mutex<Variable>>)> {
         self.get_variables_in_class_helper(class_mut, access, write, true)
             .await
+            .into_iter()
             .map(|(name, var, _)| (name, var))
+            .collect()
     }
 
     pub async fn get_inaccessible_variables_in_class<'b>(
@@ -721,10 +654,12 @@ impl<'a> Linter<'a> {
         class_mut: Arc<Mutex<Class>>,
         access: &'b tokenizer::AccessType,
         write: bool,
-    ) -> impl Stream<Item = (IString, Arc<Mutex<Variable>>, String)> + Send + 'b {
+    ) -> Vec<(IString, Arc<Mutex<Variable>>, String)> {
         self.get_variables_in_class_helper(class_mut, access, write, true)
             .await
+            .into_iter()
             .map(|(name, var, err)| (name, var, err.unwrap()))
+            .collect()
     }
 
     pub fn find_callable_function_in_class<'b>(

@@ -8,7 +8,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_throw(&mut self) -> EOFOr<Option<Statement>> {
         let throw = self.tokens.next()?;
         let mut err = None;
-        let expression = quick_exit_opt!(self.parse_expression(false)?, err);
+        let expression = ret_opt!(self.parse_expression(false)?, err);
 
         if err.is_none() {
             self.expect_newline()?.ok();
@@ -50,7 +50,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_destroy(&mut self) -> EOFOr<Option<Statement>> {
         let destroy = self.tokens.next()?;
         let mut err = None;
-        let expression = quick_exit_opt!(self.parse_expression(false)?, err);
+        let expression = ret_opt!(self.parse_expression(false)?, err);
         if err.is_none() {
             self.expect(TokenType::NEWLINE)?.ok();
         }
@@ -65,8 +65,130 @@ impl<I: Iterator<Item = char>> Parser<I> {
         }))
     }
 
-    // TODO make a parse_instance_variable_declaration instead?
-    pub fn parse_variable_declaration(&mut self) -> EOFOrParserResult<Statement> {
+    pub fn parse_variable_declaration(
+        &mut self,
+        constant: Option<Token>,
+        allow_multiple: bool,
+    ) -> EOFOrParserResult<Vec<Variable>> {
+        let mut data_type = ret_res!(self.parse_type()?);
+        let start = if let Some(token) = &constant {
+            token.range.start
+        } else {
+            data_type.range.start
+        };
+
+        let mut vars = Vec::new();
+        let mut end;
+        let mut err = None;
+
+        loop {
+            let name = ret_res!(self.expect(TokenType::ID)?);
+            end = name.range.end;
+
+            if self
+                .optional(TokenType::Symbol(tokenizer::Symbol::LBRACE))?
+                .is_some()
+            {
+                let mut first = true;
+                loop {
+                    match self.tokens.peek()?.token_type {
+                        TokenType::Symbol(tokenizer::Symbol::RBRACE) => {
+                            end = self.tokens.next()?.range.end;
+                            break;
+                        }
+                        TokenType::Symbol(tokenizer::Symbol::COMMA) if !first => {
+                            end = self.tokens.next()?.range.end;
+                        }
+                        TokenType::Literal(tokenizer::Literal::NUMBER) if first => {}
+                        _ => {
+                            let range = self.tokens.peek()?.range;
+                            err = self
+                                .fatal::<()>(
+                                    &if first {
+                                        "Expected ']' or a Number Literal"
+                                    } else {
+                                        "Expected ']' or ','"
+                                    }
+                                    .into(),
+                                    range,
+                                    true,
+                                )?
+                                .err();
+                            break;
+                        }
+                    }
+                    first = false;
+
+                    err = self
+                        .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
+                        .err();
+                    if err.is_some() {
+                        break;
+                    }
+
+                    if self
+                        .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
+                        .is_some()
+                    {
+                        err = self
+                            .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
+                            .err();
+                        if err.is_some() {
+                            break;
+                        }
+                    }
+                }
+
+                data_type = DataType {
+                    range: data_type.range.expanded(&end),
+                    data_type_type: DataTypeType::Array(Box::new(data_type.data_type_type.clone())),
+                }
+            }
+
+            let expression = if err.is_none()
+                && self
+                    .optional(TokenType::Operator(tokenizer::Operator::EQ))?
+                    .is_some()
+            {
+                let expression;
+                (expression, err) = self.parse_expression(false)?.split();
+                if let Some(ex) = &expression {
+                    end = ex.range.end;
+                }
+                expression
+            } else {
+                None
+            };
+
+            vars.push(Variable {
+                range: Range {
+                    start,
+                    end,
+                    uri: self.uri(),
+                },
+                data_type: data_type.clone(),
+                access: VariableAccess {
+                    name,
+                    is_write: true,
+                },
+                constant: constant.is_some(),
+                initial_value: expression,
+            });
+
+            if !allow_multiple
+                || err.is_some()
+                || self
+                    .optional(TokenType::Symbol(tokenizer::Symbol::COMMA))?
+                    .is_none()
+            {
+                break;
+            }
+        }
+
+        Some(Ok(vars))
+    }
+
+    pub fn parse_instance_variable_declaration(&mut self) -> EOFOrParserResult<Statement> {
         let start = self.tokens.peek()?.range.start;
 
         let base = match self.tokens.peek()?.token_type {
@@ -149,138 +271,26 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
         }
 
-        let mut var_start = None;
-        let constant =
-            if let Some(token) = self.optional(TokenType::Keyword(tokenizer::Keyword::CONSTANT))? {
-                var_start = Some(token.range.start);
-                true
-            } else {
-                false
-            };
+        let constant = self.optional(TokenType::Keyword(tokenizer::Keyword::CONSTANT))?;
 
-        let mut data_type = quick_exit!(self.parse_type()?);
-        let var_start = var_start.unwrap_or(data_type.range.start);
-
-        let mut vars = Vec::new();
-        let mut end;
         let mut err = None;
+        let vars = ret_res!(self.parse_variable_declaration(constant, true)?, err);
+        let end = vars.last().unwrap().range.end;
 
-        loop {
-            let name = quick_exit_simple!(self.expect(TokenType::ID)?);
-            end = name.range.end;
-
-            if self
-                .optional(TokenType::Symbol(tokenizer::Symbol::LBRACE))?
-                .is_some()
-            {
-                let mut first = true;
-                loop {
-                    match self.tokens.peek()?.token_type {
-                        TokenType::Symbol(tokenizer::Symbol::RBRACE) => {
-                            end = self.tokens.next()?.range.end;
-                            break;
-                        }
-                        TokenType::Symbol(tokenizer::Symbol::COMMA) if !first => {
-                            end = self.tokens.next()?.range.end;
-                        }
-                        TokenType::Literal(tokenizer::Literal::NUMBER) if first => {}
-                        _ => {
-                            let range = self.tokens.peek()?.range;
-                            err = self
-                                .fatal::<()>(
-                                    &if first {
-                                        "Expected ']' or a Number Literal"
-                                    } else {
-                                        "Expected ']' or ','"
-                                    }
-                                    .into(),
-                                    range,
-                                    true,
-                                )?
-                                .err();
-                            break;
-                        }
-                    }
-                    first = false;
-
-                    err = self
-                        .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
-                        .err();
-                    if err.is_some() {
-                        break;
-                    }
-
-                    if self
-                        .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
-                        .is_some()
-                    {
-                        err = self
-                            .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
-                            .err();
-                        if err.is_some() {
-                            break;
-                        }
-                    }
-                }
-
-                data_type = DataType {
-                    range: data_type.range.expanded(&end),
-                    data_type_type: DataTypeType::Array(Box::new(data_type.data_type_type.clone())),
-                }
-            }
-
-            let expression = if err.is_none()
-                && self
-                    .optional(TokenType::Operator(tokenizer::Operator::EQ))?
-                    .is_some()
-            {
-                let expression;
-                (expression, err) = self.parse_expression(false)?.split();
-                if let Some(ex) = &expression {
-                    end = ex.range.end;
-                }
-                expression
-            } else {
-                None
-            };
-
-            vars.push(InstanceVariable {
-                access: access.clone(),
-                variable: Variable {
-                    range: Range {
-                        start: var_start,
-                        end,
-                        uri: self.uri(),
-                    },
-                    data_type: data_type.clone(),
-                    access: VariableAccess {
-                        name,
-                        is_write: true,
-                    },
-                    constant,
-                    initial_value: expression,
-                },
-            });
-
-            if err.is_some() {
-                break;
-            }
-
-            if self.optional(TokenType::NEWLINE)?.is_some() {
-                break;
-            }
-
-            err = self
-                .expect(TokenType::Symbol(tokenizer::Symbol::COMMA))?
-                .err();
-            if err.is_some() {
-                break;
-            }
+        if err.is_none() {
+            err = self.expect_newline()?.err();
         }
 
         Some(ParseResult::new(
             Statement {
-                statement_type: StatementType::Declaration(vars),
+                statement_type: StatementType::Declaration(
+                    vars.into_iter()
+                        .map(|variable| InstanceVariable {
+                            access: access.clone(),
+                            variable,
+                        })
+                        .collect(),
+                ),
                 range: Range {
                     start,
                     end,
@@ -293,6 +303,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
     pub fn parse_expression_or_assignment(&mut self) -> EOFOr<Option<Statement>> {
         match self.parse_expression(false)?.split() {
+            // TODO handle this _err (dont read in the newlin 40 lines ↓)
             (Some(expression), _err) => match (expression, self.tokens.peek()?.token_type) {
                 (
                     expression @ Expression {
@@ -315,7 +326,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                                         return Some(Some(Statement {
                                             range: expression.range.clone(),
                                             statement_type: StatementType::Expression(expression),
-                                        }))
+                                        }));
                                     }
                                 },
                                 expression,
@@ -517,12 +528,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_for_loop(&mut self) -> EOFOr<Option<Statement>> {
         let for_token = self.tokens.next()?;
 
-        let name = quick_exit_simple_opt!(self.expect(TokenType::ID)?);
-        let _eq =
-            quick_exit_simple_opt!(self.expect(TokenType::Operator(tokenizer::Operator::EQ))?);
-        let start = quick_exit_opt!(self.parse_expression(false)?);
-        let _to = quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TO))?);
-        let stop = quick_exit_opt!(self.parse_expression(false)?);
+        let name = ret_opt!(self.expect(TokenType::ID)?);
+        let _eq = ret_opt!(self.expect(TokenType::Operator(tokenizer::Operator::EQ))?);
+        let start = ret_opt!(self.parse_expression(false)?);
+        let _to = ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::TO))?);
+        let stop = ret_opt!(self.parse_expression(false)?);
 
         let (step, err) = match self.optional(TokenType::Keyword(tokenizer::Keyword::STEP))? {
             Some(_) => self.parse_expression(false)?.split(),
@@ -536,6 +546,23 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut statements = Vec::new();
         loop {
             match self.tokens.peek()?.token_type {
+                TokenType::Keyword(tokenizer::Keyword::END) => {
+                    let range = self.tokens.next()?.range;
+                    match self.tokens.peek()?.token_type {
+                        TokenType::Keyword(tokenizer::Keyword::FOR) => {
+                            end = self.tokens.next()?.range.end;
+                            self.expect_newline();
+                            break;
+                        }
+                        _ => {
+                            self.fatal::<()>(
+                                &"Dangling END keyword, did you mean END FOR".into(),
+                                range,
+                                true,
+                            )
+                        }
+                    };
+                }
                 TokenType::Keyword(tokenizer::Keyword::NEXT) => {
                     end = self.tokens.next()?.range.end;
                     self.expect_newline()?.ok();
@@ -574,7 +601,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 keyword @ (tokenizer::Keyword::WHILE | tokenizer::Keyword::UNTIL),
             ) => {
                 let mut err = None;
-                let condition = quick_exit_opt!(self.parse_expression(false)?, err);
+                let condition = ret_opt!(self.parse_expression(false)?, err);
 
                 is_inversed = false;
                 is_until = keyword == tokenizer::Keyword::UNTIL;
@@ -823,10 +850,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
     pub fn parse_choose_case(&mut self) -> EOFOr<Option<Statement>> {
         let choose_token = self.tokens.next()?;
-        quick_exit_simple_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::CASE))?);
+        ret_opt!(self.expect(TokenType::Keyword(tokenizer::Keyword::CASE))?);
 
         let mut err = None;
-        let choose = quick_exit_opt!(self.parse_expression(false)?, err);
+        let choose = ret_opt!(self.parse_expression(false)?, err);
         if err.is_none() {
             self.expect_newline()?.ok();
         }
@@ -866,7 +893,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
             let mut specifiers = Vec::new();
             loop {
-                let specifier = match self.tokens.peek()?.token_type {
+                match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::IS) => {
                         let is = self.tokens.next()?;
                         let operator = match self.tokens.peek()?.token_type {
@@ -878,97 +905,92 @@ impl<I: Iterator<Item = char>> Parser<I> {
                             ) => operator,
                             _ => {
                                 let range = self.tokens.peek()?.range;
-                                self.fatal::<()>(
-                                    &"Expected a Comparison Operator (>=, >, <=, <)".into(),
-                                    range,
-                                    true,
-                                )?
-                                .ok();
+                                err = self
+                                    .fatal::<()>(
+                                        &"Expected a Comparison Operator (>=, >, <=, <)".into(),
+                                        range,
+                                        true,
+                                    )?
+                                    .err();
                                 break;
                             }
                         };
                         self.tokens.next()?;
 
-                        let Some(literal) = self
-                            .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
-                            .ok()
-                        else {
-                            break;
-                        };
+                        let expression;
+                        (expression, err) = self.parse_expression(false)?.split();
 
-                        CaseSpecifier {
-                            range: is.range.merged(&literal.range),
-                            specifier_type: CaseSpecifierType::Is(
-                                operator,
-                                Literal {
-                                    literal_type: tokenizer::Literal::NUMBER,
-                                    content: literal.content,
-                                    range: literal.range,
-                                },
-                            ),
-                        }
-                    }
-                    TokenType::Literal(literal) => {
-                        let token = self.tokens.next()?;
-                        match literal {
-                            tokenizer::Literal::NUMBER
-                                if self
-                                    .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
-                                    .is_some() =>
-                            {
-                                let Some(up_to_token) = self
-                                    .expect(TokenType::Literal(tokenizer::Literal::NUMBER))?
-                                    .ok()
-                                else {
-                                    break;
-                                };
-
-                                CaseSpecifier {
-                                    range: token.range.clone().merged(&up_to_token.range),
-                                    specifier_type: CaseSpecifierType::To(
-                                        Literal {
-                                            literal_type: literal,
-                                            content: token.content,
-                                            range: token.range,
-                                        },
-                                        Literal {
-                                            literal_type: tokenizer::Literal::NUMBER,
-                                            content: up_to_token.content,
-                                            range: up_to_token.range,
-                                        },
-                                    ),
-                                }
-                            }
-                            _ => CaseSpecifier {
-                                range: token.range.clone(),
-                                specifier_type: CaseSpecifierType::Literals(Literal {
-                                    literal_type: literal,
-                                    content: token.content,
-                                    range: token.range,
-                                }),
-                            },
+                        if let Some(expression) = expression {
+                            specifiers.push(CaseSpecifier {
+                                range: is.range.merged(&expression.range),
+                                specifier_type: CaseSpecifierType::Is(operator, expression),
+                            });
                         }
                     }
                     TokenType::Keyword(tokenizer::Keyword::ELSE) => {
                         let token = self.tokens.next()?;
-                        CaseSpecifier {
+                        specifiers.push(CaseSpecifier {
                             specifier_type: CaseSpecifierType::Else,
                             range: token.range,
-                        }
+                        });
                     }
                     _ => {
-                        let range = self.tokens.peek()?.range;
-                        self.fatal::<()>(
-                            &"Expected one of (LITERAL, IS, ELSE)".into(),
-                            range,
-                            true,
-                        )?
-                        .ok();
-                        break;
+                        let expression;
+                        (expression, err) = self.parse_expression(false)?.split();
+
+                        if let Some(expression) = expression {
+                            match expression.expression_type {
+                                ExpressionType::Literal(Literal {
+                                    literal_type: tokenizer::Literal::NUMBER,
+                                    ..
+                                })
+                                | ExpressionType::LValue(LValue {
+                                    lvalue_type: LValueType::Variable(_),
+                                    ..
+                                }) if err.is_none()
+                                    && self
+                                        .optional(TokenType::Keyword(tokenizer::Keyword::TO))?
+                                        .is_some() =>
+                                {
+                                    let up_to;
+                                    (up_to, err) = self.parse_expression(false)?.split();
+
+                                    if let Some(up_to) = up_to {
+                                        specifiers.push(CaseSpecifier {
+                                            range: expression.range.clone().merged(&up_to.range),
+                                            specifier_type: CaseSpecifierType::To(
+                                                expression, up_to,
+                                            ),
+                                        })
+                                    }
+                                }
+                                ExpressionType::Literal(_)
+                                | ExpressionType::LValue(LValue {
+                                    lvalue_type: LValueType::Variable(_),
+                                    ..
+                                }) => specifiers.push(CaseSpecifier {
+                                    range: expression.range.clone(),
+                                    specifier_type: CaseSpecifierType::Literals(expression),
+                                }),
+                                _ => {
+                                    if err.is_none() {
+                                        let range = self.tokens.peek()?.range;
+                                        err = self.fatal::<()>(
+                                            &format!("Expected one of (LITERAL, CONSTANT, IS, ELSE) got {:?}", expression.expression_type),
+                                            range,
+                                            true,
+                                        )?.err();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 };
 
-                specifiers.push(specifier);
+                if err.is_some() {
+                    break;
+                }
 
                 match self.tokens.peek()?.token_type {
                     TokenType::Symbol(tokenizer::Symbol::COMMA) => {
@@ -1042,7 +1064,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 CallType::Super
             }
             TokenType::ID => {
-                let (group, name) = quick_exit_opt!(self.parse_class_id()?);
+                let (group, name) = ret_opt!(self.parse_class_id()?);
                 CallType::Ancestor(group, name)
             }
             _ => {
@@ -1057,10 +1079,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
         };
 
-        quick_exit_simple_opt!(self.expect(TokenType::Symbol(tokenizer::Symbol::COLONCOLON))?);
+        ret_opt!(self.expect(TokenType::Symbol(tokenizer::Symbol::COLONCOLON))?);
 
         let mut err = None;
-        let lvalue = quick_exit_opt!(self.parse_lvalue(false)?, err);
+        let lvalue = ret_opt!(self.parse_lvalue(false)?, err);
         if err.is_none() {
             self.expect_newline()?.ok();
         }
@@ -1099,13 +1121,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
     pub fn parse_statement(&mut self) -> EOFOr<Option<Statement>> {
         match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CONSTANT) => {
-                Some(self.parse_variable_declaration()?.value())
+                Some(self.parse_instance_variable_declaration()?.value())
             }
             TokenType::ID
             | TokenType::Keyword(
                 tokenizer::Keyword::THIS | tokenizer::Keyword::SUPER | tokenizer::Keyword::PARENT,
             ) => match self.tokens.peek_nth(1)?.token_type {
-                TokenType::ID => Some(self.parse_variable_declaration()?.value()),
+                TokenType::ID => Some(self.parse_instance_variable_declaration()?.value()),
                 _ => self.parse_expression_or_assignment(),
             },
             TokenType::Keyword(tokenizer::Keyword::THROW) => self.parse_throw(),

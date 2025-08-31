@@ -1,5 +1,73 @@
-use std::{cell::RefCell, cmp::min, path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use std::{backtrace::Backtrace, sync::Arc, time::Duration};
+
+#[derive(Debug)]
+pub struct Mutex<T: ?Sized> {
+    m: tokio::sync::Mutex<T>,
+}
+
+unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
+
+impl<T: Sized> Mutex<T> {
+    pub fn new(t: T) -> Self {
+        Self {
+            m: tokio::sync::Mutex::new(t),
+        }
+    }
+
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, T> {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), self.m.lock()).await {
+                Ok(lock) => return lock,
+                Err(_) => {
+                    eprintln!("Possible deadlock: {}!!", Backtrace::capture().to_string());
+                }
+            }
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.m.into_inner()
+    }
+}
+
+#[derive(Debug)]
+pub struct RwLock<T: ?Sized> {
+    m: tokio::sync::RwLock<T>,
+}
+
+unsafe impl<T: Send> Send for RwLock<T> {}
+unsafe impl<T: Send> Sync for RwLock<T> {}
+
+impl<T: Sized> RwLock<T> {
+    pub fn new(t: T) -> Self {
+        Self {
+            m: tokio::sync::RwLock::new(t),
+        }
+    }
+
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, T> {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), self.m.read()).await {
+                Ok(lock) => return lock,
+                Err(_) => {
+                    eprintln!("Possible deadlock: {}!!", Backtrace::capture().to_string());
+                }
+            }
+        }
+    }
+
+    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, T> {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), self.m.write()).await {
+                Ok(lock) => return lock,
+                Err(_) => {
+                    eprintln!("Possible deadlock: {}!!", Backtrace::capture().to_string());
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum EitherOr<Left, Right> {

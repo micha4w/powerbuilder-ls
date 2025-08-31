@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use futures::StreamExt;
 use tower_lsp::{jsonrpc, lsp_types::*};
 
-use crate::{linter, parser, tokenizer, types::MaybeMut};
+use crate::{linter, parser, tokenizer};
 
 use super::ls::PowerBuilderLS;
 
@@ -32,9 +31,11 @@ impl PowerBuilderLS {
             .await;
 
         let pos = params.text_document_position.position.into();
+
         let Some((top_level_type, nodes)) = proj.get_node_at(&file, &pos) else {
             return Ok(None);
         };
+
         let Some(node) = nodes.last() else {
             self.client
                 .log_message(MessageType::INFO, "Node not found")
@@ -54,7 +55,8 @@ impl PowerBuilderLS {
                 .await
                 .unwrap_or_else(HashMap::new),
             return_type: parser::DataTypeType::Void,
-            file: MaybeMut::No(&file),
+            file: file_lock,
+            diagnose: false,
         };
 
         let mut items = Vec::new();
@@ -195,29 +197,25 @@ impl PowerBuilderLS {
                             if let Some(linter::Complex::Class(class_mut)) =
                                 linter.find_class(&grouped_name).await
                             {
-                                let mut vars = Box::pin(
-                                    linter
-                                        .get_variables_in_class(
-                                            class_mut.clone(),
-                                            &tokenizer::AccessType::PRIVATE,
-                                            access.is_write,
-                                        )
-                                        .await,
-                                );
-                                while let Some((_, var)) = vars.next().await {
+                                for (_, var) in linter
+                                    .get_variables_in_class(
+                                        class_mut.clone(),
+                                        &tokenizer::AccessType::PRIVATE,
+                                        access.is_write,
+                                    )
+                                    .await
+                                {
                                     let lock = var.lock().await;
                                     add_variable(&mut items, &lock, None).await;
                                 }
 
-                                let mut funcs = Box::pin(
-                                    linter
-                                        .get_functions_in_class(
-                                            class_mut,
-                                            &tokenizer::AccessType::PRIVATE,
-                                        )
-                                        .await,
-                                );
-                                while let Some((_, func)) = funcs.next().await {
+                                for (_, func) in linter
+                                    .get_functions_in_class(
+                                        class_mut,
+                                        &tokenizer::AccessType::PRIVATE,
+                                    )
+                                    .await
+                                {
                                     let lock = func.lock().await;
                                     add_function(&mut items, &lock, None).await;
                                 }

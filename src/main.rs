@@ -1,12 +1,15 @@
+#![feature(try_trait_v2)]
+
 mod linter;
 mod ls;
 mod parser;
 mod tokenizer;
 mod types;
 
-use std::{panic::PanicHookInfo, time::Duration};
+use std::{panic::PanicHookInfo, path::PathBuf, str::FromStr, time::Duration};
 
 use tokio::time::sleep;
+use types::Url;
 
 fn panic_hook(info: &PanicHookInfo) {
     eprintln!("{}", info);
@@ -39,6 +42,10 @@ async fn main() -> anyhow::Result<()> {
     //         file.read().await.diagnostics.len()
     //     );
     // }
+
+    // creator.proj.write().await.add_default_project(&Url::from_str("file:///home/micha4w/Code/Rust/powerbuilder-ls/res/2025-Solution/")?).await?;
+
+    // return Ok(());
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
