@@ -1,0 +1,25 @@
+{
+    "version": "0.5",
+    "requires": [
+        "zstd/1.5.5#8400bcba21d1b495dca55edf3f065246%1744114239.76",
+        "zlib/1.3.1#b8bc2603263cf7eccbd6e17e66b0ed76%1733936244.862",
+        "sqlite3/3.49.1#8631739a4c9b93bd3d6b753bac548a63%1740462952.817",
+        "protobuf/6.30.1#97bae23ef6d7f9fcfdb4ded9468ad6de%1747665968.233",
+        "poco/1.13.3#d32d94b924693daeefd937ead17bed14%1744117531.057",
+        "pcre2/10.42#9a35f5089feb875ec61a38eca364ce77%1743524593.693",
+        "openssl/3.4.1#afcaa66ae3020340af2d5641a475b5ae%1747751109.075",
+        "lz4/1.9.4#4ed63aa8e019d795cd3b8c0d2dd66cda%1743433190.812",
+        "libpq/15.4#7c113f89180dee415d80d6b5aa9bab7f%1743667704.492",
+        "libmysqlclient/8.1.0#ecca1993f7ce32371ef5436f3639074a%1704273465.815",
+        "expat/2.7.1#b0b67ba910c5147271b444139ca06953%1743502492.76",
+        "bzip2/1.0.8#00b4a4658791c1f06914e087f0e792f5%1744702067.178",
+        "abseil/20250127.0#9e8e8cfc89a1324139fc0ee3bd4d8c8c%1748442696.334"
+    ],
+    "build_requires": [
+        "strawberryperl/5.32.1.1#707032463aa0620fa17ec0d887f5fe41%1716912583.131",
+        "nasm/2.16.01#31e26f2ee3c4346ecd347911bd126904%1745483323.489",
+        "cmake/3.31.8#dde3bde00bb843687e55aea5afa0e220%1751628300.59"
+    ],
+    "python_requires": [],
+    "config_requires": []
+}

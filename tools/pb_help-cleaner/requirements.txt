@@ -1,0 +1,7 @@
+protobuf
+types-protobuf
+mypy-protobuf
+grpcio-tools==v1.73.1
+
+beautifulsoup4
+types-beautifulsoup4

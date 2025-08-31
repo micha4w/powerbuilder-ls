@@ -1,0 +1,3 @@
+LIBRARY pbshr.dll
+EXPORTS
+pbstg_begin@4 @3

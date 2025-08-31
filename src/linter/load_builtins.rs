@@ -1,8 +1,7 @@
-use std::{str::Chars, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use prost::{bytes::Bytes, Message as _};
-use tokio::sync::Mutex;
 
 use super::{
     powerbuilder_proto::{self, variable},
@@ -43,18 +42,8 @@ impl Project {
     }
 
     fn parse_help(help: &Option<String>) -> anyhow::Result<Option<String>> {
-        return Ok(None);
-
-        // TODO actually parse the html goodly
-        // let Some(help) = help else {
-        //     return Ok(None);
-        // };
-        // let md = htmd::convert(help)?;
-        // if md.trim().is_empty() {
-        //     return Ok(None);
-        // }
-
-        // Ok(Some(md))
+        // Handled by /tools/pb_help-cleaner
+        Ok(help.clone())
     }
 
     fn load_proto_function(
@@ -110,7 +99,7 @@ impl Project {
 
     pub(super) async fn load_enums(&mut self) -> anyhow::Result<()> {
         let enums = powerbuilder_proto::Enums::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/enums.pb")
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/enums.pb")
         )))?;
         for mut en in enums.r#enum {
             let iname = (&en.name).into();
@@ -135,7 +124,7 @@ impl Project {
 
     pub(super) async fn load_builtin_classes(&mut self) -> anyhow::Result<()> {
         let classes = powerbuilder_proto::Classes::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/classes.pb")
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/classes.pb")
         )))?;
 
         for class in classes.class {
@@ -262,7 +251,7 @@ impl Project {
 
     pub(super) fn load_builtin_functions(&mut self) -> anyhow::Result<()> {
         let funcs = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/system/system_functions.pb")
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/functions.pb")
         )))?;
 
         for func in funcs.function {

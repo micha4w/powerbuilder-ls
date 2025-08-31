@@ -1,0 +1,26 @@
+LIBRARY pbvm.dll
+EXPORTS
+ob_class_name@8 @949
+ob_get_array_bounds_string_from_field_info@8 @1535
+ob_get_class_field_info@12 @1121
+ob_get_class_from_name@12 @1765
+ob_get_class_property@12 @1304
+ob_get_classes_within_group@16 @1229
+ob_get_enum_info@12 @1050
+ob_get_enums_within_group@12 @996
+ob_get_event_vtable_ids@16 @1469
+ob_get_field_property@16 @1305
+ob_get_field_property_set@16 @1761
+ob_get_field_type@16 @1490
+ob_get_function_vtable_ids@20 @1471
+ob_get_obj_classhndls_of_class@12 @1044
+ob_get_parent_class@8 @1227
+ob_get_proto_info@48 @1137
+ob_get_proto_throws_info@24 @1502
+ob_get_routine_property@16 @1306
+ob_get_system_class@8 @1149
+ob_get_system_func_class@4 @1394
+ob_global_reference_of_class@16 @1232
+ot_set_return_val@8 @1039
+rt_get_current_this@0 @1290
+FN_RuntimeCreate@32 @156

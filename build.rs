@@ -1,7 +1,7 @@
 use std::{io::Result, path::PathBuf};
 
 fn main() -> Result<()> {
-    let proto_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proto/output.proto");
+    let proto_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("builtins/proto/builtins.proto");
 
     println!("cargo:rerun-if-changed={}", proto_file.display());
 
