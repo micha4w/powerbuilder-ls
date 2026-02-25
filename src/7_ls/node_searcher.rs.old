@@ -1,0 +1,569 @@
+use std::{mem::replace, sync::Arc};
+
+use crate::{
+    linter::{self, Linter},
+    parser, project, tokenizer,
+    types::*,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub enum BuiltLValue<'a> {
+    This(Option<project::ClassRef<'a>>),
+    Super(Found<project::Complex<'a>>),
+    Parent(Found<project::Complex<'a>>),
+
+    Variable(
+        &'a parser::VariableAccess,
+        Found<(Option<project::ClassRef<'a>>, &'a Arc<project::Variable>)>,
+    ),
+    Function(
+        &'a parser::FunctionCall,
+        Option<project::ClassRef<'a>>,
+        Found<&'a project::Function>,
+    ),
+
+    Member(
+        &'a Box<parser::LValue>,
+        &'a parser::VariableAccess,
+        Found<(project::ClassRef<'a>, Found<&'a project::Variable>)>,
+    ),
+    Method(
+        &'a Box<parser::LValue>,
+        &'a parser::FunctionCall,
+        Found<(
+            project::ClassRef<'a>,
+            Found<OneOf<&'a project::Function, &'a project::Event>>,
+        )>,
+    ),
+    Index(&'a Box<parser::LValue>, &'a Box<parser::Expression>),
+    SQLAccess(&'a tokenizer::Token, &'a Box<parser::LValue>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Node<'a> {
+    VariableDeclaration(&'a project::Variable),
+    ScopedVariableDeclaration(&'a project::Variable),
+    InstanceVariableDeclaration(&'a project::Variable),
+    Label(&'a tokenizer::Token),
+
+    /// Used for both declarations and the headers above definitions
+    FunctionHeader(&'a project::FunctionHeader),
+    EventHeader(&'a project::EventHeader),
+
+    LValue(&'a Range, BuiltLValue<'a>),
+    Expression(&'a parser::Expression),
+    Statement(&'a parser::Statement),
+
+    // Basically just wrapped parser::LValueType
+    DataType(&'a parser::DataType, Option<Found<project::Complex<'a>>>),
+}
+
+struct NodeSearch<'a> {
+    pos: &'a Position,
+    nodes: Vec<Node<'a>>,
+
+    linter: &'a Linter<'a>,
+    scope: &'a linter::Scope<'a>,
+
+    in_sql: bool,
+}
+
+impl NodeSearch<'_> {
+    fn inside_sql(&mut self, f: impl FnOnce(&mut Self) -> Found<()>) -> Found<()> {
+        let prev_in_sql = replace(&mut self.in_sql, true);
+        let found = f(self);
+        self.in_sql = prev_in_sql;
+        found
+    }
+}
+
+trait NodeSearcher {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()>;
+}
+
+impl<T: NodeSearcher> NodeSearcher for Arc<T> {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        (**self).search(search)
+    }
+}
+
+impl<T: NodeSearcher> NodeSearcher for Option<T> {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if let Some(val) = self {
+            val.search(search)?;
+        }
+
+        Found::No
+    }
+}
+
+impl<T: NodeSearcher> NodeSearcher for Vec<T> {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        for val in self {
+            val.search(search)?;
+        }
+
+        Found::No
+    }
+}
+
+impl NodeSearcher for parser::DataType {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        let class = match project::PowerScriptType::new(&self) {
+            project::PowerScriptType::Complex(name) => Some(
+                search
+                    .linter
+                    .proj
+                    .find_class(Some(search.linter.file), &name),
+            ),
+            _ => None,
+        };
+
+        search.nodes.push(Node::DataType(self, class));
+
+        Found::Yes(())
+    }
+}
+
+// impl NodeSearcher for parser::VariableAccess {
+//     fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+//         if !self.name.range.contains(&search.pos) {
+//             return Found::No;
+//         }
+
+//         let var = project::Context::first(search.scope.context.variables(
+//             project::VariableFilter::ForAccess(self, tokenizer::AccessType::PUBLIC),
+//         ));
+
+//         search.nodes.push(Node::VariableAccess(self, var));
+//         Found::Yes(())
+//     }
+// }
+
+impl NodeSearcher for parser::Variable {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        let body = search
+            .scope
+            .context
+            .body
+            .expect("this should not be used for instance or scoped variables");
+        let var = body
+            .variables
+            .get(&(&self.access.name.content).into())
+            .unwrap();
+
+        search.nodes.push(Node::VariableDeclaration(var));
+        self.data_type.search(search)?;
+        self.initial_value.search(search)?;
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for project::Variable {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.parsed().range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        match &self.variable_type {
+            project::VariableType::Instance(_) => search.nodes.push(Node::InstanceVariableDeclaration(self)),
+            project::VariableType::Scoped(_) => search.nodes.push(Node::ScopedVariableDeclaration(self)),
+            project::VariableType::Argument(_) => search.nodes.push(Node::VariableDeclaration(self)),
+            project::VariableType::Local(_) => unreachable!("TODO: make this be reachable, its not because local variables are not in the parse tree")
+        };
+
+        self.parsed().data_type.search(search)?;
+        self.parsed().initial_value.search(search)?;
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for parser::LValue {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        // TODO(sql): ...
+        // if !search.in_sql {
+        //     search.nodes.push(Node::LValue(self));
+        // }
+
+        let built = match &self.lvalue_type {
+            // TODO make these be variable accesses?
+            parser::LValueType::This => BuiltLValue::This(search.scope.context.class),
+            parser::LValueType::Super => {
+                let cls = search.scope.context.class.and_then(|fc| {
+                    search
+                        .scope
+                        .context
+                        .find_class(&fc.class.base().into())
+                        .into()
+                });
+
+                BuiltLValue::Super(cls.into())
+            }
+            parser::LValueType::Parent => {
+                let cls = search
+                    .scope
+                    .context
+                    .class
+                    .and_then(|fc| fc.class.within())
+                    .and_then(|class| search.scope.context.find_class(&class.into()).into());
+
+                BuiltLValue::Super(cls.into())
+            }
+            parser::LValueType::Variable(access) => {
+                let var = project::Context::first(search.scope.context.variables(
+                    project::VariableFilter::ForAccess(access, tokenizer::AccessType::PUBLIC),
+                ));
+
+                BuiltLValue::Variable(access, var)
+            }
+            parser::LValueType::Function(call) => {
+                let iname = (&call.name.content).into();
+                let args = search
+                    .linter
+                    .must_lint_expressions(&call.arguments, &search.scope);
+
+                let funcs = search
+                    .scope
+                    .context
+                    .functions(project::FunctionFilter::ForCall(
+                        &iname,
+                        &args,
+                        tokenizer::AccessType::PUBLIC,
+                    ));
+                let func = project::Context::first(funcs);
+
+                call.arguments.search(search)?;
+            }
+            parser::LValueType::Method(lvalue, call) => {
+                lvalue.search(search)?;
+                call.arguments.search(search)?;
+            }
+            parser::LValueType::Member(lvalue, _) => {
+                lvalue.search(search)?;
+            }
+            parser::LValueType::Index(lvalue, expression) => {
+                lvalue.search(search)?;
+                expression.search(search)?;
+            }
+            parser::LValueType::SQLAccess(_, lvalue) => lvalue.search(search)?,
+        };
+
+        search.nodes.push(Node::LValue(&self.range, built));
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for parser::Expression {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        if !search.in_sql {
+            search.nodes.push(Node::Expression(self));
+        }
+
+        match &self.expression_type {
+            parser::ExpressionType::Create(data_type) => {
+                data_type.search(search)?;
+            }
+            parser::ExpressionType::Literal(..) => {}
+            parser::ExpressionType::ArrayLiteral(expressions) => {
+                expressions.search(search)?;
+            }
+            parser::ExpressionType::Operation(left, _operator, right) => {
+                left.search(search)?;
+                right.search(search)?;
+            }
+            parser::ExpressionType::UnaryOperation(_, expression)
+            | parser::ExpressionType::IncrementDecrement(expression, _)
+            | parser::ExpressionType::BooleanNot(expression)
+            | parser::ExpressionType::Parenthesized(expression)
+            | parser::ExpressionType::CreateUsing(expression) => expression.search(search)?,
+
+            parser::ExpressionType::LValue(lvalue) => lvalue.search(search)?,
+            parser::ExpressionType::Error => {}
+        };
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for parser::Statement {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        search.nodes.push(Node::Statement(self));
+
+        match &self.statement_type {
+            parser::StatementType::Expression(expression) |
+            parser::StatementType::Throw(expression) |
+            parser::StatementType::Destroy(expression) |
+            parser::StatementType::Return(Some(expression)) => {
+                    expression.search(search)?;
+            }
+            parser::StatementType::Assignment(lvalue, _, expression) => {
+                    lvalue.search(search)?;
+                    expression.search(search)?;
+            }
+            parser::StatementType::Declaration(var) => {
+                unreachable!("should be handled in the top level");
+            }
+
+            parser::StatementType::Goto(label) | parser::StatementType::Label(label) => if label.range.contains(&search.pos) {
+                search.nodes.push(Node::Label(label));
+            },
+
+            parser::StatementType::Return(None) |
+            parser::StatementType::Call(..) | // TODO
+            parser::StatementType::Exit |
+            parser::StatementType::Continue |
+            parser::StatementType::Error => {},
+            parser::StatementType::SQL(sql) => {
+                sql.get_transaction().search(search)?;
+                search.inside_sql(|search| {
+                    match sql {
+                        parser::SQLStatement::OPEN(token) => {}
+                        parser::SQLStatement::CLOSE(token) => {}
+                        parser::SQLStatement::CONNECT(_) => {}
+                        parser::SQLStatement::DISCONNECT(_) => {}
+                        parser::SQLStatement::COMMIT(_) => { }
+                        parser::SQLStatement::DECLARE_CURSOR(cursor, select) => {
+                            &select.fields.search(search)?;
+                            &select.intos.search(search)?;
+                            &select.clause.search(search)?;
+                        }
+                        parser::SQLStatement::DECLARE_PROCEDURE(decl) => {},
+                        parser::SQLStatement::EXECUTE(procedure) => {},
+                        parser::SQLStatement::FETCH(cursor_or_procedure, intos) => {
+                            search.in_sql = false;
+                            intos.search(search)?;
+                        }
+                        parser::SQLStatement::ROLLBACK(_) => {},
+                        parser::SQLStatement::DELETE(_, criteria, _) => {
+                            criteria.search(search)?
+                        }
+                        parser::SQLStatement::DELETE_OF_CURSOR(_, cursor) => todo!(),
+                        parser::SQLStatement::INSERT(insert) => {
+                            &insert.fields.search(search)?;
+                            &insert.values.search(search)?;
+                        }
+                        parser::SQLStatement::SELECT(select) => {
+                            &select.fields.search(search)?;
+                            &select.intos.search(search)?;
+                            &select.clause.search(search)?;
+                        }
+                        parser::SQLStatement::UPDATE(update) => {
+                            &update.set.search(search)?;
+                            &update.clause.search(search)?;
+                        }
+                        parser::SQLStatement::UPDATE_OF_CURSOR(update) => {
+                            &update.set.search(search)?;
+                        }
+                    }
+
+                    Found::No
+                })?;
+            }
+            parser::StatementType::If(if_statement) => {
+                if_statement.condition.search(search)?;
+                if_statement.statements.search(search)?;
+                for (expression, statements) in &if_statement.elseif_statements {
+                    expression.search(search)?;
+                    statements.search(search)?;
+                }
+                if_statement.else_statements.search(search)?;
+            },
+            parser::StatementType::TryCatch(try_catch_statement) => {
+                try_catch_statement.statements.search(search)?;
+
+                for (variable, statements) in &try_catch_statement.catches {
+                    variable.search(search)?;
+                    statements.search(search)?;
+
+                }
+
+                if let Some(statements) = &try_catch_statement.finally {
+                    statements.search(search)?;
+                };
+            }
+            parser::StatementType::ForLoop(for_loop) => {
+                for_loop.variable.search(search)?;
+
+                for_loop.start.search(search)?;
+                for_loop.stop.search(search)?;
+                for_loop.step.search(search)?;
+
+                for_loop.statements.search(search)?;
+            },
+            parser::StatementType::WhileLoop(while_loop) => {
+                while_loop.condition.search(search)?;
+                while_loop.statements.search(search)?;
+            },
+            parser::StatementType::Choose(choose_case) => {
+                choose_case.choose.search(search)?;
+
+                for (specifiers, statements) in &choose_case.cases {
+                    for specifier in specifiers {
+                        for expr in specifier.get_expressions() {
+                            expr.search(search)?;
+                        }
+                    }
+
+                    statements.search(search)?;
+                }
+            },
+        };
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for project::FunctionHeader {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.parsed.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        search.nodes.push(Node::FunctionHeader(self));
+
+        self.parsed.returns.search(search)?;
+        self.arguments.search(search)?;
+        self.parsed.throws.search(search)?;
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for project::EventHeader {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        if !self.parsed.range.contains(&search.pos) {
+            return Found::No;
+        }
+
+        search.nodes.push(Node::EventHeader(self));
+
+        match &self.parsed.event_type {
+            parser::EventType::User(returns, arguments) => {
+                returns.search(search)?;
+
+                for arg in arguments {
+                    arg.variable.search(search)?;
+                }
+            }
+            parser::EventType::Predefined => {}
+            parser::EventType::System(name) => {} // TODO(events): ...
+        }
+
+        Found::Yes(())
+    }
+}
+
+impl NodeSearcher for parser::Class {
+    fn search<'a>(&'a self, search: &mut NodeSearch<'a>) -> Found<()> {
+        self.name.search(search)?;
+        self.base.search(search)?;
+        self.within.search(search)?;
+
+        Found::No
+    }
+}
+
+pub trait NodeGetter {
+    fn get_nodes_at<'a>(
+        &'a self,
+        pos: &'a Position,
+        linter: &'a Linter,
+        scope: &'a linter::Scope,
+    ) -> Vec<Node<'a>>;
+}
+
+impl NodeGetter for project::TopLevelType {
+    // TODO: make this return not only the parsed but also the built values
+    fn get_nodes_at<'a>(
+        &'a self,
+        pos: &'a Position,
+        linter: &'a Linter,
+        scope: &'a linter::Scope,
+    ) -> Vec<Node<'a>> {
+        let mut search = NodeSearch {
+            pos,
+            nodes: Vec::new(),
+            linter,
+            scope,
+
+            in_sql: false,
+        };
+
+        match &self {
+            project::TopLevelType::ForwardDecl(decl) => {
+                // TOOD(forward): ...
+                // decl.variables.search(&mut search);
+                for datatype in &decl.classes {
+                    datatype.class.search(&mut search);
+                    // datatype.events.search(&mut search);
+                    // datatype.functions.search(&mut search);
+                    // datatype.variables.search(&mut search);
+                }
+            }
+            project::TopLevelType::TypeVariablesDecl(vars) => {
+                for var in vars {
+                    var.parsed().search(&mut search);
+                }
+            }
+            project::TopLevelType::FunctionsForwardDecl(functions)
+            | project::TopLevelType::ExternalFunctions(functions) => {
+                for func in functions {
+                    func.header.search(&mut search);
+                }
+            }
+
+            project::TopLevelType::FunctionBody(body) => {
+                body.header.search(&mut search);
+                body.parsed.statements.search(&mut search);
+            }
+            project::TopLevelType::EventBody(body) => {
+                body.header.search(&mut search);
+                body.parsed.statements.search(&mut search);
+            }
+            project::TopLevelType::OnBody(body) => {
+                body.statements.search(&mut search);
+            }
+
+            project::TopLevelType::ScopedVariableDecl(vars)
+            | project::TopLevelType::ScopedVariablesDecl(vars) => {
+                vars.search(&mut search);
+            }
+            project::TopLevelType::DatatypeDecl(decl) => {
+                decl.class.parsed.class.search(&mut search);
+
+                for e in &decl.events {
+                    e.header.search(&mut search);
+                }
+                for f in &decl.functions {
+                    f.header.search(&mut search);
+                }
+                decl.variables.search(&mut search);
+            }
+        }
+
+        search.nodes
+    }
+}

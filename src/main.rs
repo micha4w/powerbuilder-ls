@@ -1,19 +1,33 @@
-#![feature(try_trait_v2)]
+#![feature(try_trait_v2, try_trait_v2_residual)]
+#![feature(coroutines, coroutine_trait, stmt_expr_attributes, iter_from_coroutine)]
 
-mod linter;
-mod ls;
-mod parser;
-mod tokenizer;
+
 mod types;
+mod utils;
 
-use std::{panic::PanicHookInfo, path::PathBuf, str::FromStr, time::Duration};
+#[path="1_tokenizer/mod.rs"]
+mod tokenizer;
+#[path="2_parser/mod.rs"]
+mod parser;
+#[path="3_builder/mod.rs"]
+mod builder;
+#[path="4_project/mod.rs"]
+mod project;
+#[path="5_resolver/mod.rs"]
+mod resolver;
+#[path="6_linter/mod.rs"]
+mod linter;
+#[path="7_ls/mod.rs"]
+mod ls;
 
+use std::{panic::PanicHookInfo, time::Duration};
+
+use ls::PowerBuilderLS;
 use tokio::time::sleep;
-use types::Url;
 
 fn panic_hook(info: &PanicHookInfo) {
     eprintln!("{}", info);
-    if let Err(err) = std::fs::write("powerbuilder-log.txt", info.to_string()) {
+    if let Err(err) = std::fs::write("/home/micha4w/Code/Rust/powerbuilder-ls/powerbuilder-log.txt", info.to_string()) {
         eprintln!("{}", err);
     };
 }
@@ -22,8 +36,7 @@ fn panic_hook(info: &PanicHookInfo) {
 async fn main() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(panic_hook));
 
-    let creator = ls::PowerBuilderLSCreator::new().await?;
-    // sleep(Duration::from_secs(3)).await;
+    // sleep(Duration::from_secs(10)).await;
 
     // creator
     //     .proj
@@ -50,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = tower_lsp::LspService::new(move |client| creator.create(client));
+    let (service, socket) = tower_lsp::LspService::new(move |client| PowerBuilderLS::new(client));
     // println!("{:?}", service
     //     .inner()
     //     .hover_impl(tower_lsp::lsp_types::HoverParams {
