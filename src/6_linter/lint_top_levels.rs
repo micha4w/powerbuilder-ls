@@ -410,12 +410,13 @@ impl<'a> Linter<'a> {
                     }
                 };
 
-                self.lint_statements_in_block(
-                    on.statements.iter(),
-                    &None,
-                    std::iter::empty(),
-                    &builder::Body::empty(),
-                );
+                // TODO(on): ...
+                // self.lint_statements_in_block(
+                //     on.statements.iter(),
+                //     &None,
+                //     std::iter::empty(),
+                //     &builder::Body::empty(),
+                // );
                 self.class = prev_class;
             }
         }
