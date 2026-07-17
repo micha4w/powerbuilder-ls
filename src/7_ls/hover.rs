@@ -131,7 +131,7 @@ impl PowerBuilderLS {
         match resolved {
             ResolvedType::Complex(project::Complex::Class(fc)) => {
                 title = fc.class.to_string();
-                description = fc.class.help.clone();
+                description = fc.class.help.cloned();
             }
             ResolvedType::Complex(project::Complex::Enum(en)) => {
                 title = format!("type {} from enumerated", en.name);

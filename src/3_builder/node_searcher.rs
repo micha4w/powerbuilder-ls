@@ -397,7 +397,7 @@ pub trait NodeGetter {
     fn get_nodes_at(&self, pos: &Position) -> Vec<Node<'_>>;
 }
 
-impl NodeGetter for TopLevelType {
+impl NodeGetter for TopLevelType<'_> {
     // TODO: make this return not only the parsed but also the built values
     fn get_nodes_at(&self, pos: &Position) -> Vec<Node<'_>> {
         let mut nodes = vec![];

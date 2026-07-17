@@ -4,6 +4,7 @@ use std::{
 };
 
 use prost::{bytes::Bytes, Message as _};
+use self_cell::self_cell;
 
 use super::{
     powerbuilder_proto::{self, variable},
@@ -20,36 +21,42 @@ pub static BUILTIN_URL: LazyLock<Arc<Url>> =
     LazyLock::new(|| Arc::new(Url::parse("powerbuilder-ls:///builtins.sru").unwrap()));
 
 #[derive(Debug)]
-pub struct Builtins {
-    pub enums: HashMap<IString, builder::Enum>,
-    pub enums_value_cache: HashMap<IString, IString>,
-    pub functions: HashMap<
-        IString,
-        Vec<
-            DefinitionDeclaration<
-                Arc<builder::FunctionDefinition>,
-                Arc<builder::FunctionDeclaration>,
-            >,
-        >,
-    >,
-    pub classes: HashMap<IString, Arc<builder::Class>>,
+pub struct BuiltinsParsed {
+    pub functions: Vec<parser::Function>,
+    pub classes: Vec<parser::DatatypeDecl>,
 }
 
-impl Builtins {
+impl BuiltinsParsed {
     pub fn new() -> Self {
-        Builtins {
-            enums: HashMap::new(),
-            enums_value_cache: HashMap::new(),
-            functions: HashMap::new(),
-            classes: HashMap::new(),
+        let functions = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/functions.pb")
+        )))
+        .expect("Failed to load builtins");
+
+        let classes = powerbuilder_proto::Classes::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/classes.pb")
+        )))
+        .expect("Failed to load builtins");
+
+        BuiltinsParsed {
+            functions: functions
+                .function
+                .into_iter()
+                .map(|func| Self::parse_proto_function(func))
+                .collect(),
+            classes: classes
+                .class
+                .into_iter()
+                .map(|class| Self::parse_proto_class(class))
+                .collect(),
         }
     }
 
-    fn empty(&self) -> Range {
+    fn empty() -> Range {
         Range::empty(BUILTIN_URL.clone())
     }
 
-    fn parse_type(&self, mut name: String) -> parser::DataType {
+    fn parse_type(mut name: String) -> parser::DataType {
         name += "\n\n";
 
         let mut parser = Parser::new(name.chars(), BUILTIN_URL.clone());
@@ -73,8 +80,7 @@ impl Builtins {
         }
     }
 
-    fn load_proto_callable(
-        &self,
+    fn parse_proto_callable(
         ret: Option<String>,
         argument: Vec<powerbuilder_proto::Variable>,
     ) -> (Option<parser::DataType>, Vec<parser::Argument>, bool) {
@@ -84,7 +90,7 @@ impl Builtins {
 
         if let Some(ret) = ret {
             if ret != "\u{1}void" {
-                returns = Some(self.parse_type(ret));
+                returns = Some(Self::parse_type(ret));
             }
         }
 
@@ -99,18 +105,18 @@ impl Builtins {
                     variable: parser::Variable {
                         help: None,
                         constant: flags & variable::Flag::NoWrite as u32 > 0,
-                        data_type: self.parse_type(arg.r#type.unwrap()),
+                        data_type: Self::parse_type(arg.r#type.unwrap()),
                         access: VariableAccess {
                             name: Token {
                                 token_type: TokenType::ID,
-                                content: arg.name.clone().unwrap(),
-                                range: self.empty(),
+                                content: arg.name.unwrap(),
+                                range: Self::empty(),
                                 error: None,
                             },
                             is_write: true,
                         },
                         initial_value: None,
-                        range: self.empty(),
+                        range: Self::empty(),
                     },
                 })
             }
@@ -119,71 +125,130 @@ impl Builtins {
         (returns, arguments, has_vararg)
     }
 
-    fn load_return_and_arguments(
-        &self,
-        returns: Option<parser::DataType>,
-        arguments: Vec<parser::Argument>,
-    ) -> (Option<builder::DataType>, Vec<builder::Variable>) {
-        (
-            returns.map(builder::DataType::new),
-            arguments
-                .into_iter()
-                .map(|arg| builder::Variable::new_argument(arg))
-                .collect(),
-        )
-    }
-
-    fn load_proto_function(
-        &self,
-        func: powerbuilder_proto::Function,
-    ) -> builder::FunctionDeclaration {
+    fn parse_proto_function(func: powerbuilder_proto::Function) -> parser::Function {
         let (parser_returns, parser_arguments, has_vararg) =
-            self.load_proto_callable(func.ret, func.argument);
+            Self::parse_proto_callable(func.ret, func.argument);
 
-        builder::FunctionDeclaration {
-            header: builder::FunctionHeader::new(parser::Function {
-                help: func.help,
-                returns: parser_returns,
-                scope_modif: None,
-                access: None,
-                name: Token {
-                    token_type: TokenType::ID,
-                    content: func.name,
-                    range: self.empty(),
-                    error: None,
-                },
-                arguments: parser_arguments,
-                vararg: has_vararg.then(|| Token {
-                    token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
-                    content: "...".into(),
-                    range: self.empty(),
-                    error: None,
-                }),
-                range: self.empty(),
-                throws: Vec::new(),
+        parser::Function {
+            help: func.help,
+            returns: parser_returns,
+            scope_modif: None,
+            access: None,
+            name: Token {
+                token_type: TokenType::ID,
+                content: func.name,
+                range: Self::empty(),
+                error: None,
+            },
+            arguments: parser_arguments,
+            vararg: has_vararg.then(|| Token {
+                token_type: TokenType::Symbol(tokenizer::Symbol::DOTDOTDOT),
+                content: "...".into(),
+                range: Self::empty(),
+                error: None,
             }),
+            range: Self::empty(),
+            throws: Vec::new(),
         }
     }
 
-    fn load_proto_event(&self, event: powerbuilder_proto::Function) -> builder::EventDeclaration {
+    fn parse_proto_event(event: powerbuilder_proto::Function) -> parser::Event {
         let (parsed_returns, parsed_arguments, has_vararg) =
-            self.load_proto_callable(event.ret, event.argument);
-        if has_vararg {
-            todo!();
-        }
+            Self::parse_proto_callable(event.ret, event.argument);
+        assert!(!has_vararg, "Events cannot have varargs");
 
-        builder::EventDeclaration {
-            header: builder::EventHeader::new(parser::Event {
-                name: Token {
-                    token_type: TokenType::ID,
-                    content: event.name,
-                    range: self.empty(),
-                    error: None,
+        parser::Event {
+            name: Token {
+                token_type: TokenType::ID,
+                content: event.name,
+                range: Self::empty(),
+                error: None,
+            },
+            range: Self::empty(),
+            help: event.help,
+            event_type: parser::EventType::User(parsed_returns, parsed_arguments),
+        }
+    }
+
+    fn parse_proto_variable(var: powerbuilder_proto::Variable) -> parser::InstanceVariable {
+        parser::InstanceVariable {
+            access: parser::Access {
+                read: None,
+                write: None,
+            },
+            variable: parser::Variable {
+                help: None,
+                constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
+                data_type: Self::parse_type(var.r#type.unwrap()),
+                access: VariableAccess {
+                    name: Token::fake_identifier(var.name.unwrap(), Self::empty()),
+                    is_write: true,
                 },
-                range: self.empty(),
-                help: event.help,
-                event_type: parser::EventType::User(parsed_returns, parsed_arguments),
-            }),
+                initial_value: None,
+                range: Self::empty(),
+            },
+        }
+    }
+
+    pub(super) fn parse_proto_class(class: powerbuilder_proto::Class) -> parser::DatatypeDecl {
+        parser::DatatypeDecl {
+            class: parser::Class {
+                name: parser::DataType::simple(Token::fake_identifier(class.name, Self::empty())),
+                base: parser::DataType::simple(Token::fake_identifier(class.base, Self::empty())),
+                scope: Some(tokenizer::ScopeModif::GLOBAL),
+
+                within: None,
+                autoinstantiate: None,
+                native: None,
+            },
+
+            variables: class
+                .variable
+                .into_iter()
+                .map(|var| Self::parse_proto_variable(var))
+                .collect(),
+
+            functions: class
+                .function
+                .into_iter()
+                .map(|func| Self::parse_proto_function(func))
+                .collect(),
+            events: class
+                .event
+                .into_iter()
+                .map(|event| Self::parse_proto_event(event))
+                .collect(),
+
+            help: class.help,
+
+            range: Self::empty(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BuiltinsInner<'pars> {
+    pub enums: HashMap<IString, builder::Enum>,
+    pub enums_value_cache: HashMap<IString, IString>,
+    pub functions: HashMap<
+        IString,
+        Vec<
+            DefinitionDeclaration<
+                Arc<builder::FunctionDefinition<'pars>>,
+                Arc<builder::FunctionDeclaration<'pars>>,
+            >,
+        >,
+    >,
+    pub classes: HashMap<IString, Arc<builder::Class<'pars>>>,
+}
+
+impl<'pars> BuiltinsInner<'pars> {
+    pub fn new() -> Self {
+        BuiltinsInner {
+            enums: HashMap::new(),
+            enums_value_cache: HashMap::new(),
+            functions: HashMap::new(),
+            classes: HashMap::new(),
         }
     }
 
@@ -212,66 +277,21 @@ impl Builtins {
         }
     }
 
-    pub(super) fn load_classes(&mut self) {
-        let classes = powerbuilder_proto::Classes::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/classes.pb")
-        )))
-        .expect("Failed to load builtins");
+    pub(super) fn load_classes(&mut self, parsed: &'pars BuiltinsParsed) {
+        for dt in &parsed.classes {
+            let mut new_class = builder::Class::new(dt);
 
-        for class in classes.class.clone() {
-            let iname = (&class.name).into();
-            let mut new_class = builder::Class::new(parser::DatatypeDecl {
-                class: parser::Class {
-                    name: parser::DataType::simple(Token::fake_identifier(
-                        class.name.clone(),
-                        self.empty(),
-                    )),
-                    base: parser::DataType::simple(Token::fake_identifier(
-                        class.base.clone(),
-                        self.empty(),
-                    )),
-                    scope: Some(tokenizer::ScopeModif::GLOBAL),
-
-                    within: None,
-                    autoinstantiate: None,
-                    native: None,
-                },
-                variables: Vec::new(),
-                events: Vec::new(),
-                functions: Vec::new(),
-                range: self.empty(),
-            });
-
-            new_class.help = class.help;
-
-            for var in class.variable {
-                let iname = var.name.as_ref().unwrap().into();
-                let parsed = parser::Variable {
-                    help: None,
-                    constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
-                    data_type: self.parse_type(var.r#type.unwrap()),
-                    access: VariableAccess {
-                        name: Token::fake_identifier(var.name.unwrap(), self.empty()),
-                        is_write: true,
-                    },
-                    initial_value: None,
-                    range: self.empty(),
-                };
-
-                new_class.instance_variables.insert(
-                    iname,
-                    Arc::new(builder::Variable::new_instance(parser::InstanceVariable {
-                        variable: parsed,
-                        access: parser::Access {
-                            read: None,
-                            write: None,
-                        },
-                    })),
-                );
+            for var in &dt.variables {
+                let new_var = builder::Variable::new_instance(var);
+                new_class
+                    .instance_variables
+                    .insert(new_var.iname(), Arc::new(new_var));
             }
 
-            for func in class.function {
-                let new_func = self.load_proto_function(func);
+            for func in &dt.functions {
+                let new_func = builder::FunctionDeclaration {
+                    header: builder::FunctionHeader::new(func),
+                };
 
                 new_class
                     .functions
@@ -283,8 +303,10 @@ impl Builtins {
                     );
             }
 
-            for event in class.event {
-                let new_event = self.load_proto_event(event);
+            for event in &dt.events {
+                let new_event = builder::EventDeclaration {
+                    header: builder::EventHeader::new(event),
+                };
 
                 new_class.events.insert(
                     new_event.header.iname(),
@@ -292,24 +314,31 @@ impl Builtins {
                 );
             }
 
-            self.classes.insert(iname, Arc::new(new_class));
+            self.classes.insert(new_class.iname(), Arc::new(new_class));
         }
     }
 
-    pub(super) fn load_functions(&mut self) {
-        let funcs = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/functions.pb")
-        )))
-        .expect("Failed to load builtins");
-
-        for func in funcs.function {
-            let iname = (&func.name).into();
-            let new_func = self.load_proto_function(func);
+    pub(super) fn load_functions(&mut self, parsed: &'pars BuiltinsParsed) {
+        for func in &parsed.functions {
+            let new_func = builder::FunctionDeclaration {
+                header: builder::FunctionHeader::new(func),
+            };
 
             self.functions
-                .entry(iname)
+                .entry(new_func.header.iname())
                 .or_default()
                 .push(DefinitionDeclaration::declaration(Arc::new(new_func)));
         }
     }
 }
+
+self_cell!(
+    pub struct Builtins {
+        owner: BuiltinsParsed,
+
+        #[covariant]
+        dependent: BuiltinsInner,
+    }
+
+    impl {Debug}
+);

@@ -50,28 +50,27 @@ impl project::Project {
             let Some(file) = self.files.get_mut(&url) else {
                 continue;
             };
-            let meta = file.meta_mut();
 
-            for changes in all_changes {
-                for change in changes {
-                    match change.range {
-                        None => {
-                            meta.content = Rope::from_str(&change.text);
-                        }
-                        Some(range) => {
-                            let start = meta.content.line_to_char(range.start.line as usize)
-                                + range.start.character as usize;
-                            let end = meta.content.line_to_char(range.end.line as usize)
-                                + range.end.character as usize;
+            file.reparse(|meta| {
+                for changes in all_changes {
+                    for change in changes {
+                        match change.range {
+                            None => {
+                                meta.content = Rope::from_str(&change.text);
+                            }
+                            Some(range) => {
+                                let start = meta.content.line_to_char(range.start.line as usize)
+                                    + range.start.character as usize;
+                                let end = meta.content.line_to_char(range.end.line as usize)
+                                    + range.end.character as usize;
 
-                            meta.content.remove(start..end);
-                            meta.content.insert(start, &change.text);
+                                meta.content.remove(start..end);
+                                meta.content.insert(start, &change.text);
+                            }
                         }
                     }
                 }
-            }
-
-            file.reparse();
+            });
         }
     }
 }

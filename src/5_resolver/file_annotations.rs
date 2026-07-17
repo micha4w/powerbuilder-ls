@@ -35,6 +35,7 @@ impl<'a, 'proj> AnnotationTree<'proj> {
         }
 
         if self.range.contains_range(&range) {
+            // TODO(perf): binary search (wont work yet because the items are not ordered)
             for child in &self.children {
                 let anot = child.find_exact(range);
                 if anot.is_some() {

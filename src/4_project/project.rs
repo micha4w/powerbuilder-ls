@@ -15,12 +15,15 @@ use anyhow::anyhow;
 use encoding_rs_io::DecodeReaderBytes;
 
 use crate::{
-    builder::{self, Builder, BuiltFile, File},
+    builder::{self, Builder, BuiltFile, BuiltFileInner, File},
     tokenizer,
     types::*,
 };
 
-use super::{builtins::Builtins, types::*};
+use super::{
+    builtins::{Builtins, BuiltinsInner, BuiltinsParsed},
+    types::*,
+};
 
 #[derive(Debug)]
 pub struct Project {
@@ -38,17 +41,17 @@ pub struct Project {
 
 impl<'proj> Project {
     pub fn new() -> Project {
-        let mut proj = Project {
+        Project {
             application: None,
             files: HashMap::new(),
-            builtins: Builtins::new(),
-        };
-
-        proj.builtins.load_enums();
-        proj.builtins.load_classes();
-        proj.builtins.load_functions();
-
-        proj
+            builtins: Builtins::new(BuiltinsParsed::new(), |parsed| {
+                let mut inner = BuiltinsInner::new();
+                inner.load_enums();
+                inner.load_classes(parsed);
+                inner.load_functions(parsed);
+                inner
+            }),
+        }
     }
 
     pub fn load_file(&mut self, uri: Url) -> anyhow::Result<&mut File> {
@@ -71,7 +74,7 @@ impl<'proj> Project {
 
                 load_classes = take(&mut builder.load_requests)
                     .into_iter()
-                    .filter(|class| !file.meta.classes.contains(class))
+                    .filter(|class| !file.parsed().meta.classes.contains(class))
                     .collect::<Vec<_>>();
 
                 File::Built(file)
@@ -93,14 +96,14 @@ impl<'proj> Project {
     pub fn load_file_for_editing(&mut self, uri: &Url) -> anyhow::Result<&mut BuiltFile> {
         let mut file = self.load_file_for_depending(uri)?;
 
-        if !file.bodies_processed {
+        if !file.inner().bodies_processed {
             let mut builder = Builder::new();
             builder.build_file_bodies(&mut file);
 
             for class in builder
                 .load_requests
                 .into_iter()
-                .filter(|class| !file.meta.classes.contains(class))
+                .filter(|class| !file.parsed().meta.classes.contains(class))
                 .collect::<Vec<_>>()
             {
                 if let Some(uri) = self.get_file_for_class(&class) {
@@ -251,6 +254,7 @@ impl<'proj> Project {
     pub fn builtin_class(&self, name: &'static str) -> ClassRef<'_> {
         ClassRef::builtin(
             self.builtins
+                .borrow_dependent()
                 .classes
                 .get(&(name.into()))
                 .expect(&format!("No builtin class with name {}", name)),
@@ -315,24 +319,24 @@ impl<'proj> Project {
         name: &IString,
     ) -> Found<Complex<'proj>> {
         if let Some(file) = current_file {
-            if let Some(class) = file.classes.get(name) {
+            if let Some(class) = file.inner().classes.get(name) {
                 return Found::Yes(Complex::Class(ClassRef::new(file, class)));
             }
         }
 
         if let Some(uri) = self.get_file_for_class(name) {
             if let Some(File::Built(built)) = self.files.get(&uri) {
-                if let Some(class) = built.classes.get(name) {
+                if let Some(class) = built.inner().classes.get(name) {
                     return Found::Yes(Complex::Class(ClassRef::new(built, class)));
                 }
             };
         }
 
-        if let Some(en) = self.builtins.enums.get(name) {
+        if let Some(en) = self.builtins.borrow_dependent().enums.get(name) {
             return Found::Yes(Complex::Enum(en));
         }
 
-        if let Some(class) = self.builtins.classes.get(name) {
+        if let Some(class) = self.builtins.borrow_dependent().classes.get(name) {
             return Found::Yes(Complex::Class(ClassRef::builtin(class)));
         }
 

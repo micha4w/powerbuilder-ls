@@ -17,13 +17,13 @@ pub struct FoundVariable<'proj> {
     /// None for builtins
     pub file: Option<&'proj BuiltFile>,
     /// None for locals/args and file scoped variables
-    pub class: Option<&'proj Arc<builder::Class>>,
+    pub class: Option<&'proj Arc<builder::Class<'proj>>>,
 
-    pub variable: &'proj Arc<builder::Variable>,
+    pub variable: &'proj Arc<builder::Variable<'proj>>,
 }
 
 impl<'proj> FoundVariable<'proj> {
-    fn new(file: &'proj BuiltFile, variable: &'proj Arc<builder::Variable>) -> Self {
+    fn new(file: &'proj BuiltFile, variable: &'proj Arc<builder::Variable<'proj>>) -> Self {
         FoundVariable {
             file: Some(file),
             class: None,
@@ -33,7 +33,7 @@ impl<'proj> FoundVariable<'proj> {
 
     fn new_instance(
         class: project::ClassRef<'proj>,
-        variable: &'proj Arc<builder::Variable>,
+        variable: &'proj Arc<builder::Variable<'proj>>,
     ) -> Self {
         FoundVariable {
             file: class.file,
@@ -56,8 +56,8 @@ pub struct Context<'proj> {
 
     pub class: Option<project::ClassRef<'proj>>,
     // pub top_level: Option<&'a TopLevel>,
-    pub arguments: Option<HashMap<IString, &'proj Arc<builder::Variable>>>,
-    pub body: Option<&'proj builder::Body>,
+    pub arguments: Option<HashMap<IString, &'proj Arc<builder::Variable<'proj>>>>,
+    pub body: Option<&'proj builder::Body<'proj>>,
 }
 
 impl<'proj> Context<'proj> {
@@ -76,7 +76,7 @@ impl<'proj> Context<'proj> {
             arguments: None,
         };
 
-        for top_level in &file.top_levels {
+        for top_level in &file.inner().top_levels {
             if let builder::TopLevelType::DatatypeDecl(decl) = &top_level.top_level_type {
                 ctx.class = Some(project::ClassRef::new(file, &decl.class));
             }
@@ -132,8 +132,8 @@ impl<'proj> Context<'proj> {
 
     pub(super) fn load_body(
         &mut self,
-        body: &'proj builder::Body,
-        arguments: &'proj Vec<Arc<builder::Variable>>,
+        body: &'proj builder::Body<'proj>,
+        arguments: &'proj Vec<Arc<builder::Variable<'proj>>>,
     ) {
         self.body = Some(body);
         self.arguments = Some(
@@ -152,11 +152,14 @@ impl<'proj> Context<'proj> {
         &self,
         class: project::ClassRef<'proj>,
         filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj Arc<builder::Variable>)>> + '_
-    {
+    ) -> impl Iterator<
+        Item = ListResult<(
+            project::ClassRef<'proj>,
+            &'proj Arc<builder::Variable<'proj>>,
+        )>,
+    > + '_ {
         let level = self
             .class
-            .clone()
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
                 self.proj.get_access_for(current_class, class)
             });
@@ -201,12 +204,16 @@ impl<'proj> Context<'proj> {
 
                 match &filter {
                     VariableFilter::All => {
-                        for var in self.file.variables.values() {
+                        for var in self.file.inner().variables.values() {
                             yield Ok(FoundVariable::new(self.file, var));
                         }
                     }
                     VariableFilter::ForAccess(variable, _) => {
-                        if let Some(var) = self.file.variables.get(&(&variable.name.content).into())
+                        if let Some(var) = self
+                            .file
+                            .inner()
+                            .variables
+                            .get(&(&variable.name.content).into())
                         {
                             yield Ok(FoundVariable::new(self.file, var));
                         }
@@ -224,11 +231,10 @@ impl<'proj> Context<'proj> {
         &'a self,
         class: project::ClassRef<'proj>,
         filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function)>> + 'a
+    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
     {
         let level = self
             .class
-            .clone()
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
                 self.proj.get_access_for(current_class, class)
             });
@@ -240,8 +246,12 @@ impl<'proj> Context<'proj> {
     pub fn functions<'a>(
         &'a self,
         filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(Option<project::ClassRef<'proj>>, &'proj builder::Function)>>
-           + 'a {
+    ) -> impl Iterator<
+        Item = ListResult<(
+            Option<project::ClassRef<'proj>>,
+            &'proj builder::Function<'proj>,
+        )>,
+    > + 'a {
         iter::from_coroutine(
             #[coroutine]
             move || {
@@ -260,7 +270,9 @@ impl<'proj> Context<'proj> {
                             yield Self::map_res(func, |(class, t)| (Some(class), t));
                         }
 
-                        if let Some(overloads) = self.proj.builtins.functions.get(&iname) {
+                        if let Some(overloads) =
+                            self.proj.builtins.borrow_dependent().functions.get(&iname)
+                        {
                             for overload in overloads {
                                 if self.proj.is_function_callable(
                                     Some(self.file),
@@ -277,7 +289,7 @@ impl<'proj> Context<'proj> {
                     FunctionFilter::All => {
                         // TODO: find all global functions
 
-                        for overloads in self.proj.builtins.functions.values() {
+                        for overloads in self.proj.builtins.borrow_dependent().functions.values() {
                             for overload in overloads {
                                 yield Ok((None, overload));
                             }

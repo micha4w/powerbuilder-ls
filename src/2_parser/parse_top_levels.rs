@@ -721,6 +721,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 variables,
                 events,
                 functions,
+                help: None, // TODO(help): ...
                 range: Range {
                     start,
                     end,

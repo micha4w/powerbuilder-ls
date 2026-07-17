@@ -960,6 +960,7 @@ pub struct DatatypeDecl {
     // TODO: can you have functions inside the declaration
     // TODO: if you can, make sure that they are actually handled correctly in builder and linter
     pub functions: Vec<Function>,
+    pub help: Option<String>,
 
     pub range: Range,
 }

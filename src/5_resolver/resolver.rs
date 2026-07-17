@@ -153,7 +153,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                     match fc.class.within() {
                         Some(within) => self.ctx.find_class(&within.into()).as_option(),
                         None => {
-                            // TODO(parent): is this correct?
+                            // TODO(groups): is this correct?
                             let window_object = project::Complex::Class(
                                 self.ctx.proj.builtin_class("windowobject"),
                             );
@@ -273,7 +273,6 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                 .clone(),
             parser::ExpressionType::CreateUsing(class) => {
                 self.resolve_expression(class, annot);
-                // TODO(create using): do something with the class?
                 ResolvedType::Unknown
             }
             parser::ExpressionType::Literal(literal) => match literal.literal_type {
@@ -293,11 +292,18 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                         .ctx
                         .proj
                         .builtins
+                        .borrow_dependent()
                         .enums_value_cache
                         .get(&(&literal.content).into())
                     {
                         ResolvedType::Complex(project::Complex::Enum(
-                            self.ctx.proj.builtins.enums.get(name).unwrap(),
+                            self.ctx
+                                .proj
+                                .builtins
+                                .borrow_dependent()
+                                .enums
+                                .get(name)
+                                .unwrap(),
                         ))
                     } else {
                         ResolvedType::Unknown
@@ -606,12 +612,12 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
         annot: &'a mut AnnotationTree<'proj>,
     ) {
         self.resolve_callable_header(
-            header.returns.as_ref().map(|r| &r.parsed),
+            header.returns.as_ref().map(|r| r.parsed),
             header.arguments.iter().map(|arg| arg.parsed()),
             annot,
         );
 
-        // TODO(annot): order is wrong, binary search wont work
+        // TODO(perf): order is wrong, binary search wont work
         if let Some(fc) = self.ctx.class {
             let funcs = if is_external {
                 &fc.class.external_functions
@@ -643,7 +649,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
             self.resolve_callable_header(ret.as_ref(), args.iter().map(|arg| &arg.variable), annot);
         }
 
-        // TODO(annot): order is wrong, binary search wont work
+        // TODO(perf): order is wrong, binary search wont work
         if let Some(fc) = self.ctx.class {
             let event = fc.class.events.get(&header.iname()).unwrap();
 
@@ -658,7 +664,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
     }
 
     pub fn resolve_file(proj: &'proj Project, file: &'proj BuiltFile) -> FileAnnotations<'proj> {
-        assert!(file.bodies_processed, "resolve_file should only be called on files that have not have had their bodies processed");
+        assert!(file.inner().bodies_processed, "resolve_file should only be called on files that have not have had their bodies processed");
 
         let mut annotator = Resolver {
             ctx: Context {
@@ -672,7 +678,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
         };
         let mut annotations = Vec::new();
 
-        for top_level in &file.top_levels {
+        for top_level in &file.inner().top_levels {
             let mut annot = AnnotationTree {
                 range: &top_level.range,
                 annotation: None,
@@ -764,6 +770,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                     // TODO(on): ...
 
                     let resolved_type = file
+                        .inner()
                         .classes
                         .get(&(&on.header.class.name.content).into())
                         .map_or(ResolvedType::Unknown, |class| {

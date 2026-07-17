@@ -1,18 +1,18 @@
 use core::panic;
 use std::sync::Arc;
 
-use crate::builder;
+use crate::builder::{self, BuiltFile};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ClassRef<'proj> {
     /// `None` for builtins
-    pub file: Option<&'proj builder::BuiltFile>,
-    pub class: &'proj Arc<builder::Class>,
+    pub file: Option<&'proj BuiltFile>,
+    pub class: &'proj Arc<builder::Class<'proj>>,
 }
 impl<'proj> ClassRef<'proj> {
     pub fn new(
-        file: &'proj builder::BuiltFile,
-        class: &'proj Arc<builder::Class>,
+        file: &'proj BuiltFile,
+        class: &'proj Arc<builder::Class<'proj>>,
     ) -> ClassRef<'proj> {
         ClassRef {
             file: Some(file),
@@ -20,15 +20,15 @@ impl<'proj> ClassRef<'proj> {
         }
     }
 
-    pub fn builtin(class: &'proj Arc<builder::Class>) -> ClassRef<'proj> {
+    pub fn builtin(class: &'proj Arc<builder::Class<'proj>>) -> ClassRef<'proj> {
         ClassRef { file: None, class }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Complex<'a> {
-    Class(ClassRef<'a>),
-    Enum(&'a builder::Enum),
+pub enum Complex<'proj> {
+    Class(ClassRef<'proj>),
+    Enum(&'proj builder::Enum),
 }
 
 impl Complex<'_> {
@@ -39,10 +39,10 @@ impl Complex<'_> {
         }
     }
 
-    pub fn help(&self) -> &Option<String> {
+    pub fn help(&self) -> Option<&String> {
         match self {
-            Complex::Class(r#ref) => &r#ref.class.help,
-            Complex::Enum(r#enum) => &r#enum.help,
+            Complex::Class(r#ref) => r#ref.class.help,
+            Complex::Enum(r#enum) => r#enum.help.as_ref(),
         }
     }
 

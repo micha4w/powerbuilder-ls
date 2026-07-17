@@ -8,26 +8,26 @@ use crate::{
     types::*,
 };
 
-pub struct Scope<'a> {
-    pub return_type: Option<&'a ResolvedType<'a>>,
+pub struct Scope<'proj> {
+    pub return_type: Option<&'proj ResolvedType<'proj>>,
     // TODO: stuff
-    pub context: resolver::Context<'a>,
+    pub context: resolver::Context<'proj>,
 }
 
-pub struct Linter<'a> {
-    pub proj: &'a Project,
-    pub file: &'a BuiltFile,
-    pub annotations: &'a FileAnnotations<'a>,
-    pub class: Option<project::ClassRef<'a>>,
+pub struct Linter<'proj> {
+    pub proj: &'proj Project,
+    pub file: &'proj BuiltFile,
+    pub annotations: &'proj FileAnnotations<'proj>,
+    pub class: Option<project::ClassRef<'proj>>,
 
     pub diagnostics: RefCell<Vec<Diagnostic>>,
 }
 
-impl<'a> Linter<'a> {
+impl<'proj> Linter<'proj> {
     pub fn new(
-        proj: &'a Project,
-        file: &'a BuiltFile,
-        annotations: &'a FileAnnotations<'a>,
+        proj: &'proj Project,
+        file: &'proj BuiltFile,
+        annotations: &'proj FileAnnotations<'proj>,
     ) -> Self {
         Self {
             proj,
@@ -38,7 +38,7 @@ impl<'a> Linter<'a> {
         }
     }
 
-    pub(super) fn get_access_for(&self, class: project::ClassRef<'a>) -> tokenizer::AccessType {
+    pub(super) fn get_access_for(&self, class: project::ClassRef<'proj>) -> tokenizer::AccessType {
         self.class
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
                 self.proj.get_access_for(current_class, class)

@@ -151,13 +151,13 @@ impl PowerScriptType {
 
 // TODO(cleanup): remove this?
 #[derive(Debug, Clone)]
-pub struct DataType {
-    pub parsed: parser::DataType,
+pub struct DataType<'pars> {
+    pub parsed: &'pars parser::DataType,
     pub powerscript_type: PowerScriptType,
 }
 
-impl DataType {
-    pub fn new(data_type: parser::DataType) -> DataType {
+impl DataType<'_> {
+    pub fn new(data_type: &parser::DataType) -> DataType<'_> {
         DataType {
             powerscript_type: PowerScriptType::new(&data_type),
             parsed: data_type,
@@ -165,51 +165,51 @@ impl DataType {
     }
 }
 
-impl fmt::Display for DataType {
+impl fmt::Display for DataType<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.parsed.wrap_variable("").to_lowercase().trim_end())
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum VariableType {
-    Local(parser::Variable),
-    Scoped(parser::ScopedVariable),
-    Argument(parser::Argument),
-    Instance(parser::InstanceVariable),
+pub enum VariableType<'pars> {
+    Local(&'pars parser::Variable),
+    Scoped(&'pars parser::ScopedVariable),
+    Argument(&'pars parser::Argument),
+    Instance(&'pars parser::InstanceVariable),
 }
 
 #[derive(Clone, Debug)]
-pub struct Variable {
-    pub variable_type: VariableType,
-    pub data_type: DataType,
+pub struct Variable<'pars> {
+    pub variable_type: VariableType<'pars>,
+    pub data_type: DataType<'pars>,
 }
 
-impl Variable {
-    pub fn new_local(var: parser::Variable) -> Variable {
+impl Variable<'_> {
+    pub fn new_local(var: &parser::Variable) -> Variable<'_> {
         Variable {
-            data_type: DataType::new(var.data_type.clone()),
+            data_type: DataType::new(&var.data_type),
             variable_type: VariableType::Local(var),
         }
     }
 
-    pub fn new_scoped(var: parser::ScopedVariable) -> Variable {
+    pub fn new_scoped(var: &parser::ScopedVariable) -> Variable<'_> {
         Variable {
-            data_type: DataType::new(var.variable.data_type.clone()),
-            variable_type: VariableType::Scoped(var.clone()),
+            data_type: DataType::new(&var.variable.data_type),
+            variable_type: VariableType::Scoped(var),
         }
     }
 
-    pub fn new_instance(instance: parser::InstanceVariable) -> Variable {
+    pub fn new_instance(instance: &parser::InstanceVariable) -> Variable<'_> {
         Variable {
-            data_type: DataType::new(instance.variable.data_type.clone()),
+            data_type: DataType::new(&instance.variable.data_type),
             variable_type: VariableType::Instance(instance),
         }
     }
 
-    pub fn new_argument(arg: parser::Argument) -> Variable {
+    pub fn new_argument(arg: &parser::Argument) -> Variable<'_> {
         Variable {
-            data_type: DataType::new(arg.variable.data_type.clone()),
+            data_type: DataType::new(&arg.variable.data_type),
             variable_type: VariableType::Argument(arg),
         }
     }
@@ -267,14 +267,14 @@ pub struct SQLProcedure {
 }
 
 #[derive(Clone, Debug)]
-pub struct Body {
+pub struct Body<'pars> {
     /// Does not include arguments
-    pub variables: HashMap<IString, Arc<Variable>>,
-    pub labels: HashMap<IString, tokenizer::Token>,
+    pub variables: HashMap<IString, Arc<Variable<'pars>>>,
+    pub labels: HashMap<IString, &'pars tokenizer::Token>,
 }
 
-impl Body {
-    pub fn new(vars: impl Iterator<Item = Variable>) -> Self {
+impl<'pars> Body<'pars> {
+    pub fn new(vars: impl Iterator<Item = Variable<'pars>>) -> Self {
         Body {
             variables: vars
                 .into_iter()
@@ -293,23 +293,21 @@ impl Body {
 }
 
 #[derive(Clone, Debug)]
-pub struct EventHeader {
-    pub parsed: parser::Event,
+pub struct EventHeader<'pars> {
+    pub parsed: &'pars parser::Event,
 
-    pub returns: Option<DataType>,
-    pub arguments: Vec<Arc<Variable>>,
+    pub returns: Option<DataType<'pars>>,
+    pub arguments: Vec<Arc<Variable<'pars>>>,
 }
 
-impl EventHeader {
-    pub fn new(parsed: parser::Event) -> EventHeader {
+impl<'pars> EventHeader<'pars> {
+    pub fn new(parsed: &'pars parser::Event) -> EventHeader<'pars> {
         let (ret, args) = parsed.get_types();
         EventHeader {
-            returns: ret
-                .as_ref()
-                .map(|data_type| DataType::new(data_type.clone())),
+            returns: ret.as_ref().map(DataType::new),
             arguments: args
                 .iter()
-                .map(|arg| Arc::new(Variable::new_argument(arg.clone())))
+                .map(|arg| Arc::new(Variable::new_argument(arg)))
                 .collect(),
 
             parsed,
@@ -322,22 +320,22 @@ impl EventHeader {
 }
 
 #[derive(Clone, Debug)]
-pub struct EventDeclaration {
-    pub header: EventHeader,
+pub struct EventDeclaration<'pars> {
+    pub header: EventHeader<'pars>,
 }
 
 #[derive(Clone, Debug)]
-pub struct EventDefinition {
-    pub parsed: parser::EventBody,
+pub struct EventDefinition<'pars> {
+    pub parsed: &'pars parser::EventBody,
 
-    pub header: EventHeader,
-    pub body: Body,
+    pub header: EventHeader<'pars>,
+    pub body: Body<'pars>,
 }
 
-pub type Event = DefinitionDeclaration<Arc<EventDefinition>, Arc<EventDeclaration>>;
+pub type Event<'pars> = DefinitionDeclaration<Arc<EventDefinition<'pars>>, Arc<EventDeclaration<'pars>>>;
 
-impl Event {
-    pub fn header(&self) -> &EventHeader {
+impl<'pars> Event<'pars> {
+    pub fn header(&self) -> &EventHeader<'pars> {
         match self.get_any() {
             DefinitionDeclarationEnum::Definition(def) => &def.header,
             DefinitionDeclarationEnum::Declaration(decl) => &decl.header,
@@ -353,30 +351,30 @@ impl Event {
 }
 
 #[derive(Clone, Debug)]
-pub struct FunctionHeader {
-    pub parsed: parser::Function,
+pub struct FunctionHeader<'pars> {
+    pub parsed: &'pars parser::Function,
 
-    pub returns: Option<DataType>,
-    pub arguments: Vec<Arc<Variable>>,
-    pub throws: Vec<DataType>,
+    pub returns: Option<DataType<'pars>>,
+    pub arguments: Vec<Arc<Variable<'pars>>>,
+    pub throws: Vec<DataType<'pars>>,
 }
 
-impl FunctionHeader {
-    pub fn new(parsed: parser::Function) -> FunctionHeader {
+impl FunctionHeader<'_> {
+    pub fn new(parsed: &parser::Function) -> FunctionHeader<'_> {
         FunctionHeader {
             returns: parsed
                 .returns
                 .as_ref()
-                .map(|data_type| DataType::new(data_type.clone())),
+                .map(DataType::new),
             arguments: parsed
                 .arguments
                 .iter()
-                .map(|arg| Arc::new(Variable::new_argument(arg.clone())))
+                .map(|arg| Arc::new(Variable::new_argument(arg)))
                 .collect(),
             throws: parsed
                 .throws
                 .iter()
-                .map(|data_type| DataType::new(data_type.clone()))
+                .map(DataType::new)
                 .collect(),
 
             parsed,
@@ -410,22 +408,23 @@ impl FunctionHeader {
 }
 
 #[derive(Clone, Debug)]
-pub struct FunctionDeclaration {
-    pub header: FunctionHeader,
+pub struct FunctionDeclaration<'pars> {
+    pub header: FunctionHeader<'pars>,
 }
 
 #[derive(Clone, Debug)]
-pub struct FunctionDefinition {
-    pub parsed: parser::FunctionBody,
+pub struct FunctionDefinition<'pars> {
+    pub parsed: &'pars parser::FunctionBody,
 
-    pub header: FunctionHeader,
-    pub body: Body,
+    pub header: FunctionHeader<'pars>,
+    pub body: Body<'pars>,
 }
 
-pub type Function = DefinitionDeclaration<Arc<FunctionDefinition>, Arc<FunctionDeclaration>>;
+pub type Function<'pars> =
+    DefinitionDeclaration<Arc<FunctionDefinition<'pars>>, Arc<FunctionDeclaration<'pars>>>;
 
-impl Function {
-    pub fn header(&self) -> &FunctionHeader {
+impl Function<'_> {
+    pub fn header(&self) -> &FunctionHeader<'_> {
         match self.get_any() {
             DefinitionDeclarationEnum::Definition(def) => &def.header,
             DefinitionDeclarationEnum::Declaration(decl) => &decl.header,
@@ -448,26 +447,26 @@ pub struct Enum {
 }
 
 #[derive(Debug, Clone)]
-pub struct Class {
-    pub parsed: parser::DatatypeDecl,
+pub struct Class<'pars> {
+    pub parsed: &'pars parser::DatatypeDecl,
 
-    pub help: Option<String>,
+    pub help: Option<&'pars String>,
     pub is_global: bool,
 
-    pub instance_variables: HashMap<IString, Arc<Variable>>,
-    pub events: HashMap<IString, Event>,
-    pub functions: HashMap<IString, HashMap<IString, Function>>,
-    pub external_functions: HashMap<IString, HashMap<IString, Function>>,
+    pub instance_variables: HashMap<IString, Arc<Variable<'pars>>>,
+    pub events: HashMap<IString, Event<'pars>>,
+    pub functions: HashMap<IString, HashMap<IString, Function<'pars>>>,
+    pub external_functions: HashMap<IString, HashMap<IString, Function<'pars>>>,
     pub ons: HashMap<IString, ()>,
 }
 
-impl Class {
-    pub fn new(parsed: parser::DatatypeDecl) -> Class {
+impl<'pars> Class<'pars> {
+    pub fn new(parsed: &'pars parser::DatatypeDecl) -> Class<'pars>{
         Class {
             is_global: matches!(parsed.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
 
             parsed,
-            help: None,
+            help: parsed.help.as_ref(),
 
             instance_variables: HashMap::new(),
             events: HashMap::new(),
@@ -493,12 +492,12 @@ impl Class {
         self.parsed.class.within.as_ref().map(|g| &g.name.content)
     }
 
-    pub fn function_entry(
-        &mut self,
+    pub fn function_entry<'a>(
+        &'a mut self,
         name: IString,
         sig: IString,
         is_external: bool,
-    ) -> hash_map::Entry<'_, IString, Function> {
+    ) -> hash_map::Entry<'a, IString, Function<'pars>> {
         let funcs = if is_external {
             &mut self.external_functions
         } else {
@@ -508,7 +507,7 @@ impl Class {
     }
 }
 
-impl fmt::Display for Class {
+impl fmt::Display for Class<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_global {
             write!(f, "global ")?;
@@ -523,33 +522,33 @@ impl fmt::Display for Class {
 }
 
 #[derive(Clone, Debug)]
-pub struct DatatypeDecl {
-    pub class: Arc<Class>,
+pub struct DatatypeDecl<'pars> {
+    pub class: Arc<Class<'pars>>,
 
-    pub variables: Vec<Arc<Variable>>,
-    pub events: Vec<Arc<EventDeclaration>>,
-    pub functions: Vec<Arc<FunctionDeclaration>>,
+    pub variables: Vec<Arc<Variable<'pars>>>,
+    pub events: Vec<Arc<EventDeclaration<'pars>>>,
+    pub functions: Vec<Arc<FunctionDeclaration<'pars>>>,
 }
 
 #[derive(Debug)]
-pub enum TopLevelType {
-    ForwardDecl(parser::ForwardDecl, Vec<Arc<Variable>>),
+pub enum TopLevelType<'pars> {
+    ForwardDecl(&'pars parser::ForwardDecl, Vec<Arc<Variable<'pars>>>),
 
-    ScopedVariableDecl(Vec<Arc<Variable>>),
-    ScopedVariablesDecl(Vec<Arc<Variable>>),
+    ScopedVariableDecl(Vec<Arc<Variable<'pars>>>),
+    ScopedVariablesDecl(Vec<Arc<Variable<'pars>>>),
 
-    DatatypeDecl(DatatypeDecl),
-    TypeVariablesDecl(Vec<Arc<Variable>>),
-    FunctionsForwardDecl(Vec<Arc<FunctionDeclaration>>),
-    ExternalFunctions(Vec<Arc<FunctionDeclaration>>),
+    DatatypeDecl(DatatypeDecl<'pars>),
+    TypeVariablesDecl(Vec<Arc<Variable<'pars>>>),
+    FunctionsForwardDecl(Vec<Arc<FunctionDeclaration<'pars>>>),
+    ExternalFunctions(Vec<Arc<FunctionDeclaration<'pars>>>),
 
-    FunctionBody(Arc<FunctionDefinition>),
-    EventBody(Arc<EventDefinition>),
-    OnBody(parser::OnBody),
+    FunctionBody(Arc<FunctionDefinition<'pars>>),
+    EventBody(Arc<EventDefinition<'pars>>),
+    OnBody(&'pars parser::OnBody),
 }
 
 #[derive(Debug)]
-pub struct TopLevel {
-    pub range: Range,
-    pub top_level_type: TopLevelType,
+pub struct TopLevel<'pars> {
+    pub range: &'pars Range,
+    pub top_level_type: TopLevelType<'pars>,
 }

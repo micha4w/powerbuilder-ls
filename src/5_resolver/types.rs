@@ -93,14 +93,20 @@ pub enum ResolvedLValue<'proj> {
     Parent(project::Complex<'proj>),
 
     /// `ClassRef` is `None` for scoped / local variables, `Some` for instance variables
-    Variable(Option<project::ClassRef<'proj>>, &'proj builder::Variable),
+    Variable(
+        Option<project::ClassRef<'proj>>,
+        &'proj builder::Variable<'proj>,
+    ),
     /// `ClassRef` is `None` for builtin functions
-    Function(Option<project::ClassRef<'proj>>, &'proj builder::Function),
+    Function(
+        Option<project::ClassRef<'proj>>,
+        &'proj builder::Function<'proj>,
+    ),
 
-    Member(project::ClassRef<'proj>, &'proj builder::Variable),
+    Member(project::ClassRef<'proj>, &'proj builder::Variable<'proj>),
     Method(
         project::ClassRef<'proj>,
-        OneOf<&'proj builder::Function, &'proj builder::Event>,
+        OneOf<&'proj builder::Function<'proj>, &'proj builder::Event<'proj>>,
     ),
     // Index,
     // SQLAccess,

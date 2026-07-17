@@ -29,24 +29,24 @@ impl<'proj> Project {
     pub fn classes(
         &'proj self,
         current_file: Option<&'proj BuiltFile>,
-        name: &'proj IString,
     ) -> impl Iterator<Item = ListResult<project::Complex<'proj>>> + 'proj {
         iter::from_coroutine(
             #[coroutine]
             move || {
                 if let Some(file) = current_file {
-                    for class in file.classes.values() {
+                    for class in file.inner().classes.values() {
                         yield Ok(project::Complex::Class(project::ClassRef::new(file, class)));
                     }
                 }
 
                 for file in self.files.values() {
+                    // TODO: also return unparsed classes
                     if let File::Built(built) = file {
                         if current_file.is_some_and(|f| ptr::eq(f, built)) {
                             continue;
                         }
 
-                        for class in built.classes.values() {
+                        for class in built.inner().classes.values() {
                             yield Ok(project::Complex::Class(project::ClassRef::new(
                                 built, class,
                             )));
@@ -54,11 +54,11 @@ impl<'proj> Project {
                     };
                 }
 
-                if let Some(en) = self.builtins.enums.get(name) {
+                for en in self.builtins.borrow_dependent().enums.values() {
                     yield Ok(project::Complex::Enum(en));
                 }
 
-                if let Some(class) = self.builtins.classes.get(name) {
+                for class in self.builtins.borrow_dependent().classes.values() {
                     yield Ok(project::Complex::Class(project::ClassRef::builtin(class)));
                 }
             },
@@ -68,7 +68,7 @@ impl<'proj> Project {
     pub fn global_variables(
         &'proj self,
         filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<&'proj Arc<builder::Variable>>> + 'proj {
+    ) -> impl Iterator<Item = ListResult<&'proj Arc<builder::Variable<'proj>>>> + 'proj {
         iter::from_coroutine(
             #[coroutine]
             move || {
@@ -79,7 +79,7 @@ impl<'proj> Project {
                             .as_ref()
                             .and_then(|uri| self.files.get(uri))
                         {
-                            for var in file.variables.values() {
+                            for var in file.inner().variables.values() {
                                 yield Ok(var);
                             }
                         }
@@ -87,7 +87,7 @@ impl<'proj> Project {
                         for file in self.files.values() {
                             // TODO(load): also make sure global variable dependents are loaded when loading?
                             if let File::Built(built) = file {
-                                for var in built.variables.values() {
+                                for var in built.inner().variables.values() {
                                     yield Ok(var);
                                 }
                             };
@@ -102,7 +102,7 @@ impl<'proj> Project {
                             .and_then(|uri| self.files.get(uri))
                         {
                             // TODO: ensure the application is always built
-                            if let Some(var) = file.variables.get(&iname) {
+                            if let Some(var) = file.inner().variables.get(&iname) {
                                 yield Ok(var);
                             }
                         }
@@ -121,7 +121,7 @@ impl<'proj> Project {
                                 {
                                     // TODO(load): also make sure global variable dependents are loaded when loading?
                                     if let File::Built(built) = file {
-                                        if let Some(var) = built.variables.get(&iname) {
+                                        if let Some(var) = built.inner().variables.get(&iname) {
                                             if var.unwrap_scoped().scope
                                                 == tokenizer::ScopeModif::GLOBAL
                                             {
@@ -142,7 +142,7 @@ impl<'proj> Project {
         &'proj self,
         caller_file: Option<&'proj BuiltFile>,
         filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function)>> + 'a
+    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
     {
         iter::from_coroutine(
             #[coroutine]
@@ -263,7 +263,7 @@ impl<'proj> Project {
         &'proj self,
         class_ref: project::ClassRef<'proj>,
         filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj Arc<builder::Variable>)>>
+    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj Arc<builder::Variable<'proj>>)>>
            + 'proj {
         iter::from_coroutine(
             #[coroutine]
@@ -321,7 +321,7 @@ impl<'proj> Project {
         &'proj self,
         class_ref: project::ClassRef<'proj>,
         filter: EventFilter<'a>,
-    ) -> impl Iterator<Item = (project::ClassRef<'proj>, &'proj builder::Event)> + 'a
+    ) -> impl Iterator<Item = (project::ClassRef<'proj>, &'proj builder::Event<'proj>)> + 'a
     where
         'proj: 'a,
     {
@@ -356,7 +356,7 @@ impl<'proj> Project {
         &'proj self,
         class_ref: project::ClassRef<'proj>,
         filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function)>> + 'a
+    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
     {
         iter::from_coroutine(
             #[coroutine]

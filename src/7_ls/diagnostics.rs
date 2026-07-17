@@ -1,27 +1,10 @@
-use std::{rc::Rc, time::Duration};
+use tower_lsp::lsp_types;
 
-use tokio::{sync::oneshot, time::timeout};
-use tower_lsp::{
-    jsonrpc,
-    lsp_types::{self, DiagnosticOptions, DiagnosticServerCapabilities, WorkDoneProgressOptions},
-};
-
-use crate::{builder::File, linter::Linter, parser, project, types::*};
-
+use crate::{builder::File, linter::Linter, types::*};
 use super::ls::{PowerBuilderLS, PowerBuilderLSInner};
 
 impl PowerBuilderLS {
-    pub(super) fn diagnostics_capabilities(&self, caps: &mut lsp_types::ServerCapabilities) {
-        caps.diagnostic_provider = None;
-        // caps.diagnostic_provider = Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-        //     identifier: None,
-        //     inter_file_dependencies: true,
-        //     workspace_diagnostics: false,
-        //     work_done_progress_options: WorkDoneProgressOptions {
-        //         work_done_progress: None,
-        //     },
-        // }));
-    }
+    pub(super) fn diagnostics_capabilities(&self, _: &mut lsp_types::ServerCapabilities) {}
 
     pub(super) async fn diagnostics_post_rebuild(&self, inner: &PowerBuilderLSInner) {
         for (uri, _) in &inner.opened_files {
@@ -67,7 +50,7 @@ impl PowerBuilderLSInner {
             linter.lint_file();
 
             let items = Iterator::chain(
-                file.meta.parse_diagnostics.iter(),
+                file.borrow_owner().meta.parse_diagnostics.iter(),
                 linter.diagnostics.borrow().iter(),
             )
             .map(|d| lsp_types::Diagnostic {
@@ -89,28 +72,4 @@ impl PowerBuilderLSInner {
             Ok(Some(items))
         })
     }
-
-    // async fn diagnostic_impl(
-    //     &self,
-    //     params: DocumentDiagnosticParams,
-    // ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
-    //     self.client
-    //         .log_message(
-    //             MessageType::INFO,
-    //             format!("file diagnostics! {:?}", params.text_document),
-    //         )
-    //         .await;
-
-    //     let path: PathBuf = params.text_document.uri.path().into();
-    //     let items = self.get_file_diagnostics(path).await?;
-    //     Ok(DocumentDiagnosticReportResult::Report(
-    //         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
-    //             related_documents: None,
-    //             full_document_diagnostic_report: FullDocumentDiagnosticReport {
-    //                 result_id: None,
-    //                 items,
-    //             },
-    //         }),
-    //     ))
-    // }
 }

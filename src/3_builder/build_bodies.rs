@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::{builder::Builder, types::*};
 use crate::parser;
 
-impl Builder {
+impl<'pars> Builder {
     fn build_expression(&mut self, expression: &parser::Expression) {
         match &expression.expression_type {
             parser::ExpressionType::Create(data_type) => {
@@ -14,7 +14,7 @@ impl Builder {
         }
     }
 
-    fn build_statement(&mut self, statement: &parser::Statement, body: &mut Body) {
+    fn build_statement(&mut self, statement: &'pars parser::Statement, body: &mut Body<'pars>) {
         match &statement.statement_type {
             parser::StatementType::Expression(expression) => {
                 self.build_expression(expression);
@@ -48,7 +48,7 @@ impl Builder {
 
                     body.variables.insert(
                         (&var.variable.access.name.content).into(),
-                        Arc::new(Variable::new_local(var.variable.clone())),
+                        Arc::new(Variable::new_local(&var.variable)),
                     );
                 }
             }
@@ -126,7 +126,7 @@ impl Builder {
             }
             parser::StatementType::Goto(_) => {}
             parser::StatementType::Label(token) => {
-                body.labels.insert((&token.content).into(), token.clone());
+                body.labels.insert((&token.content).into(), token);
             }
             parser::StatementType::Exit => {}
             parser::StatementType::Continue => {}
@@ -137,8 +137,8 @@ impl Builder {
 
     pub(super) fn build_statements(
         &mut self,
-        statements: &Vec<parser::Statement>,
-        body: &mut Body,
+        statements: &'pars Vec<parser::Statement>,
+        body: &mut Body<'pars>,
     ) {
         for statement in statements {
             self.build_statement(statement, body);

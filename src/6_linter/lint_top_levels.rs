@@ -7,7 +7,7 @@ use crate::{
     types::*,
 };
 
-impl<'a> Linter<'a> {
+impl<'proj> Linter<'proj> {
     fn lint_variable_declaration(&self, var: &builder::Variable) {
         // TODO: merge with the thing in lint_statements?
         let parsed = var.parsed();
@@ -29,6 +29,7 @@ impl<'a> Linter<'a> {
             builder::VariableType::Scoped(_) => {
                 let existing = self
                     .file
+                    .inner()
                     .variables
                     .get(&(&parsed.access.name.content).into())
                     .unwrap();
@@ -109,6 +110,7 @@ impl<'a> Linter<'a> {
 
         let existing = self
             .file
+            .inner()
             .classes
             .get(&(&parsed.class.name.name.content).into())
             .unwrap();
@@ -260,7 +262,7 @@ impl<'a> Linter<'a> {
         }
     }
 
-    pub fn lint_top_level(&mut self, top_level: &'a builder::TopLevel) {
+    pub fn lint_top_level(&mut self, top_level: &'proj builder::TopLevel<'proj>) {
         match &top_level.top_level_type {
             builder::TopLevelType::ForwardDecl(..) => {
                 // TODO(forward): ...
@@ -397,6 +399,7 @@ impl<'a> Linter<'a> {
                 let prev_class = self.class.take();
                 self.class = match self
                     .file
+                    .inner()
                     .classes
                     .get(&(&on.header.class.name.content).into())
                 {
@@ -423,7 +426,7 @@ impl<'a> Linter<'a> {
     }
 
     pub fn lint_file(&mut self) {
-        for top_level in &self.file.top_levels {
+        for top_level in &self.file.inner().top_levels {
             self.lint_top_level(top_level);
         }
     }

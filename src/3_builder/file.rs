@@ -16,6 +16,7 @@ use crate::{
     parser::{self, Parser},
     types::*,
 };
+use self_cell::self_cell;
 
 #[derive(Debug)]
 pub struct FileDiagnostic {
@@ -25,7 +26,7 @@ pub struct FileDiagnostic {
 
 #[derive(Debug)]
 pub struct FileMeta {
-    pub uri: Url,
+    pub uri: Arc<Url>,
     pub content: Rope,
     pub classes: HashSet<IString>,
     pub variables: HashSet<IString>,
@@ -40,12 +41,12 @@ pub struct ParsedFile {
 }
 
 impl ParsedFile {
-    pub fn new(uri: Url, content: Rope) -> ParsedFile {
+    pub fn new(uri: Arc<Url>, content: Rope) -> ParsedFile {
         let top_levels;
         let parse_diagnostics;
         {
             let start = Instant::now();
-            let mut parser = Parser::new_file(content.chars(), Arc::new(uri.clone()));
+            let mut parser = Parser::new_file(content.chars(), uri.clone());
             top_levels = parser.parse_tokens();
             parse_diagnostics = parser.get_syntax_errors();
             eprintln!(
@@ -119,21 +120,19 @@ impl ParsedFile {
 }
 
 #[derive(Debug)]
-pub struct BuiltFile {
-    pub meta: FileMeta,
-
+pub struct BuiltFileInner<'pars> {
     pub bodies_processed: bool,
 
-    pub classes: HashMap<IString, Arc<Class>>,
+    pub classes: HashMap<IString, Arc<Class<'pars>>>,
     // Shared and Global variables
-    pub variables: HashMap<IString, Arc<Variable>>,
+    pub variables: HashMap<IString, Arc<Variable<'pars>>>,
 
     // pub sql_cursors: HashMap<IString, SQLCursor>,
     // pub sql_procedures: HashMap<IString, SQLProcedure>,
-    pub top_levels: Vec<TopLevel>,
+    pub top_levels: Vec<TopLevel<'pars>>,
 }
 
-impl BuiltFile {
+impl BuiltFileInner<'_> {
     pub(super) fn fill_caches(&mut self) {
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
@@ -156,11 +155,31 @@ impl BuiltFile {
         }
     }
 
-    pub fn get_nodes_at<'a>(&'a self, pos: &Position) -> Option<(&'a TopLevel, Vec<Node<'a>>)> {
+    pub fn get_nodes_at<'a>(&'a self, pos: &Position) -> Option<(&'a TopLevel<'a>, Vec<Node<'a>>)> {
         let top_level = &self.top_levels.iter().find(|tl| tl.range.contains(pos))?;
         let nodes = top_level.top_level_type.get_nodes_at(pos);
 
         Some((top_level, nodes))
+    }
+}
+
+self_cell!(
+    pub struct BuiltFile {
+        owner: ParsedFile,
+
+        #[covariant]
+        dependent: BuiltFileInner,
+    }
+    impl {Debug}
+);
+
+impl BuiltFile {
+    pub fn parsed(&self) -> &ParsedFile {
+        self.borrow_owner()
+    }
+
+    pub fn inner(&self) -> &BuiltFileInner<'_> {
+        self.borrow_dependent()
     }
 }
 
@@ -177,11 +196,11 @@ impl File {
 
         let content = Rope::from_reader(DecodeReaderBytes::new(fs::File::open(&decoded_path)?))?;
 
-        Ok(File::Parsed(ParsedFile::new(uri, content)))
+        Ok(File::Parsed(ParsedFile::new(Arc::new(uri), content)))
     }
 
     pub fn new_from_content(uri: Url, content: &str) -> File {
-        File::Parsed(ParsedFile::new(uri, Rope::from_str(content)))
+        File::Parsed(ParsedFile::new(Arc::new(uri), Rope::from_str(content)))
     }
 
     pub fn new_from_meta(meta: FileMeta) -> File {
@@ -191,34 +210,29 @@ impl File {
     pub fn meta(&self) -> &FileMeta {
         match self {
             File::Parsed(parsed) => &parsed.meta,
-            File::Built(built) => &built.meta,
-        }
-    }
-
-    pub fn meta_mut(&mut self) -> &mut FileMeta {
-        match self {
-            File::Parsed(parsed) => &mut parsed.meta,
-            File::Built(built) => &mut built.meta,
+            File::Built(built) => &built.parsed().meta,
         }
     }
 
     pub fn into_meta(self) -> FileMeta {
         match self {
             File::Parsed(parsed) => parsed.meta,
-            File::Built(built) => built.meta,
+            File::Built(built) => built.into_owner().meta,
         }
     }
 
-    pub fn reparse(&mut self) {
-        replace_with(self, |file| File::new_from_meta(file.into_meta()))
+    pub fn reparse(&mut self, f: impl FnOnce(&mut FileMeta)) {
+        replace_with(self, |file| {
+            let mut meta = file.into_meta();
+            f(&mut meta);
+            File::new_from_meta(meta)
+        })
     }
 
     pub fn rebuild(&mut self) {
-        let File::Built(_) = self else {
-            return;
-        };
-
-        // TODO(perf): keep parsed toplevels, can probably do this when and if we change the parser references instead of clones
-        self.reparse();
+        replace_with(self, |file| match file {
+            File::Parsed(_) => file,
+            File::Built(built) => File::Parsed(built.into_owner()),
+        });
     }
 }

@@ -6,6 +6,6 @@ mod node_searcher;
 mod types;
 
 pub use builder::Builder;
-pub use file::{BuiltFile, File, FileDiagnostic, FileMeta, ParsedFile};
+pub use file::{BuiltFile, BuiltFileInner, File, FileDiagnostic, FileMeta, ParsedFile};
 pub use node_searcher::Node;
 pub use types::*;

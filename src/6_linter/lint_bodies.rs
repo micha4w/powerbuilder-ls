@@ -10,8 +10,8 @@ use crate::{
     types::*,
 };
 
-impl<'a> Linter<'a> {
-    pub fn lint_datatype(&self, data_type: &parser::DataType) -> &'a ResolvedType<'a> {
+impl<'proj> Linter<'proj> {
+    pub fn lint_datatype(&self, data_type: &parser::DataType) -> &'proj ResolvedType<'proj> {
         let typ = self.annotations.must_type(&data_type.range);
         if let ResolvedType::Unknown = typ {
             self.diagnostic_error("Class not found".into(), data_type.range.clone());
@@ -19,7 +19,7 @@ impl<'a> Linter<'a> {
         typ
     }
 
-    pub fn lint_lvalue(&self, lvalue: &parser::LValue, scope: &Scope) -> &'a ResolvedType<'a> {
+    pub fn lint_lvalue(&self, lvalue: &parser::LValue, scope: &Scope) -> &'proj ResolvedType<'proj> {
         let resolved = self.annotations.lvalue(&lvalue);
         let typ = self.annotations.must_type(&lvalue.range);
 
@@ -163,7 +163,7 @@ impl<'a> Linter<'a> {
         &self,
         expression: &parser::Expression,
         scope: &Scope,
-    ) -> &'a ResolvedType<'a> {
+    ) -> &'proj ResolvedType<'proj> {
         let typ = self.annotations.must_type(&expression.range);
 
         match &expression.expression_type {
@@ -841,7 +841,7 @@ impl<'a> Linter<'a> {
         &self,
         expressions: &Vec<parser::Expression>,
         scope: &Scope,
-    ) -> Vec<&'a ResolvedType<'a>> {
+    ) -> Vec<&'proj ResolvedType<'proj>> {
         expressions
             .iter()
             .map(|e| self.lint_expression(e, scope))
@@ -851,10 +851,10 @@ impl<'a> Linter<'a> {
     pub(super) fn lint_arguments_and_returns(
         &self,
         returns: &Option<builder::DataType>,
-        arguments: impl Iterator<Item = &'a Arc<builder::Variable>>,
+        arguments: impl Iterator<Item = &'proj Arc<builder::Variable<'proj>>>,
     ) -> (
-        HashMap<IString, &'a Arc<builder::Variable>>,
-        Option<&'a ResolvedType<'a>>,
+        HashMap<IString, &'proj Arc<builder::Variable<'proj>>>,
+        Option<&'proj ResolvedType<'proj>>,
     ) {
         let mut args = HashMap::new();
         for arg in arguments {
@@ -877,9 +877,9 @@ impl<'a> Linter<'a> {
 
     pub(super) fn lint_statements_in_block(
         &self,
-        statements: impl Iterator<Item = &'a parser::Statement>,
+        statements: impl Iterator<Item = &'proj parser::Statement>,
         returns: &Option<builder::DataType>,
-        arguments: impl Iterator<Item = &'a Arc<builder::Variable>>,
+        arguments: impl Iterator<Item = &'proj Arc<builder::Variable<'proj>>>,
         body: &builder::Body,
     ) {
         let (args_map, return_type) = self.lint_arguments_and_returns(returns, arguments);
