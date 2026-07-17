@@ -606,6 +606,10 @@ impl LValue {
                 access.is_write = true;
                 None
             }
+            LValueType::Index(lvalue, _) => {
+                lvalue.set_write();
+                None
+            }
             LValueType::SQLAccess(_, lvalue) => lvalue.set_write(),
             _ => Some((
                 "Can only assign to LValue of type Variable or Member".into(),
