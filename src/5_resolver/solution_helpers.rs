@@ -2,18 +2,18 @@ use std::{iter, ptr, sync::Arc};
 
 use super::types::*;
 use crate::{
-    builder::{self, BuiltFile, File},
-    project::{self, Project},
+    builder::{self, BuiltFile},
+    solution::{self, Solution},
     tokenizer,
     types::*,
 };
 
-impl<'proj> Project {
+impl<'sol> Solution {
     pub fn to_resolved_type(
-        &'proj self,
-        current_file: Option<&'proj BuiltFile>,
+        &'sol self,
+        current_file: Option<&'sol BuiltFile>,
         ps_type: &builder::PowerScriptType,
-    ) -> ResolvedType<'proj> {
+    ) -> ResolvedType<'sol> {
         match ps_type {
             builder::PowerScriptType::Base(base) => ResolvedType::Base(base.clone()),
             builder::PowerScriptType::Complex(name) => match self.find_class(current_file, name) {
@@ -27,80 +27,70 @@ impl<'proj> Project {
     }
 
     pub fn classes(
-        &'proj self,
-        current_file: Option<&'proj BuiltFile>,
-    ) -> impl Iterator<Item = ListResult<project::Complex<'proj>>> + 'proj {
+        &'sol self,
+        current_file: Option<&'sol BuiltFile>,
+    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'sol {
+        // TODO: return an error if the class is shadowed
         iter::from_coroutine(
             #[coroutine]
             move || {
+                // Do current file first because the order decides which one is shadowed
                 if let Some(file) = current_file {
                     for class in file.inner().classes.values() {
-                        yield Ok(project::Complex::Class(project::ClassRef::new(file, class)));
+                        yield Ok(solution::Complex::Class(solution::ClassRef::new(
+                            file, class,
+                        )));
                     }
                 }
 
-                for file in self.files.values() {
-                    // TODO: also return unparsed classes
-                    if let File::Built(built) = file {
-                        if current_file.is_some_and(|f| ptr::eq(f, built)) {
-                            continue;
-                        }
+                for file in self.files_iter() {
+                    if current_file.is_some_and(|f| ptr::eq(f, file)) {
+                        continue;
+                    }
 
-                        for class in built.inner().classes.values() {
-                            yield Ok(project::Complex::Class(project::ClassRef::new(
-                                built, class,
-                            )));
-                        }
-                    };
+                    for class in file.inner().classes.values() {
+                        yield Ok(solution::Complex::Class(solution::ClassRef::new(
+                            file, class,
+                        )));
+                    }
                 }
 
                 for en in self.builtins.borrow_dependent().enums.values() {
-                    yield Ok(project::Complex::Enum(en));
+                    yield Ok(solution::Complex::Enum(en));
                 }
 
                 for class in self.builtins.borrow_dependent().classes.values() {
-                    yield Ok(project::Complex::Class(project::ClassRef::builtin(class)));
+                    yield Ok(solution::Complex::Class(solution::ClassRef::builtin(class)));
                 }
             },
         )
     }
 
     pub fn global_variables(
-        &'proj self,
-        filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<&'proj Arc<builder::Variable<'proj>>>> + 'proj {
+        &'sol self,
+        filter: VariableFilter<'sol>,
+    ) -> impl Iterator<Item = ListResult<&'sol Arc<builder::Variable<'sol>>>> + 'sol {
         iter::from_coroutine(
             #[coroutine]
             move || {
                 match filter {
                     VariableFilter::All => {
-                        if let Some(File::Built(file)) = self
-                            .application
-                            .as_ref()
-                            .and_then(|uri| self.files.get(uri))
-                        {
+                        if let Some(file) = self.application() {
                             for var in file.inner().variables.values() {
                                 yield Ok(var);
                             }
                         }
 
                         for file in self.files.values() {
-                            // TODO(load): also make sure global variable dependents are loaded when loading?
-                            if let File::Built(built) = file {
-                                for var in built.inner().variables.values() {
-                                    yield Ok(var);
-                                }
-                            };
+                            for var in file.inner().variables.values() {
+                                yield Ok(var);
+                            }
                         }
                     }
                     VariableFilter::ForAccess(variable, _) => {
                         let iname = (&variable.name.content).into();
 
-                        if let Some(File::Built(file)) = self
-                            .application
-                            .as_ref()
-                            .and_then(|uri| self.files.get(uri))
-                        {
+                        if let Some(file) = self.application() {
                             // TODO: ensure the application is always built
                             if let Some(var) = file.inner().variables.get(&iname) {
                                 yield Ok(var);
@@ -119,14 +109,11 @@ impl<'proj> Project {
                                     .content
                                     .eq_ignore_ascii_case(&prefix.to_string_lossy())
                                 {
-                                    // TODO(load): also make sure global variable dependents are loaded when loading?
-                                    if let File::Built(built) = file {
-                                        if let Some(var) = built.inner().variables.get(&iname) {
-                                            if var.unwrap_scoped().scope
-                                                == tokenizer::ScopeModif::GLOBAL
-                                            {
-                                                yield Ok(var);
-                                            }
+                                    if let Some(var) = file.inner().variables.get(&iname) {
+                                        if var.unwrap_scoped().scope
+                                            == tokenizer::ScopeModif::GLOBAL
+                                        {
+                                            yield Ok(var);
                                         }
                                     }
                                 }
@@ -139,10 +126,10 @@ impl<'proj> Project {
     }
 
     pub fn global_functions<'a>(
-        &'proj self,
-        caller_file: Option<&'proj BuiltFile>,
-        filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
+        &'sol self,
+        caller_file: Option<&'sol BuiltFile>,
+        filter: FunctionFilter<'sol, 'a>,
+    ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
         iter::from_coroutine(
             #[coroutine]
@@ -152,7 +139,7 @@ impl<'proj> Project {
                         // TODO: find all global functions (store all srf?)
                     }
                     FunctionFilter::ForCall(name, arguments, _) => {
-                        if let Found::Yes(complex @ project::Complex::Class(class)) =
+                        if let Found::Yes(complex @ solution::Complex::Class(class)) =
                             self.find_class(caller_file, &name)
                         {
                             // TODO(load): also ensure global functions are loaded when loading?
@@ -160,7 +147,9 @@ impl<'proj> Project {
                             let is_function = self
                                 .inherits_from(
                                     &complex,
-                                    &project::Complex::Class(self.builtin_class("function_object")),
+                                    &solution::Complex::Class(
+                                        self.builtin_class("function_object"),
+                                    ),
                                 )
                                 .unwrap_or(false);
 
@@ -260,11 +249,12 @@ impl<'proj> Project {
     }
 
     pub fn variables_in_class(
-        &'proj self,
-        class_ref: project::ClassRef<'proj>,
-        filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj Arc<builder::Variable<'proj>>)>>
-           + 'proj {
+        &'sol self,
+        class_ref: solution::ClassRef<'sol>,
+        filter: VariableFilter<'sol>,
+    ) -> impl Iterator<
+        Item = ListResult<(solution::ClassRef<'sol>, &'sol Arc<builder::Variable<'sol>>)>,
+    > + 'sol {
         iter::from_coroutine(
             #[coroutine]
             move || {
@@ -306,7 +296,7 @@ impl<'proj> Project {
                     }
                 };
 
-                if let Found::Yes(project::Complex::Class(base)) =
+                if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())
                 {
                     for var in Box::new(self.variables_in_class(base, next_filter)) {
@@ -318,12 +308,12 @@ impl<'proj> Project {
     }
 
     pub fn events_in_class<'a>(
-        &'proj self,
-        class_ref: project::ClassRef<'proj>,
+        &'sol self,
+        class_ref: solution::ClassRef<'sol>,
         filter: EventFilter<'a>,
-    ) -> impl Iterator<Item = (project::ClassRef<'proj>, &'proj builder::Event<'proj>)> + 'a
+    ) -> impl Iterator<Item = (solution::ClassRef<'sol>, &'sol builder::Event<'sol>)> + 'a
     where
-        'proj: 'a,
+        'sol: 'a,
     {
         iter::from_coroutine(
             #[coroutine]
@@ -341,7 +331,7 @@ impl<'proj> Project {
                     }
                 };
 
-                if let Found::Yes(project::Complex::Class(base)) =
+                if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())
                 {
                     for ev in Box::new(self.events_in_class(base, filter)) {
@@ -353,10 +343,10 @@ impl<'proj> Project {
     }
 
     pub fn functions_in_class<'a>(
-        &'proj self,
-        class_ref: project::ClassRef<'proj>,
-        filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
+        &'sol self,
+        class_ref: solution::ClassRef<'sol>,
+        filter: FunctionFilter<'sol, 'a>,
+    ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
         iter::from_coroutine(
             #[coroutine]
@@ -422,7 +412,7 @@ impl<'proj> Project {
                     }
                 };
 
-                if let Found::Yes(project::Complex::Class(base)) =
+                if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())
                 {
                     for func in Box::new(self.functions_in_class(base, next_filter)) {

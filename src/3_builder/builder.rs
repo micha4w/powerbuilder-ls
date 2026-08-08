@@ -1,15 +1,7 @@
-use std::{
-    collections::{hash_map, HashMap, HashSet},
-    fs,
-    sync::Arc,
-    time::Instant,
-};
+use std::collections::HashSet;
 
-use encoding_rs_io::DecodeReaderBytes;
-use ropey::Rope;
-
-use super::{types::*, File};
-use crate::{parser::Parser, types::*};
+use super::types::*;
+use crate::types::*;
 
 #[derive(Debug)]
 pub struct Builder {

@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, File},
     sync::Arc,
     time::Instant,
 };
 
+use anyhow::Context;
 use encoding_rs_io::DecodeReaderBytes;
 use ropey::Rope;
 
@@ -28,8 +29,6 @@ pub struct FileDiagnostic {
 pub struct FileMeta {
     pub uri: Arc<Url>,
     pub content: Rope,
-    pub classes: HashSet<IString>,
-    pub variables: HashSet<IString>,
 
     pub parse_diagnostics: Vec<Diagnostic>,
 }
@@ -56,66 +55,27 @@ impl ParsedFile {
             );
         }
 
-        let mut parsed = ParsedFile {
+        ParsedFile {
             meta: FileMeta {
                 uri,
                 content,
-                classes: HashSet::new(),
-                variables: HashSet::new(),
                 parse_diagnostics,
             },
             top_levels,
-        };
-        parsed.load_globals();
-        parsed
+        }
     }
 
-    fn load_globals(&mut self) {
-        self.meta.classes.clear();
-        self.meta.variables.clear();
+    pub fn new_from_filesystem(uri: Arc<Url>) -> anyhow::Result<ParsedFile> {
+        let decoded_path = uri_to_path(&uri)?;
+        eprintln!("Reading File {:?}", decoded_path);
 
-        for top_level in &self.top_levels {
-            match &top_level.top_level_type {
-                parser::TopLevelType::ForwardDecl(decl) => {
-                    for var in &decl.variables {
-                        self.meta
-                            .variables
-                            .insert((&var.variable.access.name.content).into());
-                    }
+        let content = Rope::from_reader(DecodeReaderBytes::new(
+            fs::File::open(&decoded_path).context("Failed to open file")?,
+        ))
+        .context("Failed to read file")?;
+        let parsed = ParsedFile::new(uri, content);
 
-                    for dt in &decl.classes {
-                        self.meta
-                            .classes
-                            .insert((&dt.class.name.name.content).into());
-                    }
-                }
-                parser::TopLevelType::ScopedVariablesDecl(vars) => {
-                    for var in vars {
-                        self.meta
-                            .variables
-                            .insert((&var.variable.access.name.content).into());
-                    }
-                }
-                parser::TopLevelType::ScopedVariableDecl(vars) => {
-                    for var in vars {
-                        self.meta
-                            .variables
-                            .insert((&var.variable.access.name.content).into());
-                    }
-                }
-                parser::TopLevelType::DatatypeDecl(datatype) => {
-                    self.meta
-                        .classes
-                        .insert((&datatype.class.name.name.content).into());
-                }
-                parser::TopLevelType::TypeVariablesDecl(_) => {}
-                parser::TopLevelType::FunctionsForwardDecl(_) => {}
-                parser::TopLevelType::ExternalFunctions(_) => {}
-                parser::TopLevelType::FunctionBody(_) => {}
-                parser::TopLevelType::EventBody(_) => {}
-                parser::TopLevelType::OnBody(_) => {}
-            }
-        }
+        Ok(parsed)
     }
 }
 
@@ -180,59 +140,5 @@ impl BuiltFile {
 
     pub fn inner(&self) -> &BuiltFileInner<'_> {
         self.borrow_dependent()
-    }
-}
-
-#[derive(Debug)]
-pub enum File {
-    Parsed(ParsedFile),
-    Built(BuiltFile),
-}
-
-impl File {
-    pub fn new(uri: Url) -> anyhow::Result<File> {
-        let decoded_path = uri_to_path(&uri)?;
-        eprintln!("Reading File {:?}", decoded_path);
-
-        let content = Rope::from_reader(DecodeReaderBytes::new(fs::File::open(&decoded_path)?))?;
-
-        Ok(File::Parsed(ParsedFile::new(Arc::new(uri), content)))
-    }
-
-    pub fn new_from_content(uri: Url, content: &str) -> File {
-        File::Parsed(ParsedFile::new(Arc::new(uri), Rope::from_str(content)))
-    }
-
-    pub fn new_from_meta(meta: FileMeta) -> File {
-        File::Parsed(ParsedFile::new(meta.uri, meta.content))
-    }
-
-    pub fn meta(&self) -> &FileMeta {
-        match self {
-            File::Parsed(parsed) => &parsed.meta,
-            File::Built(built) => &built.parsed().meta,
-        }
-    }
-
-    pub fn into_meta(self) -> FileMeta {
-        match self {
-            File::Parsed(parsed) => parsed.meta,
-            File::Built(built) => built.into_owner().meta,
-        }
-    }
-
-    pub fn reparse(&mut self, f: impl FnOnce(&mut FileMeta)) {
-        replace_with(self, |file| {
-            let mut meta = file.into_meta();
-            f(&mut meta);
-            File::new_from_meta(meta)
-        })
-    }
-
-    pub fn rebuild(&mut self) {
-        replace_with(self, |file| match file {
-            File::Parsed(_) => file,
-            File::Built(built) => File::Parsed(built.into_owner()),
-        });
     }
 }

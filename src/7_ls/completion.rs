@@ -3,7 +3,7 @@ use std::any::Any;
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser, project,
+    builder, parser, solution,
     resolver::{self, ResolvedType},
     tokenizer,
     types::Found,
@@ -23,7 +23,7 @@ impl PowerBuilderLS {
 
     fn add_variable(
         items: &mut Vec<lsp_types::CompletionItem>,
-        class: &Option<project::ClassRef>,
+        class: &Option<solution::ClassRef>,
         var: &builder::Variable,
         err: Option<String>,
     ) {
@@ -62,7 +62,7 @@ impl PowerBuilderLS {
 
     fn add_function(
         items: &mut Vec<lsp_types::CompletionItem>,
-        class: &Option<project::ClassRef>,
+        class: &Option<solution::ClassRef>,
         func: &builder::Function,
         err: Option<String>,
     ) {
@@ -155,15 +155,15 @@ impl PowerBuilderLS {
                         Self::add_function(&mut items, &class, func, None);
                     }
 
-                    for (_, file) in &ctx.proj.files {
-                        for class in &file.meta().classes {
+                    for (_, file) in &ctx.sol.files {
+                        for class in &file.inner().classes {
                             // TODO(completion): add class
                             // TODO(proj): also store class base and within
                         }
                     }
                 }
                 parser::LValueType::Member(lvalue, access) => {
-                    if let ResolvedType::Complex(project::Complex::Class(fc)) =
+                    if let ResolvedType::Complex(solution::Complex::Class(fc)) =
                         ctx.annotations.must_type(&lvalue.range)
                     {
                         // TODO(completion): error when member is not accessible
@@ -186,7 +186,7 @@ impl PowerBuilderLS {
                     }
                 }
                 parser::LValueType::Method(lvalue, call) => {
-                    if let ResolvedType::Complex(project::Complex::Class(fc)) =
+                    if let ResolvedType::Complex(solution::Complex::Class(fc)) =
                         ctx.annotations.must_type(&lvalue.range)
                     {
                         for func in ctx.functions_in_class(*fc, resolver::FunctionFilter::All) {

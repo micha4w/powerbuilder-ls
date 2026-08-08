@@ -2,12 +2,12 @@ use std::{collections::HashMap, ptr, sync::Arc};
 
 use super::linter::{Linter, Scope};
 use crate::{
-    builder, project,
+    builder, solution,
     resolver::{self, ResolvedType},
     types::*,
 };
 
-impl<'proj> Linter<'proj> {
+impl<'sol> Linter<'sol> {
     fn lint_variable_declaration(&self, var: &builder::Variable) {
         // TODO: merge with the thing in lint_statements?
         let parsed = var.parsed();
@@ -15,7 +15,7 @@ impl<'proj> Linter<'proj> {
         self.lint_datatype(&parsed.data_type);
         if let Some(expr) = &parsed.initial_value {
             let mut scope = Scope {
-                context: resolver::Context::new_for_body(self.proj, self.file, self.class),
+                context: resolver::Context::new_for_body(self.sol, self.file, self.class),
                 return_type: None,
             };
             if let builder::VariableType::Scoped(_) = &var.variable_type {
@@ -74,7 +74,7 @@ impl<'proj> Linter<'proj> {
 
         if let Some(within) = &parsed.class.within {
             match self.lint_datatype(within) {
-                ResolvedType::Complex(project::Complex::Class(fc)) => {
+                ResolvedType::Complex(solution::Complex::Class(fc)) => {
                     if fc.file.is_none_or(|f| !ptr::eq(f, self.file)) {
                         self.diagnostic_error(
                             "Parent Class has to be in this file".into(),
@@ -82,7 +82,7 @@ impl<'proj> Linter<'proj> {
                         );
                     }
                 }
-                ResolvedType::Complex(project::Complex::Enum(_)) => {
+                ResolvedType::Complex(solution::Complex::Enum(_)) => {
                     self.diagnostic_error(
                         "Parent Class cannot be an Enum".into(),
                         within.range.clone(),
@@ -184,7 +184,7 @@ impl<'proj> Linter<'proj> {
         }
     }
 
-    fn require_class(&self, top_level_type: String, range: Range) -> Option<project::ClassRef<'_>> {
+    fn require_class(&self, top_level_type: String, range: Range) -> Option<solution::ClassRef<'_>> {
         if self.class.is_none() {
             self.diagnostic_error(
                 top_level_type + " have to come after the Type Definition that they refer to",
@@ -262,7 +262,7 @@ impl<'proj> Linter<'proj> {
         }
     }
 
-    pub fn lint_top_level(&mut self, top_level: &'proj builder::TopLevel<'proj>) {
+    pub fn lint_top_level(&mut self, top_level: &'sol builder::TopLevel<'sol>) {
         match &top_level.top_level_type {
             builder::TopLevelType::ForwardDecl(..) => {
                 // TODO(forward): ...
@@ -286,7 +286,7 @@ impl<'proj> Linter<'proj> {
             }
 
             builder::TopLevelType::DatatypeDecl(decl) => {
-                self.class = Some(project::ClassRef::new(self.file, &decl.class));
+                self.class = Some(solution::ClassRef::new(self.file, &decl.class));
                 self.lint_datatype_decl(&decl, true);
             }
 
@@ -403,7 +403,7 @@ impl<'proj> Linter<'proj> {
                     .classes
                     .get(&(&on.header.class.name.content).into())
                 {
-                    Some(class) => Some(project::ClassRef::new(self.file, class)),
+                    Some(class) => Some(solution::ClassRef::new(self.file, class)),
                     None => {
                         self.diagnostic_error(
                             "Class does not exist".into(),

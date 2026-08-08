@@ -9,5 +9,6 @@ mod hover;
 
 mod ls;
 mod ls_context;
+mod server;
 
 pub use ls::PowerBuilderLS;

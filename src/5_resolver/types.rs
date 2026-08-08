@@ -1,19 +1,19 @@
 use core::fmt;
 
-use crate::{builder, parser, project, tokenizer, types::*};
+use crate::{builder, parser, solution, tokenizer, types::*};
 
 #[derive(Debug, Clone)]
-pub enum ResolvedType<'proj> {
+pub enum ResolvedType<'sol> {
     Base(builder::BaseType),
 
-    Complex(project::Complex<'proj>),
+    Complex(solution::Complex<'sol>),
     Array(Box<Self>), // TODO(arrays): fixed size arrays
     Unknown,
     Void,
 }
 
-impl<'proj> ResolvedType<'proj> {
-    // pub fn new(ctx: &Context<'proj>, data_type: &parser::DataType) -> ResolvedType<'proj> {
+impl<'sol> ResolvedType<'sol> {
+    // pub fn new(ctx: &Context<'sol>, data_type: &parser::DataType) -> ResolvedType<'sol> {
     //     let base = BaseType::new(data_type);
 
     //     let typ = match base {
@@ -66,7 +66,7 @@ impl<'proj> ResolvedType<'proj> {
         }
     }
 
-    pub fn unnested(&self) -> &ResolvedType<'proj> {
+    pub fn unnested(&self) -> &ResolvedType<'sol> {
         match self {
             Self::Array(inner) => inner.unnested(),
             _ => self,
@@ -87,35 +87,35 @@ impl std::fmt::Display for ResolvedType<'_> {
 }
 
 #[derive(Clone)]
-pub enum ResolvedLValue<'proj> {
-    This(project::ClassRef<'proj>),
-    Super(project::Complex<'proj>),
-    Parent(project::Complex<'proj>),
+pub enum ResolvedLValue<'sol> {
+    This(solution::ClassRef<'sol>),
+    Super(solution::Complex<'sol>),
+    Parent(solution::Complex<'sol>),
 
     /// `ClassRef` is `None` for scoped / local variables, `Some` for instance variables
     Variable(
-        Option<project::ClassRef<'proj>>,
-        &'proj builder::Variable<'proj>,
+        Option<solution::ClassRef<'sol>>,
+        &'sol builder::Variable<'sol>,
     ),
     /// `ClassRef` is `None` for builtin functions
     Function(
-        Option<project::ClassRef<'proj>>,
-        &'proj builder::Function<'proj>,
+        Option<solution::ClassRef<'sol>>,
+        &'sol builder::Function<'sol>,
     ),
 
-    Member(project::ClassRef<'proj>, &'proj builder::Variable<'proj>),
+    Member(solution::ClassRef<'sol>, &'sol builder::Variable<'sol>),
     Method(
-        project::ClassRef<'proj>,
-        OneOf<&'proj builder::Function<'proj>, &'proj builder::Event<'proj>>,
+        solution::ClassRef<'sol>,
+        OneOf<&'sol builder::Function<'sol>, &'sol builder::Event<'sol>>,
     ),
     // Index,
     // SQLAccess,
 }
 
 #[derive(Clone)]
-pub struct Annotation<'proj> {
-    pub resolved_type: ResolvedType<'proj>,
-    pub lvalue: Option<ResolvedLValue<'proj>>,
+pub struct Annotation<'sol> {
+    pub resolved_type: ResolvedType<'sol>,
+    pub lvalue: Option<ResolvedLValue<'sol>>,
 }
 
 #[derive(Debug)]
@@ -138,13 +138,13 @@ impl fmt::Display for ListError {
 }
 
 #[derive(Clone)]
-pub enum VariableFilter<'proj> {
+pub enum VariableFilter<'sol> {
     All,
-    ForAccess(&'proj parser::VariableAccess, tokenizer::AccessType),
+    ForAccess(&'sol parser::VariableAccess, tokenizer::AccessType),
 }
 
-impl<'proj> VariableFilter<'proj> {
-    pub fn with_access(self, level: tokenizer::AccessType) -> VariableFilter<'proj> {
+impl<'sol> VariableFilter<'sol> {
+    pub fn with_access(self, level: tokenizer::AccessType) -> VariableFilter<'sol> {
         match self {
             VariableFilter::All => VariableFilter::All,
             VariableFilter::ForAccess(name, _) => VariableFilter::ForAccess(name, level),
@@ -154,17 +154,17 @@ impl<'proj> VariableFilter<'proj> {
 
 #[derive(Clone)]
 // TODO: change to a struct of Options?
-pub enum FunctionFilter<'proj, 'tmp> {
+pub enum FunctionFilter<'sol, 'tmp> {
     All,
     ForCall(
         &'tmp IString,
-        &'tmp Vec<&'tmp ResolvedType<'proj>>,
+        &'tmp Vec<&'tmp ResolvedType<'sol>>,
         tokenizer::AccessType,
     ),
 }
 
-impl<'proj, 'tmp> FunctionFilter<'proj, 'tmp> {
-    pub fn with_access(self, level: tokenizer::AccessType) -> FunctionFilter<'proj, 'tmp> {
+impl<'sol, 'tmp> FunctionFilter<'sol, 'tmp> {
+    pub fn with_access(self, level: tokenizer::AccessType) -> FunctionFilter<'sol, 'tmp> {
         match self {
             FunctionFilter::All => FunctionFilter::All,
             FunctionFilter::ForCall(name, arg_types, old_level) => FunctionFilter::ForCall(

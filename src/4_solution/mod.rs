@@ -1,8 +1,8 @@
 mod builtins;
-mod project;
+mod solution;
 mod types;
 
-pub use project::Project;
+pub use solution::Solution;
 pub use builtins::BUILTIN_URL;
 pub use types::*;
 

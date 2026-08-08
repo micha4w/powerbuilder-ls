@@ -7,23 +7,23 @@ use std::{
 use super::types::*;
 use crate::{
     builder::{self, BuiltFile},
-    project::{self, Project},
+    solution::{self, Solution},
     tokenizer,
     types::*,
 };
 
 #[derive(Debug, Clone)]
-pub struct FoundVariable<'proj> {
+pub struct FoundVariable<'sol> {
     /// None for builtins
-    pub file: Option<&'proj BuiltFile>,
+    pub file: Option<&'sol BuiltFile>,
     /// None for locals/args and file scoped variables
-    pub class: Option<&'proj Arc<builder::Class<'proj>>>,
+    pub class: Option<&'sol Arc<builder::Class<'sol>>>,
 
-    pub variable: &'proj Arc<builder::Variable<'proj>>,
+    pub variable: &'sol Arc<builder::Variable<'sol>>,
 }
 
-impl<'proj> FoundVariable<'proj> {
-    fn new(file: &'proj BuiltFile, variable: &'proj Arc<builder::Variable<'proj>>) -> Self {
+impl<'sol> FoundVariable<'sol> {
+    fn new(file: &'sol BuiltFile, variable: &'sol Arc<builder::Variable<'sol>>) -> Self {
         FoundVariable {
             file: Some(file),
             class: None,
@@ -32,8 +32,8 @@ impl<'proj> FoundVariable<'proj> {
     }
 
     fn new_instance(
-        class: project::ClassRef<'proj>,
-        variable: &'proj Arc<builder::Variable<'proj>>,
+        class: solution::ClassRef<'sol>,
+        variable: &'sol Arc<builder::Variable<'sol>>,
     ) -> Self {
         FoundVariable {
             file: class.file,
@@ -42,32 +42,28 @@ impl<'proj> FoundVariable<'proj> {
         }
     }
 
-    pub fn class_ref(&self) -> Option<project::ClassRef<'proj>> {
-        self.class.map(|c| project::ClassRef {
+    pub fn class_ref(&self) -> Option<solution::ClassRef<'sol>> {
+        self.class.map(|c| solution::ClassRef {
             file: self.file,
             class: c,
         })
     }
 }
 
-pub struct Context<'proj> {
-    pub proj: &'proj Project,
-    pub file: &'proj BuiltFile,
+pub struct Context<'sol> {
+    pub sol: &'sol Solution,
+    pub file: &'sol BuiltFile,
 
-    pub class: Option<project::ClassRef<'proj>>,
+    pub class: Option<solution::ClassRef<'sol>>,
     // pub top_level: Option<&'a TopLevel>,
-    pub arguments: Option<HashMap<IString, &'proj Arc<builder::Variable<'proj>>>>,
-    pub body: Option<&'proj builder::Body<'proj>>,
+    pub arguments: Option<HashMap<IString, &'sol Arc<builder::Variable<'sol>>>>,
+    pub body: Option<&'sol builder::Body<'sol>>,
 }
 
-impl<'proj> Context<'proj> {
-    pub fn new(
-        proj: &'proj Project,
-        file: &'proj BuiltFile,
-        pos: &'proj Position,
-    ) -> Context<'proj> {
+impl<'sol> Context<'sol> {
+    pub fn new(sol: &'sol Solution, file: &'sol BuiltFile, pos: &'sol Position) -> Context<'sol> {
         let mut ctx = Context {
-            proj,
+            sol,
             file,
 
             class: None,
@@ -78,7 +74,7 @@ impl<'proj> Context<'proj> {
 
         for top_level in &file.inner().top_levels {
             if let builder::TopLevelType::DatatypeDecl(decl) = &top_level.top_level_type {
-                ctx.class = Some(project::ClassRef::new(file, &decl.class));
+                ctx.class = Some(solution::ClassRef::new(file, &decl.class));
             }
 
             if top_level.range.contains(pos) {
@@ -106,13 +102,13 @@ impl<'proj> Context<'proj> {
     }
 
     pub fn new_for_body(
-        proj: &'proj Project,
-        file: &'proj BuiltFile,
-        class: Option<project::ClassRef<'proj>>,
+        sol: &'sol Solution,
+        file: &'sol BuiltFile,
+        class: Option<solution::ClassRef<'sol>>,
         // top_level: &'a TopLevel,
-    ) -> Context<'proj> {
+    ) -> Context<'sol> {
         let ctx = Context {
-            proj,
+            sol,
             file,
             class,
             // top_level: Some(top_level),
@@ -132,8 +128,8 @@ impl<'proj> Context<'proj> {
 
     pub(super) fn load_body(
         &mut self,
-        body: &'proj builder::Body<'proj>,
-        arguments: &'proj Vec<Arc<builder::Variable<'proj>>>,
+        body: &'sol builder::Body<'sol>,
+        arguments: &'sol Vec<Arc<builder::Variable<'sol>>>,
     ) {
         self.body = Some(body);
         self.arguments = Some(
@@ -144,34 +140,31 @@ impl<'proj> Context<'proj> {
         );
     }
 
-    pub fn find_class(&self, name: &IString) -> Found<project::Complex<'proj>> {
-        self.proj.find_class(Some(self.file), name)
+    pub fn find_class(&self, name: &IString) -> Found<solution::Complex<'sol>> {
+        self.sol.find_class(Some(self.file), name)
     }
 
     pub fn variables_in_class(
         &self,
-        class: project::ClassRef<'proj>,
-        filter: VariableFilter<'proj>,
+        class: solution::ClassRef<'sol>,
+        filter: VariableFilter<'sol>,
     ) -> impl Iterator<
-        Item = ListResult<(
-            project::ClassRef<'proj>,
-            &'proj Arc<builder::Variable<'proj>>,
-        )>,
+        Item = ListResult<(solution::ClassRef<'sol>, &'sol Arc<builder::Variable<'sol>>)>,
     > + '_ {
         let level = self
             .class
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.proj.get_access_for(current_class, class)
+                self.sol.get_access_for(current_class, class)
             });
 
-        self.proj
+        self.sol
             .variables_in_class(class, filter.with_access(level))
     }
 
     pub fn variables(
         &self,
-        filter: VariableFilter<'proj>,
-    ) -> impl Iterator<Item = ListResult<FoundVariable<'proj>>> + '_ {
+        filter: VariableFilter<'sol>,
+    ) -> impl Iterator<Item = ListResult<FoundVariable<'sol>>> + '_ {
         iter::from_coroutine(
             #[coroutine]
             move || {
@@ -192,7 +185,7 @@ impl<'proj> Context<'proj> {
                 }
 
                 if let Some(class) = self.class {
-                    for var in self.proj.variables_in_class(
+                    for var in self.sol.variables_in_class(
                         class,
                         filter.clone().with_access(tokenizer::AccessType::PRIVATE),
                     ) {
@@ -220,7 +213,7 @@ impl<'proj> Context<'proj> {
                     }
                 }
 
-                for var in self.proj.global_variables(filter) {
+                for var in self.sol.global_variables(filter) {
                     yield Self::map_res(var, |var| FoundVariable::new(self.file, var));
                 }
             },
@@ -229,34 +222,34 @@ impl<'proj> Context<'proj> {
 
     pub fn functions_in_class<'a>(
         &'a self,
-        class: project::ClassRef<'proj>,
-        filter: FunctionFilter<'proj, 'a>,
-    ) -> impl Iterator<Item = ListResult<(project::ClassRef<'proj>, &'proj builder::Function<'proj>)>> + 'a
+        class: solution::ClassRef<'sol>,
+        filter: FunctionFilter<'sol, 'a>,
+    ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
         let level = self
             .class
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.proj.get_access_for(current_class, class)
+                self.sol.get_access_for(current_class, class)
             });
 
-        self.proj
+        self.sol
             .functions_in_class(class, filter.with_access(level))
     }
 
     pub fn functions<'a>(
         &'a self,
-        filter: FunctionFilter<'proj, 'a>,
+        filter: FunctionFilter<'sol, 'a>,
     ) -> impl Iterator<
         Item = ListResult<(
-            Option<project::ClassRef<'proj>>,
-            &'proj builder::Function<'proj>,
+            Option<solution::ClassRef<'sol>>,
+            &'sol builder::Function<'sol>,
         )>,
     > + 'a {
         iter::from_coroutine(
             #[coroutine]
             move || {
                 if let Some(class) = self.class {
-                    for func in self.proj.functions_in_class(
+                    for func in self.sol.functions_in_class(
                         class,
                         filter.clone().with_access(tokenizer::AccessType::PRIVATE),
                     ) {
@@ -266,15 +259,15 @@ impl<'proj> Context<'proj> {
 
                 match filter {
                     FunctionFilter::ForCall(iname, arg_types, _) => {
-                        for func in self.proj.global_functions(Some(self.file), filter) {
+                        for func in self.sol.global_functions(Some(self.file), filter) {
                             yield Self::map_res(func, |(class, t)| (Some(class), t));
                         }
 
                         if let Some(overloads) =
-                            self.proj.builtins.borrow_dependent().functions.get(&iname)
+                            self.sol.builtins.borrow_dependent().functions.get(&iname)
                         {
                             for overload in overloads {
-                                if self.proj.is_function_callable(
+                                if self.sol.is_function_callable(
                                     Some(self.file),
                                     &overload.header(),
                                     &arg_types,
@@ -289,7 +282,7 @@ impl<'proj> Context<'proj> {
                     FunctionFilter::All => {
                         // TODO: find all global functions
 
-                        for overloads in self.proj.builtins.borrow_dependent().functions.values() {
+                        for overloads in self.sol.builtins.borrow_dependent().functions.values() {
                             for overload in overloads {
                                 yield Ok((None, overload));
                             }
@@ -308,14 +301,14 @@ impl<'proj> Context<'proj> {
     }
 
     // pub fn some_class<T>(
-    //     res: ListResult<(project::ClassRef<'proj>, &'proj T)>,
-    // ) -> ListResult<(Option<project::ClassRef<'proj>>, &'proj T)> {
+    //     res: ListResult<(solution::ClassRef<'sol>, &'sol T)>,
+    // ) -> ListResult<(Option<solution::ClassRef<'sol>>, &'sol T)> {
     //     Self::map_res(res, |(class, t)| (Some(class), t))
     // }
 
     // pub fn no_class<T>(
-    //     val: ListResult<&'proj T>,
-    // ) -> ListResult<(Option<project::ClassRef<'proj>>, &'proj T)> {
+    //     val: ListResult<&'sol T>,
+    // ) -> ListResult<(Option<solution::ClassRef<'sol>>, &'sol T)> {
     //     Self::map_res(val, |t| (None, t))
     // }
 

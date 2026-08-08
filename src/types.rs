@@ -136,16 +136,16 @@ pub struct Range {
 }
 
 impl Range {
-    pub(super) fn new(start: Position, end: Position, uri: Arc<Url>) -> Self {
+    pub(crate) fn new(start: Position, end: Position, uri: Arc<Url>) -> Self {
         Self { start, end, uri }
     }
 
-    pub(super) fn merged(mut self, b: &Range) -> Self {
+    pub(crate) fn merged(mut self, b: &Range) -> Self {
         self.merge(b);
         self
     }
 
-    pub(super) fn merge(&mut self, b: &Range) -> &Self {
+    pub(crate) fn merge(&mut self, b: &Range) -> &Self {
         assert!(self.uri == b.uri, "Merging Ranges from 2 different files");
 
         if b.start < self.start {
@@ -158,12 +158,12 @@ impl Range {
         self
     }
 
-    pub(super) fn expanded(mut self, pos: &Position) -> Self {
+    pub(crate) fn expanded(mut self, pos: &Position) -> Self {
         self.expand(pos);
         self
     }
 
-    pub(super) fn expand(&mut self, pos: &Position) -> &Self {
+    pub(crate) fn expand(&mut self, pos: &Position) -> &Self {
         if pos < &self.start {
             self.start = pos.clone()
         }
@@ -173,7 +173,7 @@ impl Range {
         self
     }
 
-    pub(super) fn new_point(base_pos: Position, uri: Arc<Url>) -> Self {
+    pub(crate) fn new_point(base_pos: Position, uri: Arc<Url>) -> Self {
         Self {
             start: base_pos,
             end: base_pos,
@@ -181,7 +181,7 @@ impl Range {
         }
     }
 
-    pub(super) fn empty(uri: Arc<Url>) -> Self {
+    pub(crate) fn empty(uri: Arc<Url>) -> Self {
         Self::new_point(Position::default(), uri)
     }
 
@@ -351,8 +351,8 @@ impl From<&String> for IString {
     }
 }
 
-impl From<&'static str> for IString {
-    fn from(value: &'static str) -> Self {
+impl From<&str> for IString {
+    fn from(value: &str) -> Self {
         Self {
             _str: value.to_lowercase(),
         }
@@ -562,12 +562,23 @@ impl<T> FromResidual<<Found<T> as Try>::Residual> for Found<T> {
 //     }
 // }
 
-pub(super) fn uri_to_path(uri: &Url) -> anyhow::Result<PathBuf> {
+pub(crate) fn uri_to_path(uri: &Url) -> anyhow::Result<PathBuf> {
     uri.to_file_path()
-        .map_err(|_| anyhow!("Failed to convert Url to PathBuf {:?}", uri))
+        .map_err(|_| anyhow!("Failed to convert Url to PathBuf for {:?}", uri))
 }
 
-pub(super) fn replace_with<T, F>(slot: &mut T, f: F)
+pub(crate) fn url_join_path(mut base: Url, path: &str) -> Url {
+    let mut base_path = base.path().to_string();
+    if !base_path.ends_with('/') {
+        base_path.push('/');
+    }
+    base_path.push_str(path);
+    base.set_path(&base_path);
+    base
+}
+
+
+pub(crate) fn replace_with<T, F>(slot: &mut T, f: F)
 where
     F: FnOnce(T) -> T,
 {
@@ -591,7 +602,7 @@ macro_rules! unwrap_enum {
         }
     };
 }
-pub(super) use unwrap_enum;
+pub(crate) use unwrap_enum;
 
 /// for debugging stuf...
 pub fn assert_lifetime<'a, T>(x: &'a T) -> &'a T {

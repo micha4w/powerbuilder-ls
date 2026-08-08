@@ -11,8 +11,8 @@ mod tokenizer;
 mod parser;
 #[path="3_builder/mod.rs"]
 mod builder;
-#[path="4_project/mod.rs"]
-mod project;
+#[path="4_solution/mod.rs"]
+mod solution;
 #[path="5_resolver/mod.rs"]
 mod resolver;
 #[path="6_linter/mod.rs"]

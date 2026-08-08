@@ -3,16 +3,16 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::OneOf;
 
 use super::types::*;
-use crate::{builder, parser, project, types::*};
+use crate::{builder, parser, solution, types::*};
 
-pub struct AnnotationTree<'proj> {
-    pub range: &'proj Range,
-    pub annotation: Option<Annotation<'proj>>,
-    pub children: Vec<AnnotationTree<'proj>>,
+pub struct AnnotationTree<'sol> {
+    pub range: &'sol Range,
+    pub annotation: Option<Annotation<'sol>>,
+    pub children: Vec<AnnotationTree<'sol>>,
 }
 
-impl<'a, 'proj> AnnotationTree<'proj> {
-    pub fn add_empty_child(&'a mut self, range: &'proj Range) -> &'a mut AnnotationTree<'proj> {
+impl<'a, 'sol> AnnotationTree<'sol> {
+    pub fn add_empty_child(&'a mut self, range: &'sol Range) -> &'a mut AnnotationTree<'sol> {
         self.children.push(AnnotationTree {
             range,
             annotation: None,
@@ -23,13 +23,13 @@ impl<'a, 'proj> AnnotationTree<'proj> {
 
     pub fn add_child(
         &'a mut self,
-        range: &'proj Range,
-        annotation: Annotation<'proj>,
-    ) -> &'a mut Annotation<'proj> {
+        range: &'sol Range,
+        annotation: Annotation<'sol>,
+    ) -> &'a mut Annotation<'sol> {
         self.add_empty_child(range).annotation.insert(annotation)
     }
 
-    fn find_exact(&'proj self, range: &Range) -> Option<&'proj Annotation<'proj>> {
+    fn find_exact(&'sol self, range: &Range) -> Option<&'sol Annotation<'sol>> {
         if self.range == range {
             return self.annotation.as_ref();
         }
@@ -48,26 +48,26 @@ impl<'a, 'proj> AnnotationTree<'proj> {
     }
 
     pub fn for_lvalue(
-        &'proj self,
+        &'sol self,
         lvalue: &parser::LValue,
-    ) -> Option<&'proj ResolvedLValue<'proj>> {
+    ) -> Option<&'sol ResolvedLValue<'sol>> {
         self.find_exact(&lvalue.range)
             .and_then(|anot| anot.lvalue.as_ref())
     }
 
-    pub fn for_range(&'proj self, range: &Range) -> Option<&'proj ResolvedType<'proj>> {
+    pub fn for_range(&'sol self, range: &Range) -> Option<&'sol ResolvedType<'sol>> {
         self.find_exact(range).map(|anot| &anot.resolved_type)
     }
 }
 
-pub struct FileAnnotations<'proj> {
-    pub top_levels: Vec<AnnotationTree<'proj>>,
+pub struct FileAnnotations<'sol> {
+    pub top_levels: Vec<AnnotationTree<'sol>>,
 }
 
-impl<'proj> FileAnnotations<'proj> {
+impl<'sol> FileAnnotations<'sol> {
     // Returns Found::No if the lvalue failed to resolve (missing class/function) or the range is wrong
     // TODO(annotations): panic when the range does not exist?
-    pub fn lvalue(&'proj self, lvalue: &parser::LValue) -> Found<&'proj ResolvedLValue<'proj>> {
+    pub fn lvalue(&'sol self, lvalue: &parser::LValue) -> Found<&'sol ResolvedLValue<'sol>> {
         for top_level in &self.top_levels {
             if let Some(anot) = top_level.for_lvalue(lvalue) {
                 return Found::Yes(anot);
@@ -77,7 +77,7 @@ impl<'proj> FileAnnotations<'proj> {
         Found::No
     }
 
-    pub fn datatype(&'proj self, range: &Range) -> Option<&'proj ResolvedType<'proj>> {
+    pub fn datatype(&'sol self, range: &Range) -> Option<&'sol ResolvedType<'sol>> {
         for top_level in &self.top_levels {
             if let Some(anot) = top_level.for_range(range) {
                 return Some(anot);
@@ -86,7 +86,7 @@ impl<'proj> FileAnnotations<'proj> {
         None
     }
 
-    pub fn must_type(&'proj self, range: &Range) -> &'proj ResolvedType<'proj> {
+    pub fn must_type(&'sol self, range: &Range) -> &'sol ResolvedType<'sol> {
         self.datatype(range)
             .expect(&format!("Expected annotation for range {:?}", range))
     }

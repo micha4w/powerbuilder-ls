@@ -2,35 +2,35 @@ use std::{backtrace::Backtrace, cell::RefCell};
 
 use crate::{
     builder::BuiltFile,
-    project::{self, Project},
+    solution::{self, Solution},
     resolver::{self, FileAnnotations, ResolvedType},
     tokenizer,
     types::*,
 };
 
-pub struct Scope<'proj> {
-    pub return_type: Option<&'proj ResolvedType<'proj>>,
+pub struct Scope<'sol> {
+    pub return_type: Option<&'sol ResolvedType<'sol>>,
     // TODO: stuff
-    pub context: resolver::Context<'proj>,
+    pub context: resolver::Context<'sol>,
 }
 
-pub struct Linter<'proj> {
-    pub proj: &'proj Project,
-    pub file: &'proj BuiltFile,
-    pub annotations: &'proj FileAnnotations<'proj>,
-    pub class: Option<project::ClassRef<'proj>>,
+pub struct Linter<'sol> {
+    pub sol: &'sol Solution,
+    pub file: &'sol BuiltFile,
+    pub annotations: &'sol FileAnnotations<'sol>,
+    pub class: Option<solution::ClassRef<'sol>>,
 
     pub diagnostics: RefCell<Vec<Diagnostic>>,
 }
 
-impl<'proj> Linter<'proj> {
+impl<'sol> Linter<'sol> {
     pub fn new(
-        proj: &'proj Project,
-        file: &'proj BuiltFile,
-        annotations: &'proj FileAnnotations<'proj>,
+        sol: &'sol Solution,
+        file: &'sol BuiltFile,
+        annotations: &'sol FileAnnotations<'sol>,
     ) -> Self {
         Self {
-            proj,
+            sol,
             file,
             annotations,
             class: None,
@@ -38,10 +38,10 @@ impl<'proj> Linter<'proj> {
         }
     }
 
-    pub(super) fn get_access_for(&self, class: project::ClassRef<'proj>) -> tokenizer::AccessType {
+    pub(super) fn get_access_for(&self, class: solution::ClassRef<'sol>) -> tokenizer::AccessType {
         self.class
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.proj.get_access_for(current_class, class)
+                self.sol.get_access_for(current_class, class)
             })
     }
 

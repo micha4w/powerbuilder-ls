@@ -1,6 +1,6 @@
 mod resolver;
 mod context;
-pub mod project_helpers;
+pub mod solution_helpers;
 mod file_annotations;
 pub mod types;
 

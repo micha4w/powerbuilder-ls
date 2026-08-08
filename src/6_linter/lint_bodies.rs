@@ -4,14 +4,13 @@ use super::linter::{Linter, Scope};
 use crate::{
     builder,
     parser::{self, GroupedName},
-    project,
     resolver::{self, ResolvedType},
-    tokenizer,
+    solution, tokenizer,
     types::*,
 };
 
-impl<'proj> Linter<'proj> {
-    pub fn lint_datatype(&self, data_type: &parser::DataType) -> &'proj ResolvedType<'proj> {
+impl<'sol> Linter<'sol> {
+    pub fn lint_datatype(&self, data_type: &parser::DataType) -> &'sol ResolvedType<'sol> {
         let typ = self.annotations.must_type(&data_type.range);
         if let ResolvedType::Unknown = typ {
             self.diagnostic_error("Class not found".into(), data_type.range.clone());
@@ -19,7 +18,7 @@ impl<'proj> Linter<'proj> {
         typ
     }
 
-    pub fn lint_lvalue(&self, lvalue: &parser::LValue, scope: &Scope) -> &'proj ResolvedType<'proj> {
+    pub fn lint_lvalue(&self, lvalue: &parser::LValue, scope: &Scope) -> &'sol ResolvedType<'sol> {
         let resolved = self.annotations.lvalue(&lvalue);
         let typ = self.annotations.must_type(&lvalue.range);
 
@@ -81,7 +80,7 @@ impl<'proj> Linter<'proj> {
                 let types = self.lint_expressions(&call.arguments, scope);
 
                 match data_type {
-                    ResolvedType::Complex(project::Complex::Class(fc)) => {
+                    ResolvedType::Complex(solution::Complex::Class(fc)) => {
                         if !resolved.found() {
                             // TODO(diagnostic): show args, also do events
                             self.diagnostic_error(
@@ -102,7 +101,7 @@ impl<'proj> Linter<'proj> {
             parser::LValueType::Member(lvalue, member) => {
                 let data_type = self.lint_lvalue(lvalue, scope);
                 match data_type {
-                    ResolvedType::Complex(project::Complex::Class(fc)) => {
+                    ResolvedType::Complex(solution::Complex::Class(fc)) => {
                         if !resolved.found() {
                             // TODO(diagnostic): ...
                             self.diagnostic_error(
@@ -163,7 +162,7 @@ impl<'proj> Linter<'proj> {
         &self,
         expression: &parser::Expression,
         scope: &Scope,
-    ) -> &'proj ResolvedType<'proj> {
+    ) -> &'sol ResolvedType<'sol> {
         let typ = self.annotations.must_type(&expression.range);
 
         match &expression.expression_type {
@@ -179,7 +178,7 @@ impl<'proj> Linter<'proj> {
                 if let Some(data_type) = types.iter().find(|t| !matches!(t, ResolvedType::Unknown))
                 {
                     for expression_type in &types {
-                        if !self.proj.is_convertible(data_type, expression_type) {
+                        if !self.sol.is_convertible(data_type, expression_type) {
                             self.diagnostic_error(
                                 "Array Literal contains differing types".into(),
                                 expression.range.clone(),
@@ -195,7 +194,7 @@ impl<'proj> Linter<'proj> {
 
                 match op {
                     tokenizer::Operator::AND | tokenizer::Operator::OR => {
-                        if !self.proj.is_convertible(
+                        if !self.sol.is_convertible(
                             &left_type,
                             &ResolvedType::Base(builder::BaseType::Boolean),
                         ) {
@@ -205,7 +204,7 @@ impl<'proj> Linter<'proj> {
                             );
                         }
 
-                        if !self.proj.is_convertible(
+                        if !self.sol.is_convertible(
                             &right_type,
                             &ResolvedType::Base(builder::BaseType::Boolean),
                         ) {
@@ -216,7 +215,7 @@ impl<'proj> Linter<'proj> {
                         }
                     }
                     tokenizer::Operator::EQ | tokenizer::Operator::GTLT => {
-                        if !self.proj.is_convertible(&left_type, &right_type) {
+                        if !self.sol.is_convertible(&left_type, &right_type) {
                             self.diagnostic_error(
                                 "Types do not match".into(),
                                 expression.range.clone(),
@@ -235,10 +234,10 @@ impl<'proj> Linter<'proj> {
                         }
                     }
                     tokenizer::Operator::PLUS
-                        if self.proj.is_convertible(
+                        if self.sol.is_convertible(
                             &left_type,
                             &ResolvedType::Base(builder::BaseType::String),
-                        ) && self.proj.is_convertible(
+                        ) && self.sol.is_convertible(
                             &right_type,
                             &ResolvedType::Base(builder::BaseType::String),
                         ) => {}
@@ -271,7 +270,7 @@ impl<'proj> Linter<'proj> {
             parser::ExpressionType::BooleanNot(expression) => {
                 let expression_type = self.lint_expression(expression, scope);
 
-                if !self.proj.is_convertible(
+                if !self.sol.is_convertible(
                     &expression_type,
                     &ResolvedType::Base(builder::BaseType::Boolean),
                 ) {
@@ -286,7 +285,7 @@ impl<'proj> Linter<'proj> {
             }
             parser::ExpressionType::Create(data_type) => match self.lint_datatype(data_type) {
                 ResolvedType::Unknown => {}
-                ResolvedType::Complex(project::Complex::Class(fc)) => {
+                ResolvedType::Complex(solution::Complex::Class(fc)) => {
                     if fc.class.parsed.class.autoinstantiate.is_some() {
                         self.diagnostic_error(
                             "Cannot create an Autoinstantiated Class".into(),
@@ -305,7 +304,7 @@ impl<'proj> Linter<'proj> {
                 let class_type = self.lint_expression(class, scope);
 
                 if !self
-                    .proj
+                    .sol
                     .is_convertible(&class_type, &ResolvedType::Base(builder::BaseType::String))
                 {
                     self.diagnostic_error(
@@ -344,7 +343,7 @@ impl<'proj> Linter<'proj> {
             //         match self.proj.find_class(Some(self.file), &cls) {
             //             Found::Yes(cplx @ Complex::Class(_)) => self
             //                 .proj
-            //                 .inherits_from(&cplx, &project::Complex::Class(transation_class))
+            //                 .inherits_from(&cplx, &solution::Complex::Class(transation_class))
             //                 .unwrap_or(false),
             //             _ => false,
             //         }
@@ -474,7 +473,7 @@ impl<'proj> Linter<'proj> {
                     scope: &Scope,
                 ) {
                     let condition_type = linter.lint_expression(condition, scope);
-                    if !linter.proj.is_convertible(
+                    if !linter.sol.is_convertible(
                         &condition_type,
                         &ResolvedType::Base(builder::BaseType::Boolean),
                     ) {
@@ -506,7 +505,7 @@ impl<'proj> Linter<'proj> {
             parser::StatementType::Destroy(object) => {
                 let data_type = self.lint_expression(object, scope);
                 match data_type {
-                    ResolvedType::Complex(project::Complex::Class(_)) => {}
+                    ResolvedType::Complex(solution::Complex::Class(_)) => {}
                     ResolvedType::Base(builder::BaseType::Any) | ResolvedType::Unknown => {}
                     _ => {
                         self.diagnostic_error(
@@ -550,7 +549,7 @@ impl<'proj> Linter<'proj> {
                     if let Some(initial_value) = &var.variable.initial_value {
                         let initial_type = self.lint_expression(initial_value, scope);
 
-                        if !self.proj.is_convertible(&initial_type, &dt) {
+                        if !self.sol.is_convertible(&initial_type, &dt) {
                             self.diagnostic_error(
                                 "Type's are not convertible".into(),
                                 initial_value.range.clone(),
@@ -565,7 +564,7 @@ impl<'proj> Linter<'proj> {
 
                 match special_assignment {
                     None => {
-                        if !self.proj.is_convertible(&expression_type, &lvalue_type) {
+                        if !self.sol.is_convertible(&expression_type, &lvalue_type) {
                             self.diagnostic_error(
                                 "Type's are not convertible".into(),
                                 expression.range.clone(),
@@ -573,12 +572,12 @@ impl<'proj> Linter<'proj> {
                         }
                     }
                     Some(tokenizer::SpecialAssignment::PLUSEQ)
-                        if self.proj.is_convertible(
+                        if self.sol.is_convertible(
                             &lvalue_type,
                             &ResolvedType::Base(builder::BaseType::String),
                         ) =>
                     {
-                        if !self.proj.is_convertible(
+                        if !self.sol.is_convertible(
                             &expression_type,
                             &ResolvedType::Base(builder::BaseType::String),
                         ) {
@@ -670,7 +669,7 @@ impl<'proj> Linter<'proj> {
                     .iter()
                     .for_each(|s| self.lint_statement(s, scope));
 
-                if !self.proj.is_convertible(
+                if !self.sol.is_convertible(
                     &condition_type,
                     &ResolvedType::Base(builder::BaseType::Boolean),
                 ) {
@@ -699,7 +698,7 @@ impl<'proj> Linter<'proj> {
 
                         for expression in case.get_expressions() {
                             let literal_type = self.lint_expression(expression, scope);
-                            if !self.proj.is_convertible(&choose_type, &literal_type) {
+                            if !self.sol.is_convertible(&choose_type, &literal_type) {
                                 self.diagnostic_error(
                                     format!(
                                         "Wrong Literal Type, got {}, expected {}",
@@ -720,7 +719,7 @@ impl<'proj> Linter<'proj> {
                 let dt = ret.as_ref().map(|r| self.lint_expression(r, scope));
                 match (&dt, &scope.return_type) {
                     (Some(returned), Some(expected))
-                        if !self.proj.is_convertible(returned, expected) =>
+                        if !self.sol.is_convertible(returned, expected) =>
                     {
                         self.diagnostic_error(
                             format!(
@@ -769,7 +768,7 @@ impl<'proj> Linter<'proj> {
                 // if let Some(base) = base {
                 //     if let Found::Yes(ancestor) = self.lint_class_usage(&base, range) {
                 //         let inherits = self.map_class_or(Found::No, |fc| {
-                //             self.proj.inherits_from(&project::Complex::Class(*fc), &ancestor)
+                //             self.proj.inherits_from(&solution::Complex::Class(*fc), &ancestor)
                 //         });
 
                 //         if let Found::Yes(false) = inherits {
@@ -841,7 +840,7 @@ impl<'proj> Linter<'proj> {
         &self,
         expressions: &Vec<parser::Expression>,
         scope: &Scope,
-    ) -> Vec<&'proj ResolvedType<'proj>> {
+    ) -> Vec<&'sol ResolvedType<'sol>> {
         expressions
             .iter()
             .map(|e| self.lint_expression(e, scope))
@@ -851,10 +850,10 @@ impl<'proj> Linter<'proj> {
     pub(super) fn lint_arguments_and_returns(
         &self,
         returns: &Option<builder::DataType>,
-        arguments: impl Iterator<Item = &'proj Arc<builder::Variable<'proj>>>,
+        arguments: impl Iterator<Item = &'sol Arc<builder::Variable<'sol>>>,
     ) -> (
-        HashMap<IString, &'proj Arc<builder::Variable<'proj>>>,
-        Option<&'proj ResolvedType<'proj>>,
+        HashMap<IString, &'sol Arc<builder::Variable<'sol>>>,
+        Option<&'sol ResolvedType<'sol>>,
     ) {
         let mut args = HashMap::new();
         for arg in arguments {
@@ -877,16 +876,16 @@ impl<'proj> Linter<'proj> {
 
     pub(super) fn lint_statements_in_block(
         &self,
-        statements: impl Iterator<Item = &'proj parser::Statement>,
+        statements: impl Iterator<Item = &'sol parser::Statement>,
         returns: &Option<builder::DataType>,
-        arguments: impl Iterator<Item = &'proj Arc<builder::Variable<'proj>>>,
+        arguments: impl Iterator<Item = &'sol Arc<builder::Variable<'sol>>>,
         body: &builder::Body,
     ) {
         let (args_map, return_type) = self.lint_arguments_and_returns(returns, arguments);
 
         let mut scope = Scope {
             return_type,
-            context: resolver::Context::new_for_body(self.proj, self.file, self.class),
+            context: resolver::Context::new_for_body(self.sol, self.file, self.class),
         };
         scope.context.body = Some(body);
         scope.context.arguments = Some(args_map);

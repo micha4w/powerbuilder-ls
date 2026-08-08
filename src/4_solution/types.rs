@@ -4,31 +4,31 @@ use std::sync::Arc;
 use crate::builder::{self, BuiltFile};
 
 #[derive(Debug, Clone, Copy)]
-pub struct ClassRef<'proj> {
+pub struct ClassRef<'sol> {
     /// `None` for builtins
-    pub file: Option<&'proj BuiltFile>,
-    pub class: &'proj Arc<builder::Class<'proj>>,
+    pub file: Option<&'sol BuiltFile>,
+    pub class: &'sol Arc<builder::Class<'sol>>,
 }
-impl<'proj> ClassRef<'proj> {
+impl<'sol> ClassRef<'sol> {
     pub fn new(
-        file: &'proj BuiltFile,
-        class: &'proj Arc<builder::Class<'proj>>,
-    ) -> ClassRef<'proj> {
+        file: &'sol BuiltFile,
+        class: &'sol Arc<builder::Class<'sol>>,
+    ) -> ClassRef<'sol> {
         ClassRef {
             file: Some(file),
             class,
         }
     }
 
-    pub fn builtin(class: &'proj Arc<builder::Class<'proj>>) -> ClassRef<'proj> {
+    pub fn builtin(class: &'sol Arc<builder::Class<'sol>>) -> ClassRef<'sol> {
         ClassRef { file: None, class }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Complex<'proj> {
-    Class(ClassRef<'proj>),
-    Enum(&'proj builder::Enum),
+pub enum Complex<'sol> {
+    Class(ClassRef<'sol>),
+    Enum(&'sol builder::Enum),
 }
 
 impl Complex<'_> {

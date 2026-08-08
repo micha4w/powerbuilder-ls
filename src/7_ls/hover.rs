@@ -1,7 +1,7 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser, project,
+    builder, parser, solution,
     resolver::{ResolvedLValue, ResolvedType},
     tokenizer,
     types::*,
@@ -62,7 +62,7 @@ impl PowerBuilderLS {
                         }
                         ResolvedLValue::Super(complex) | ResolvedLValue::Parent(complex) => {
                             let class_name = match complex {
-                                project::Complex::Class(fc) => fc.class.name(),
+                                solution::Complex::Class(fc) => fc.class.name(),
                                 _ => "<error>",
                             };
                             let var_name = match resolved {
@@ -129,11 +129,11 @@ impl PowerBuilderLS {
         let title;
         let mut description = None;
         match resolved {
-            ResolvedType::Complex(project::Complex::Class(fc)) => {
+            ResolvedType::Complex(solution::Complex::Class(fc)) => {
                 title = fc.class.to_string();
                 description = fc.class.help.cloned();
             }
-            ResolvedType::Complex(project::Complex::Enum(en)) => {
+            ResolvedType::Complex(solution::Complex::Enum(en)) => {
                 title = format!("type {} from enumerated", en.name);
                 description = en.help.clone();
             }

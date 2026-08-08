@@ -6,29 +6,29 @@ use super::{file_annotations::*, types::*, Context};
 use crate::{
     builder::{self, BuiltFile},
     parser,
-    project::{self, Project},
+    solution::{self, Solution},
     tokenizer,
     types::*,
 };
 
-pub struct Resolver<'proj> {
-    ctx: Context<'proj>,
+pub struct Resolver<'sol> {
+    ctx: Context<'sol>,
 }
 
-impl<'a, 'proj: 'a> Resolver<'proj> {
+impl<'a, 'sol: 'a> Resolver<'sol> {
     fn resolve_function_call(
         &'a self,
-        method_of: Option<project::ClassRef<'proj>>,
-        call: &'proj parser::FunctionCall,
-        arguments: &'a Vec<&'a ResolvedType<'proj>>,
-    ) -> (ResolvedType<'proj>, Option<ResolvedLValue<'proj>>) {
+        method_of: Option<solution::ClassRef<'sol>>,
+        call: &'sol parser::FunctionCall,
+        arguments: &'a Vec<&'a ResolvedType<'sol>>,
+    ) -> (ResolvedType<'sol>, Option<ResolvedLValue<'sol>>) {
         let iname = (&call.name.content).into();
 
         let resolve_return_value =
-            |slf: &Self, fc: Option<project::ClassRef<'proj>>, ret: &Option<builder::DataType>| {
+            |slf: &Self, fc: Option<solution::ClassRef<'sol>>, ret: &Option<builder::DataType>| {
                 ret.as_ref().map_or(ResolvedType::Void, |r| {
                     slf.ctx
-                        .proj
+                        .sol
                         .to_resolved_type(fc.and_then(|fc| fc.file), &r.powerscript_type)
                 })
             };
@@ -40,7 +40,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
             let mut events = self
                 .ctx
-                .proj
+                .sol
                 .events_in_class(class, EventFilter::WithName(&iname));
 
             match events.next() {
@@ -99,10 +99,10 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     fn resolve_datatype(
         &'a self,
-        data_type: &'proj parser::DataType,
-        annot: &'a mut AnnotationTree<'proj>,
-    ) -> &'a Annotation<'proj> {
-        let resolved_type = self.ctx.proj.to_resolved_type(
+        data_type: &'sol parser::DataType,
+        annot: &'a mut AnnotationTree<'sol>,
+    ) -> &'a Annotation<'sol> {
+        let resolved_type = self.ctx.sol.to_resolved_type(
             Some(self.ctx.file),
             &builder::PowerScriptType::new(data_type),
         );
@@ -118,9 +118,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub fn resolve_lvalue(
         &'a self,
-        lvalue: &'proj parser::LValue,
-        annot: &'a mut AnnotationTree<'proj>,
-    ) -> &'a Annotation<'proj> {
+        lvalue: &'sol parser::LValue,
+        annot: &'a mut AnnotationTree<'sol>,
+    ) -> &'a Annotation<'sol> {
         let annot = annot.add_empty_child(&lvalue.range);
 
         let resolved_type;
@@ -136,7 +136,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                 resolved_lvalue = self.ctx.class.map(ResolvedLValue::This);
 
                 resolved_type = self.ctx.class.map_or(ResolvedType::Unknown, |fc| {
-                    ResolvedType::Complex(project::Complex::Class(fc))
+                    ResolvedType::Complex(solution::Complex::Class(fc))
                 });
             }
             parser::LValueType::Super => {
@@ -154,13 +154,13 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                         Some(within) => self.ctx.find_class(&within.into()).as_option(),
                         None => {
                             // TODO(groups): is this correct?
-                            let window_object = project::Complex::Class(
-                                self.ctx.proj.builtin_class("windowobject"),
+                            let window_object = solution::Complex::Class(
+                                self.ctx.sol.builtin_class("windowobject"),
                             );
                             match self
                                 .ctx
-                                .proj
-                                .inherits_from(&project::Complex::Class(fc), &window_object)
+                                .sol
+                                .inherits_from(&solution::Complex::Class(fc), &window_object)
                             {
                                 Found::Yes(true) => Some(window_object),
                                 _ => None,
@@ -184,7 +184,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                             Some(ResolvedLValue::Variable(var.class_ref(), var.variable));
                         resolved_type = self
                             .ctx
-                            .proj
+                            .sol
                             .to_resolved_type(var.file, &var.variable.data_type.powerscript_type);
                     }
                     _ => not_found!(),
@@ -194,7 +194,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                 let lval_type = self.resolve_lvalue(lvalue, annot).resolved_type.clone();
 
                 match lval_type {
-                    ResolvedType::Complex(project::Complex::Class(class))
+                    ResolvedType::Complex(solution::Complex::Class(class))
                         if member.name.token_type != tokenizer::TokenType::INVALID =>
                     {
                         let vars = self.ctx.variables_in_class(
@@ -207,7 +207,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                                 resolved_lvalue = Some(ResolvedLValue::Member(fc, var));
                                 resolved_type = self
                                     .ctx
-                                    .proj
+                                    .sol
                                     .to_resolved_type(fc.file, &var.data_type.powerscript_type);
                             }
                             _ => not_found!(),
@@ -225,7 +225,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                 let args = self.resolve_expressions(&call.arguments, annot);
 
                 match lval_type {
-                    ResolvedType::Complex(project::Complex::Class(class)) => {
+                    ResolvedType::Complex(solution::Complex::Class(class)) => {
                         (resolved_type, resolved_lvalue) =
                             self.resolve_function_call(Some(class), call, &args);
                     }
@@ -256,9 +256,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     fn resolve_expression(
         &'a self,
-        expression: &'proj parser::Expression,
-        annot: &'a mut AnnotationTree<'proj>,
-    ) -> &'a Annotation<'proj> {
+        expression: &'sol parser::Expression,
+        annot: &'a mut AnnotationTree<'sol>,
+    ) -> &'a Annotation<'sol> {
         if let parser::ExpressionType::LValue(lvalue) = &expression.expression_type {
             return &self.resolve_lvalue(lvalue, annot);
         }
@@ -290,15 +290,15 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                 tokenizer::Literal::ENUM => {
                     if let Some(name) = self
                         .ctx
-                        .proj
+                        .sol
                         .builtins
                         .borrow_dependent()
                         .enums_value_cache
                         .get(&(&literal.content).into())
                     {
-                        ResolvedType::Complex(project::Complex::Enum(
+                        ResolvedType::Complex(solution::Complex::Enum(
                             self.ctx
-                                .proj
+                                .sol
                                 .builtins
                                 .borrow_dependent()
                                 .enums
@@ -326,7 +326,7 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                     Some(&child_type) => {
                         inner = Some(child_type);
                         for other_type in types {
-                            if !self.ctx.proj.is_convertible(child_type, other_type) {
+                            if !self.ctx.sol.is_convertible(child_type, other_type) {
                                 inner = None;
                                 break;
                             }
@@ -421,9 +421,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     fn resolve_expressions(
         &'a self,
-        expression: impl IntoIterator<Item = &'proj parser::Expression>,
-        annot: &'a mut AnnotationTree<'proj>,
-    ) -> Vec<&'a ResolvedType<'proj>> {
+        expression: impl IntoIterator<Item = &'sol parser::Expression>,
+        annot: &'a mut AnnotationTree<'sol>,
+    ) -> Vec<&'a ResolvedType<'sol>> {
         let prev = annot.children.len();
 
         for expr in expression {
@@ -440,8 +440,8 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     fn resolve_statement(
         &'a self,
-        statement: &'proj parser::Statement,
-        annot: &'a mut AnnotationTree<'proj>,
+        statement: &'sol parser::Statement,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         match &statement.statement_type {
             parser::StatementType::Expression(expression) => {
@@ -560,8 +560,8 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub(super) fn resolve_statements(
         &'a self,
-        statements: &'proj Vec<parser::Statement>,
-        annot: &'a mut AnnotationTree<'proj>,
+        statements: &'sol Vec<parser::Statement>,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         for statement in statements {
             self.resolve_statement(statement, annot);
@@ -570,9 +570,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub fn resolve_callable_header(
         &'a self,
-        return_type: Option<&'proj parser::DataType>,
-        arguments: impl Iterator<Item = &'proj parser::Variable>,
-        annot: &'a mut AnnotationTree<'proj>,
+        return_type: Option<&'sol parser::DataType>,
+        arguments: impl Iterator<Item = &'sol parser::Variable>,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         if let Some(ret) = return_type {
             self.resolve_datatype(&ret, annot);
@@ -585,9 +585,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub fn resolve_variable_declaration(
         &'a self,
-        variable: &'proj builder::Variable,
+        variable: &'sol builder::Variable,
         is_scoped: bool,
-        annot: &'a mut AnnotationTree<'proj>,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         let mut annotation = self
             .resolve_datatype(&variable.parsed().data_type, annot)
@@ -607,9 +607,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub fn resolve_function_header(
         &'a self,
-        header: &'proj builder::FunctionHeader,
+        header: &'sol builder::FunctionHeader,
         is_external: bool,
-        annot: &'a mut AnnotationTree<'proj>,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         self.resolve_callable_header(
             header.returns.as_ref().map(|r| r.parsed),
@@ -642,8 +642,8 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
 
     pub fn resolve_event_header(
         &'a self,
-        header: &'proj builder::EventHeader,
-        annot: &'a mut AnnotationTree<'proj>,
+        header: &'sol builder::EventHeader,
+        annot: &'a mut AnnotationTree<'sol>,
     ) {
         if let parser::EventType::User(ret, args) = &header.parsed.event_type {
             self.resolve_callable_header(ret.as_ref(), args.iter().map(|arg| &arg.variable), annot);
@@ -663,12 +663,12 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
         }
     }
 
-    pub fn resolve_file(proj: &'proj Project, file: &'proj BuiltFile) -> FileAnnotations<'proj> {
+    pub fn resolve_file(sol: &'sol Solution, file: &'sol BuiltFile) -> FileAnnotations<'sol> {
         assert!(file.inner().bodies_processed, "resolve_file should only be called on files that have not have had their bodies processed");
 
         let mut annotator = Resolver {
             ctx: Context {
-                proj,
+                sol,
                 file,
 
                 class: None,
@@ -703,13 +703,13 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                     // TODO(globals): ...
                 }
                 builder::TopLevelType::DatatypeDecl(decl) => {
-                    let fc = project::ClassRef::new(file, &decl.class);
+                    let fc = solution::ClassRef::new(file, &decl.class);
                     annotator.ctx.class = Some(fc);
 
                     annot.add_child(
                         &decl.class.parsed.class.name.range,
                         Annotation {
-                            resolved_type: ResolvedType::Complex(project::Complex::Class(fc)),
+                            resolved_type: ResolvedType::Complex(solution::Complex::Class(fc)),
                             lvalue: None,
                         },
                     );
@@ -774,9 +774,9 @@ impl<'a, 'proj: 'a> Resolver<'proj> {
                         .classes
                         .get(&(&on.header.class.name.content).into())
                         .map_or(ResolvedType::Unknown, |class| {
-                            ResolvedType::Complex(project::Complex::Class(project::ClassRef::new(
-                                file, class,
-                            )))
+                            ResolvedType::Complex(solution::Complex::Class(
+                                solution::ClassRef::new(file, class),
+                            ))
                         });
                     annot.add_child(
                         &on.header.class.range,

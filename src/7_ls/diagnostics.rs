@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types;
 
-use crate::{builder::File, linter::Linter, types::*};
+use crate::{linter::Linter, types::*};
 use super::ls::{PowerBuilderLS, PowerBuilderLSInner};
 
 impl PowerBuilderLS {
@@ -12,7 +12,7 @@ impl PowerBuilderLS {
                 Ok(Some(items)) => {
                     eprintln!("Sending diagnostics");
                     self.client
-                        .publish_diagnostics(uri.clone(), items, None)
+                        .publish_diagnostics((**uri).clone(), items, None)
                         .await;
                 }
                 Ok(None) => {
@@ -36,9 +36,9 @@ impl PowerBuilderLSInner {
         &self,
         uri: &Url,
     ) -> anyhow::Result<Option<Vec<lsp_types::Diagnostic>>> {
-        self.proj.with_dependent(|proj, dep| {
-            let Some(File::Built(file)) = proj.files.get(uri) else {
-                eprintln!("[WARN] File not found or not built");
+        self.sol.with_dependent(|sol, dep| {
+            let Some(file) = sol.files.get(uri) else {
+                eprintln!("[WARN] File not found");
                 return Ok(None);
             };
             let Some(annotations) = dep.annotations.get(uri) else {
@@ -46,7 +46,7 @@ impl PowerBuilderLSInner {
                 return Ok(None);
             };
 
-            let mut linter = Linter::new(proj, file, annotations);
+            let mut linter = Linter::new(sol, file, annotations);
             linter.lint_file();
 
             let items = Iterator::chain(
