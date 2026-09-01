@@ -1,3 +1,5 @@
+use tracing::{debug, debug_span};
+
 use super::types::*;
 use crate::{parser, tokenizer, types::*};
 
@@ -135,7 +137,7 @@ impl NodeSearcher for parser::LValue {
         match &self.lvalue_type {
             // TODO make these be variable accesses?
             parser::LValueType::This | parser::LValueType::Super | parser::LValueType::Parent => {}
-            parser::LValueType::Variable(_) => {},
+            parser::LValueType::Variable(_) => {}
             parser::LValueType::Function(call) => {
                 call.arguments.search(pos, nodes)?;
             }
@@ -401,6 +403,8 @@ pub trait NodeGetter {
 impl NodeGetter for TopLevelType<'_> {
     // TODO: make this return not only the parsed but also the built values
     fn get_nodes_at(&self, pos: &Position) -> Vec<Node<'_>> {
+        let _e = debug_span!("node_search", pos = %pos).entered();
+
         let mut nodes = vec![];
 
         match &self {
@@ -449,6 +453,10 @@ impl NodeGetter for TopLevelType<'_> {
                 decl.class.parsed.functions.search(pos, &mut nodes);
                 decl.class.parsed.variables.search(pos, &mut nodes);
             }
+        }
+
+        for node in &nodes {
+            debug!(%node, range = %node.get_range(), "found node");
         }
 
         nodes

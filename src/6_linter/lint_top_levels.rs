@@ -1,9 +1,12 @@
 use std::{collections::HashMap, ptr, sync::Arc};
 
+use tracing::info_span;
+
 use super::linter::{Linter, Scope};
 use crate::{
-    builder, solution,
+    builder,
     resolver::{self, ResolvedType},
+    solution,
     types::*,
 };
 
@@ -184,7 +187,11 @@ impl<'sol> Linter<'sol> {
         }
     }
 
-    fn require_class(&self, top_level_type: String, range: Range) -> Option<solution::ClassRef<'_>> {
+    fn require_class(
+        &self,
+        top_level_type: String,
+        range: Range,
+    ) -> Option<solution::ClassRef<'_>> {
         if self.class.is_none() {
             self.diagnostic_error(
                 top_level_type + " have to come after the Type Definition that they refer to",
@@ -426,6 +433,8 @@ impl<'sol> Linter<'sol> {
     }
 
     pub fn lint_file(&mut self) {
+        let _e = info_span!("linter.file", url = %self.file.parsed().meta.uri).entered();
+
         for top_level in &self.file.inner().top_levels {
             self.lint_top_level(top_level);
         }

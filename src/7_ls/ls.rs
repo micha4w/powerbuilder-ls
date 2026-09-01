@@ -34,9 +34,11 @@ macro_rules! lock_inner_if_initialized {
     };
 }
 pub(super) use lock_inner_if_initialized;
+use tracing::{debug, info_span, warn};
 
 impl FileMeta {
     pub fn apply_pending_changes(&mut self, all_changes: Vec<Vec<TextDocumentContentChangeEvent>>) {
+        debug!(uri=%self.uri, changes=all_changes.len(), "applying pending changes");
         for changes in all_changes {
             for change in changes {
                 match change.range {
@@ -101,46 +103,50 @@ impl PowerBuilderLS {
         inner: &mut PowerBuilderLSInner,
         pre_load_files: impl FnOnce(&mut solution::Solution),
     ) {
-        inner.change_timeout = None;
-        let pending_changes = replace(&mut inner.pending_changes, HashMap::new());
-
         let mut errs = Vec::new();
-        replace_with(&mut inner.sol, |cell| {
-            let mut sol = cell.into_owner();
+        info_span!("ls.rebuild").in_scope(|| {
+            inner.change_timeout = None;
+            let pending_changes = replace(&mut inner.pending_changes, HashMap::new());
 
-            pre_load_files(&mut sol);
+            replace_with(&mut inner.sol, |cell| {
+                let mut sol = cell.into_owner();
 
-            (sol, errs) = Solution::rebuilt(
-                sol,
-                pending_changes
-                    .into_iter()
-                    .map(|(url, changes)| {
-                        (url, |meta: &mut FileMeta| {
-                            meta.apply_pending_changes(changes);
+                pre_load_files(&mut sol);
+
+                (sol, errs) = Solution::rebuilt(
+                    sol,
+                    pending_changes
+                        .into_iter()
+                        .map(|(url, changes)| {
+                            (url, |meta: &mut FileMeta| {
+                                meta.apply_pending_changes(changes);
+                            })
                         })
-                    })
-                    .collect(),
-            );
-
-            for (url, _) in &inner.opened_files {
-                sol.open_file(url);
-            }
-
-            SolutionCell::new(sol, |sol| {
-                let mut dep = SolutionDependent::default();
+                        .collect(),
+                );
 
                 for (url, _) in &inner.opened_files {
-                    let Some(file) = sol.files.get(url) else {
-                        eprintln!("[WARN] Opened file not found in solution: {:?}", url);
-                        continue;
-                    };
-
-                    dep.annotations
-                        .insert(url.clone(), Resolver::resolve_file(sol, file));
+                    debug!(%url, "opening previously opened file");
+                    sol.open_file(url);
                 }
 
-                dep
-            })
+                SolutionCell::new(sol, |sol| {
+                    let mut dep = SolutionDependent::default();
+
+                    for (url, _) in &inner.opened_files {
+                        let Some(file) = sol.files.get(url) else {
+                            warn!(%url, "opened file not found in solution");
+                            continue;
+                        };
+
+                        debug!(%url, "resolving previously opened file");
+                        dep.annotations
+                            .insert(url.clone(), Resolver::resolve_file(sol, file));
+                    }
+
+                    dep
+                })
+            });
         });
 
         for err in errs {

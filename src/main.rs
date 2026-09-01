@@ -20,21 +20,26 @@ mod linter;
 #[path="7_ls/mod.rs"]
 mod ls;
 
-use std::{panic::PanicHookInfo, time::Duration};
+use std::{panic::{self, PanicHookInfo}, process, time::Duration};
 
 use ls::PowerBuilderLS;
 use tokio::time::sleep;
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 fn panic_hook(info: &PanicHookInfo) {
     eprintln!("{}", info);
-    if let Err(err) = std::fs::write("/home/micha4w/Code/Rust/powerbuilder-ls/powerbuilder-log.txt", info.to_string()) {
-        eprintln!("{}", err);
-    };
+    process::exit(1)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    std::panic::set_hook(Box::new(panic_hook));
+    panic::set_hook(Box::new(panic_hook));
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(FmtSpan::CLOSE)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .init();
 
     // sleep(Duration::from_secs(10)).await;
 

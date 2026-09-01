@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::warn;
+
 use crate::{
     builder::{self},
     resolver::{self, FileAnnotations},
@@ -32,12 +34,12 @@ impl<'sol> LSContext<'sol> {
 
         let Some(file) = sol.files.get(&uri) else {
             // TODO(errors): return error here
-            eprintln!("[WARN] File not found or not built");
+            warn!(%uri, "file not found");
             return None;
         };
         let Some(annotations) = dep.annotations.get(&uri) else {
             // TODO(errors): return error here
-            eprintln!("[WARN] Annotations not found");
+            warn!(%uri, "annotations not found");
             return None;
         };
 

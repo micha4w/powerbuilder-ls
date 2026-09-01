@@ -5,6 +5,7 @@ use std::{
 
 use prost::{bytes::Bytes, Message as _};
 use self_cell::self_cell;
+use tracing::{info, info_span};
 
 use super::{
     powerbuilder_proto::{self, variable},
@@ -28,6 +29,8 @@ pub struct BuiltinsParsed {
 
 impl BuiltinsParsed {
     pub fn new() -> Self {
+        let _e = info_span!("builtins.load").entered();
+
         let functions = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
             concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/functions.pb")
         )))
@@ -38,18 +41,20 @@ impl BuiltinsParsed {
         )))
         .expect("Failed to load builtins");
 
-        BuiltinsParsed {
-            functions: functions
-                .function
-                .into_iter()
-                .map(|func| Self::parse_proto_function(func))
-                .collect(),
-            classes: classes
-                .class
-                .into_iter()
-                .map(|class| Self::parse_proto_class(class))
-                .collect(),
-        }
+        let functions: Vec<_> = functions
+            .function
+            .into_iter()
+            .map(|func| Self::parse_proto_function(func))
+            .collect();
+        let classes: Vec<_> = classes
+            .class
+            .into_iter()
+            .map(|class| Self::parse_proto_class(class))
+            .collect();
+
+        info!(functions = %functions.len(), classes = %classes.len(), "loaded builtins");
+
+        BuiltinsParsed { functions, classes }
     }
 
     fn empty() -> Range {

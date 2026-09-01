@@ -8,6 +8,7 @@ use std::{
 use anyhow::Context;
 use encoding_rs_io::DecodeReaderBytes;
 use ropey::Rope;
+use tracing::{debug, debug_span, error, info};
 
 use super::{
     node_searcher::{Node, NodeGetter},
@@ -41,18 +42,16 @@ pub struct ParsedFile {
 
 impl ParsedFile {
     pub fn new(uri: Arc<Url>, content: Rope) -> ParsedFile {
-        let top_levels;
-        let parse_diagnostics;
+        let (top_levels, parse_diagnostics);
         {
-            let start = Instant::now();
+            let _e = debug_span!("parse.file", %uri).entered();
+
             let mut parser = Parser::new_file(content.chars(), uri.clone());
             top_levels = parser.parse_tokens();
             parse_diagnostics = parser.get_syntax_errors();
-            eprintln!(
-                "Parsed File {:?} in {:?}",
-                uri.path_segments().unwrap().last(),
-                start.elapsed()
-            );
+            if !parse_diagnostics.is_empty() {
+                info!(%uri, diagnostics=parse_diagnostics.len(), "parsing resulted in errors");
+            }
         }
 
         ParsedFile {
@@ -67,15 +66,14 @@ impl ParsedFile {
 
     pub fn new_from_filesystem(uri: Arc<Url>) -> anyhow::Result<ParsedFile> {
         let decoded_path = uri_to_path(&uri)?;
-        eprintln!("Reading File {:?}", decoded_path);
 
+        debug!(?decoded_path, "reading file from filesystem");
         let content = Rope::from_reader(DecodeReaderBytes::new(
             fs::File::open(&decoded_path).context("Failed to open file")?,
         ))
         .context("Failed to read file")?;
-        let parsed = ParsedFile::new(uri, content);
 
-        Ok(parsed)
+        Ok(ParsedFile::new(uri, content))
     }
 }
 
@@ -94,6 +92,9 @@ pub struct BuiltFileInner<'pars> {
 
 impl BuiltFileInner<'_> {
     pub(super) fn fill_caches(&mut self) {
+        assert!(self.classes.is_empty());
+        assert!(self.variables.is_empty());
+
         for top_level in &self.top_levels {
             match &top_level.top_level_type {
                 TopLevelType::ForwardDecl(_, vars) // TODO(forward): classes
@@ -113,6 +114,12 @@ impl BuiltFileInner<'_> {
                 TopLevelType::OnBody(_) => {}
             }
         }
+
+        debug!(
+            classes = self.classes.len(),
+            variables = self.variables.len(),
+            "filled caches"
+        );
     }
 
     pub fn get_nodes_at<'a>(&'a self, pos: &Position) -> Option<(&'a TopLevel<'a>, Vec<Node<'a>>)> {

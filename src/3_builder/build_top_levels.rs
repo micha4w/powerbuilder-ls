@@ -7,6 +7,8 @@ use std::{
     sync::Arc,
 };
 
+use tracing::{debug_span, info_span};
+
 use super::{file::BuiltFileInner, types::*, Builder, BuiltFile, ParsedFile};
 use crate::{parser, types::DefinitionDeclaration};
 
@@ -59,6 +61,8 @@ impl<'pars> Builder {
     }
 
     pub fn build_file_shallow(&mut self, parsed: ParsedFile) -> BuiltFile {
+        let _e = debug_span!("build.shallow", %parsed.meta.uri).entered();
+
         BuiltFile::new(parsed, |parsed| {
             let mut top_levels: Vec<TopLevel> = parsed
                 .top_levels
@@ -308,7 +312,9 @@ impl<'pars> Builder {
     }
 
     pub fn build_file_bodies(&mut self, file: &mut BuiltFile) {
-        file.with_dependent_mut(|_, built| {
+        file.with_dependent_mut(|parsed, built| {
+            let _e = info_span!("build.bodies", %parsed.meta.uri).entered();
+
             if built.bodies_processed {
                 return;
             }

@@ -1,7 +1,8 @@
 use tower_lsp::lsp_types;
+use tracing::{info, warn};
 
-use crate::{linter::Linter, types::*};
 use super::ls::{PowerBuilderLS, PowerBuilderLSInner};
+use crate::{linter::Linter, types::*};
 
 impl PowerBuilderLS {
     pub(super) fn diagnostics_capabilities(&self, _: &mut lsp_types::ServerCapabilities) {}
@@ -10,14 +11,12 @@ impl PowerBuilderLS {
         for (uri, _) in &inner.opened_files {
             match inner.build_file_diagnostics(&uri) {
                 Ok(Some(items)) => {
-                    eprintln!("Sending diagnostics");
+                    info!("sending diagnostics");
                     self.client
                         .publish_diagnostics((**uri).clone(), items, None)
                         .await;
                 }
-                Ok(None) => {
-                    eprintln!("Skipping send diagnostics because they didn't change");
-                }
+                Ok(None) => {}
                 Err(err) => {
                     self.client
                         .log_message(
@@ -38,11 +37,11 @@ impl PowerBuilderLSInner {
     ) -> anyhow::Result<Option<Vec<lsp_types::Diagnostic>>> {
         self.sol.with_dependent(|sol, dep| {
             let Some(file) = sol.files.get(uri) else {
-                eprintln!("[WARN] File not found");
+                warn!(%uri, "file not found when sending diagnostics");
                 return Ok(None);
             };
             let Some(annotations) = dep.annotations.get(uri) else {
-                eprintln!("[WARN] Annotations not found");
+                warn!(%uri, "annotations not found when sending diagnostics");
                 return Ok(None);
             };
 

@@ -15,6 +15,7 @@ use std::{
 use anyhow::{anyhow, bail, Context};
 
 use encoding_rs_io::DecodeReaderBytes;
+use tracing::{debug, error, info, info_span, span, warn};
 
 use crate::{
     builder::{self, Builder, BuiltFile, FileMeta, ParsedFile},
@@ -36,7 +37,7 @@ pub struct Project {
 impl Project {
     fn new(folder: &Url, file: &str) -> anyhow::Result<Project> {
         let path = url_join_path(folder.clone(), file);
-        eprintln!("Adding project at: {}", path);
+        let _e = info_span!("project.load", %path).entered();
 
         let mut content = String::new();
         DecodeReaderBytes::new(fs::File::open(&uri_to_path(&path)?)?)
@@ -56,7 +57,7 @@ impl Project {
 
         for lib in libs.children().filter(roxmltree::Node::is_element) {
             if !lib.has_tag_name("Library") {
-                eprintln!("Warning: Ignoring unknown tag {}", &content[lib.range()],);
+                warn!(tag = &content[lib.range()], "ignoring unknown tag");
                 continue;
             }
 
@@ -97,6 +98,11 @@ impl Project {
             &(entry_lib.to_string() + "/" + app_name + ".sra"),
         );
 
+        info!(
+            %app_uri,
+            "application file",
+        );
+
         Ok(Project {
             application: Arc::new(app_uri),
             libraries,
@@ -119,18 +125,22 @@ pub struct Solution {
 
 impl<'sol> Solution {
     pub fn new(folder: &Url) -> anyhow::Result<Solution> {
+        let _e = info_span!("solution.load", %folder).entered();
+
         let mut solution = None;
         for file in std::fs::read_dir(uri_to_path(&folder)?)? {
             let path = file?.path();
             if path.extension().is_some_and(|ext| ext == "pbsln") {
                 if solution.is_some() {
-                    eprintln!(
-                        "Warning: Found multiple *.pbsln in {} (ignoring {})",
-                        folder,
-                        path.display()
+                    warn!(
+                        ignored = ?path,
+                        "found another *.pbsln",
                     );
                 } else {
-                    eprintln!("Found Solution file: {}", path.display());
+                    info!(
+                        solution = ?path,
+                        "found solution",
+                    );
                     solution = Some(path);
                 }
             }
@@ -161,20 +171,18 @@ impl<'sol> Solution {
             );
         };
 
-        let mut projects = BTreeMap::new();
         let default_path = default_path.replace('\\', "/");
         let mut default_arc = None;
 
-        eprintln!("Want default path {}", default_path);
+        info!(
+            default = %default_path,
+            "default project",
+        );
 
         let mut projects = BTreeMap::new();
         for proj in projs.children().filter(roxmltree::Node::is_element) {
             if !proj.has_tag_name("Project") {
-                eprintln!(
-                    "Warning: Ignoring unknown tag {} in {}",
-                    &content[proj.range()],
-                    solution.display()
-                );
+                warn!(tag = &content[proj.range()], "unkwon tag");
                 continue;
             }
 
@@ -187,21 +195,20 @@ impl<'sol> Solution {
             };
 
             let proj_path = proj_path.replace('\\', "/");
-            eprintln!("Found project path {}", proj_path);
 
             match Project::new(&folder, &proj_path) {
                 Ok(project) => {
                     let uri = Arc::new(url_join_path(folder.clone(), &proj_path));
 
                     if proj_path.eq_ignore_ascii_case(&default_path) {
-                        eprintln!("Default project found");
+                        info!("default project found in list");
                         default_arc = Some(uri.clone());
                     }
 
                     projects.insert(uri, project);
                 }
-                Err(e) => {
-                    eprintln!("Warning: Could not load project at {}: {}", proj_path, e);
+                Err(err) => {
+                    error!(%err, ?proj_path, "failed to load project");
                 }
             };
         }
@@ -234,6 +241,8 @@ impl<'sol> Solution {
         mut old: Solution,
         mut pending_changes: HashMap<Arc<Url>, impl FnOnce(&mut FileMeta)>,
     ) -> (Solution, Vec<anyhow::Error>) {
+        let _e = info_span!("solution.rebuild").entered();
+
         let mut new = Solution {
             files: HashMap::new(),
             ..old
@@ -260,7 +269,11 @@ impl<'sol> Solution {
                         uri.set_path(&path.to_string_lossy());
                         let uri = Arc::new(uri);
 
+                        debug!(%uri, "found file with pb extension");
+
                         let file = if let Some(mut old_file) = old.files.remove(&uri) {
+                            debug!("file already loaded, reusing");
+
                             // TODO(proj): currently assuming no change happened except if it was opened in editor (so changes by scripts are ignored), do hashing or timesamping?
                             if let Some(changes) = pending_changes.remove(&uri) {
                                 let mut meta = old_file.into_owner().meta;

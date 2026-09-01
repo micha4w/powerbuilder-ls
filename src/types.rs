@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use tracing::warn;
 // pub use parking_lot::{
 //     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 // };
@@ -34,7 +35,7 @@ impl<T: Sized> Mutex<T> {
             match tokio::time::timeout(Duration::from_secs(5), self.m.lock()).await {
                 Ok(lock) => return lock,
                 Err(_) => {
-                    eprintln!("Possible deadlock: {}!!", Backtrace::capture().to_string());
+                    warn!(backtrace=Backtrace::capture().to_string(), "possible deadlock");
                 }
             }
         }
