@@ -1,0 +1,112 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-extension-vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
+
+      - name: Setup
+        run: npm ci
+        working-directory: extensions/vscode
+
+      - name: Version
+        working-directory: extensions/vscode
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+
+      - name: Package
+        run: npm run vscode:package
+        working-directory: extensions/vscode
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: vscode-extension
+          path: extensions/vscode/*.vsix
+          if-no-files-found: error
+
+  build-ls:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - extension: .exe
+            rust: x86_64-pc-windows-gnu
+            ts: x64-win32
+          - extension: ""
+            rust: x86_64-unknown-linux-musl
+            ts: x64-linux
+          - extension: ""
+            rust: aarch64-apple-darwin
+            ts: arm64-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install
+        run: pip install ziglang cargo-zigbuild
+
+      - name: Setup
+        run: rustup target add ${{ matrix.target.rust }}
+
+      - name: Build
+        run: cargo zigbuild --target ${{ matrix.target.rust }} --release
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Rename
+        run: mv "target/${{ matrix.target.rust }}/release/powerbuilder-ls${{ matrix.target.extension }}" "powerbuilder-ls-${{ matrix.target.ts }}${{ matrix.target.extension }}"
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-${{ matrix.target.ts }}
+          path: powerbuilder-ls-${{ matrix.target.ts }}${{ matrix.target.extension }}
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - build-extension-vscode
+      - build-ls
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: release/*
+          generate_release_notes: true
+
