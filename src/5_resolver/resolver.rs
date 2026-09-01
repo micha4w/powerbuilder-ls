@@ -553,6 +553,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
             parser::StatementType::Label(_) => {}
             parser::StatementType::Exit => {}
             parser::StatementType::Continue => {}
+            parser::StatementType::Halt => {}
             parser::StatementType::SQL(_) => {}
             parser::StatementType::Error => {}
         };
@@ -759,11 +760,21 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                     annotator.resolve_statements(&func.parsed.statements, &mut annot);
                 }
                 builder::TopLevelType::EventBody(event) => {
+                    let mut header = &event.header;
+                    // TODO(event): load types from base class if no definition found in current class
+
+                    if let parser::EventType::DeclaredElseWhere = header.parsed.event_type {
+                        annotator
+                            .ctx
+                            .class
+                            .and_then(|fc| fc.class.events.get(&event.header.iname()))
+                            .and_then(|ev| ev.declaration.as_ref())
+                            .map(|decl| header = &decl.header);
+                    }
+
                     annotator.resolve_event_header(&event.header, &mut annot);
 
-                    annotator
-                        .ctx
-                        .load_body(&event.body, &event.header.arguments);
+                    annotator.ctx.load_body(&event.body, &header.arguments);
                     annotator.resolve_statements(&event.parsed.statements, &mut annot);
                 }
                 builder::TopLevelType::OnBody(on) => {

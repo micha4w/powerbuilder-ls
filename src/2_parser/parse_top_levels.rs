@@ -5,7 +5,7 @@ use crate::{
 };
 
 impl<I: Iterator<Item = char>> Parser<I> {
-    fn parse_descriptors(&mut self) -> EOFOrParserResult<Vec<Descriptor>> {
+    pub fn parse_descriptors(&mut self) -> EOFOrParserResult<Vec<Descriptor>> {
         let mut descriptors = Vec::new();
         loop {
             if !self
@@ -194,7 +194,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     );
                 }
 
-                EventType::Predefined
+                EventType::DeclaredElseWhere
             }
         };
 
@@ -629,6 +629,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             None
         };
 
+        // TODO(diagnostics): autoinstantiate and native cannot be used together
         let autoinstantiate = if err.is_none() {
             self.optional(TokenType::Keyword(tokenizer::Keyword::AUTOINSTANTIATE))?
         } else {
@@ -646,6 +647,11 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 Err(e) => err = Some(e),
             }
         };
+
+        let mut descriptors = None;
+        if err.is_none() {
+            (descriptors, err) = self.parse_descriptors()?.split();
+        }
 
         if err.is_none() {
             self.expect_newline()?.ok();
@@ -717,6 +723,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     within,
                     autoinstantiate,
                     native,
+                    descriptors: descriptors.unwrap_or_default(),
                 },
                 variables,
                 events,
@@ -1162,6 +1169,9 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 TokenType::Keyword(tokenizer::Keyword::TYPE) => self.parse_datatype_decl(),
                 TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
                     self.parse_scoped_variables_decl()
+                }
+                TokenType::Keyword(tokenizer::Keyword::FUNCTION) => {
+                    self.parse_function()
                 }
                 _ => self.parse_scoped_variable_decl(),
             },

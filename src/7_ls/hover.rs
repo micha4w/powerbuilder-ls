@@ -145,8 +145,12 @@ impl PowerBuilderLS {
                 title = format!("({})[]", inner_title);
                 description = inner_description;
             }
-            ResolvedType::Void => unreachable!(),
-            ResolvedType::Unknown => unreachable!(),
+            ResolvedType::Void => {
+                title = "<void>".to_string();
+            }
+            ResolvedType::Unknown => {
+                title = "<unknown>".to_string();
+            }
         };
         (title, description)
     }

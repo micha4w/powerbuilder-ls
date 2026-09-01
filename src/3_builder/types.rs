@@ -51,7 +51,7 @@ impl BaseType {
             "blob" => Some(BaseType::Blob(curly_num)),
             "boolean" => Some(BaseType::Boolean),
             "byte" => Some(BaseType::Byte),
-            "char" => Some(BaseType::Char),
+            "char" | "character" => Some(BaseType::Char),
             "date" => Some(BaseType::Date),
             "datetime" => Some(BaseType::Datetime),
             "dec" | "decimal" => Some(BaseType::Decimal(curly_num)),

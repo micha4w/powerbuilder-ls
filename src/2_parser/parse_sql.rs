@@ -116,7 +116,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     .optional(TokenType::Keyword(tokenizer::Keyword::USING))?
                     .is_some()
             {
-                let trans = self.id_or_invalid(err, range)?;
+                let trans = self.id_or_invalid(err, Some(range))?;
                 Some(LValue {
                     range: trans.range.clone(),
                     lvalue_type: LValueType::Variable(VariableAccess {
@@ -133,7 +133,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     fn parse_sql_open(&mut self) -> EOFOr<ParseResult<Statement>> {
         let mut range = self.tokens.next()?.range;
         let err = None;
-        let cursor = self.id_or_invalid(&err, &mut range)?;
+        let cursor = self.id_or_invalid(&err, Some(&mut range))?;
 
         Some(ParseResult::new(
             Statement {
@@ -147,7 +147,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     fn parse_sql_close(&mut self) -> EOFOr<ParseResult<Statement>> {
         let mut range = self.tokens.next()?.range;
         let err = None;
-        let cursor = self.id_or_invalid(&err, &mut range)?;
+        let cursor = self.id_or_invalid(&err, Some(&mut range))?;
 
         Some(ParseResult::new(
             Statement {
@@ -204,7 +204,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut range = self.tokens.next()?.range;
         let mut err = None;
 
-        let name = self.id_or_invalid(&err, &mut range)?;
+        let name = self.id_or_invalid(&err, Some(&mut range))?;
 
         match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::CURSOR) => {
@@ -230,7 +230,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             TokenType::Keyword(tokenizer::Keyword::PROCEDURE) => {
                 self.tokens.next()?;
                 ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FOR))?);
-                let stored_procedure_name = self.id_or_invalid(&err, &mut range)?;
+                let stored_procedure_name = self.id_or_invalid(&err, Some(&mut range))?;
 
                 let mut params = Vec::new();
                 loop {
@@ -239,7 +239,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     };
                     range.merge(&at.range);
 
-                    let param_name = self.id_or_invalid(&err, &mut range)?;
+                    let param_name = self.id_or_invalid(&err, Some(&mut range))?;
 
                     if err.is_none() {
                         match self.expect(TokenType::Operator(tokenizer::Operator::EQ))? {
@@ -298,7 +298,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
     fn parse_sql_execute(&mut self) -> EOFOr<ParseResult<Statement>> {
         let mut range = self.tokens.next()?.range;
         let err = None;
-        let procedure = self.id_or_invalid(&err, &mut range)?;
+        let procedure = self.id_or_invalid(&err, Some(&mut range))?;
 
         Some(ParseResult::new(
             Statement {
@@ -313,7 +313,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut range = self.tokens.next()?.range;
         let mut err = None;
 
-        let cursor_or_procedure = self.id_or_invalid(&err, &mut range)?;
+        let cursor_or_procedure = self.id_or_invalid(&err, Some(&mut range))?;
         let into = ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
         range.merge(&into.range);
 
@@ -347,7 +347,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut err = None;
 
         ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?);
-        let table = self.id_or_invalid(&err, &mut range)?;
+        let table = self.id_or_invalid(&err, Some(&mut range))?;
 
         ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::WHERE))?);
 
@@ -356,7 +356,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             .is_some()
         {
             ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
-            let cursor = self.id_or_invalid(&err, &mut range)?;
+            let cursor = self.id_or_invalid(&err, Some(&mut range))?;
 
             Some(ParseResult::new(
                 Statement {
@@ -422,7 +422,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         range.merge(&ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::FROM))?).range);
         let mut err = None;
-        let table = self.id_or_invalid(&err, &mut range)?;
+        let table = self.id_or_invalid(&err, Some(&mut range))?;
 
         let clause = if err.is_none()
             && self
@@ -461,7 +461,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::INTO))?);
 
-        let table = self.id_or_invalid(&err, &mut range)?;
+        let table = self.id_or_invalid(&err, Some(&mut range))?;
         if let Some(err) = err {
             return Some(Err((err, None)));
         }
@@ -535,7 +535,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let mut range = self.tokens.next()?.range;
         let mut err = None;
 
-        let table = self.id_or_invalid(&err, &mut range)?;
+        let table = self.id_or_invalid(&err, Some(&mut range))?;
 
         ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::SET))?);
         let set = ret_res!(self.parse_expression(true)?);
@@ -546,7 +546,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             .is_some()
         {
             ret_res!(self.expect(TokenType::Keyword(tokenizer::Keyword::OF))?);
-            let cursor = self.id_or_invalid(&err, &mut range)?;
+            let cursor = self.id_or_invalid(&err, Some(&mut range))?;
 
             Some(ParseResult::new(
                 Statement {

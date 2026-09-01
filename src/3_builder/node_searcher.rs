@@ -245,6 +245,7 @@ impl NodeSearcher for parser::Statement {
             parser::StatementType::Call(..) | // TODO(call): ...
             parser::StatementType::Exit |
             parser::StatementType::Continue |
+            parser::StatementType::Halt |
             parser::StatementType::Error => {},
             parser::StatementType::SQL(sql) => {
                 sql.get_transaction().search(pos, nodes)?;
@@ -375,7 +376,7 @@ impl NodeSearcher for parser::Event {
                     arg.variable.search(pos, nodes)?;
                 }
             }
-            parser::EventType::Predefined => todo!(),
+            parser::EventType::DeclaredElseWhere => todo!(),
             parser::EventType::System(_) => todo!(),
         }
 

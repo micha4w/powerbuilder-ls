@@ -194,7 +194,7 @@ impl<I: Iterator<Item = char>> Tokenizer<I> {
                                 self.next();
                                 Some(TokenType::Symbol(Symbol::DOTDOTDOT))
                             } else {
-                                None
+                                Some(TokenType::Symbol(Symbol::DOT))
                             }
                         }
                         _ => Some(TokenType::Symbol(Symbol::DOT)),

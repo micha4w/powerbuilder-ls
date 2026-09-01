@@ -33,7 +33,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
             || name.content.eq_ignore_ascii_case("dec")
             || name.content.eq_ignore_ascii_case("blob")
         {
-            if self.optional(TokenType::Symbol(tokenizer::Symbol::LCURLY))?.is_some() {
+            if self
+                .optional(TokenType::Symbol(tokenizer::Symbol::LCURLY))?
+                .is_some()
+            {
                 match self.optional(TokenType::Literal(tokenizer::Literal::NUMBER))? {
                     Some(prec) => {
                         let end =
@@ -200,6 +203,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
                 match self.tokens.peek()?.token_type {
                     TokenType::Keyword(tokenizer::Keyword::USING) => {
+                        self.tokens.next()?;
                         let class = ret_res!(self.parse_expression(is_sql)?, err);
                         end = class.range.end;
                         ExpressionType::CreateUsing(Box::new(class))
@@ -355,76 +359,83 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         loop {
             match &mut previous {
-                Some(prev) => match self.tokens.peek()?.token_type {
-                    TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
-                        let colon = self.tokens.next()?;
+                Some(prev) => {
+                    match self.tokens.peek()?.token_type {
+                        TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
+                            let colon = self.tokens.next()?;
 
-                        match prev.lvalue_type {
-                            LValueType::Super => {}
-                            LValueType::Variable(_) => prev.lvalue_type = LValueType::Super, // TODO ?
-                            _ => {
+                            match prev.lvalue_type {
+                                LValueType::Super => {}
+                                LValueType::Variable(_) => prev.lvalue_type = LValueType::Super, // TODO ?
+                                _ => {
+                                    self.error(
+                                        &"Only super methods can be indexed using '::'".into(),
+                                        colon.range,
+                                    );
+                                }
+                            }
+                        }
+                        TokenType::Symbol(tokenizer::Symbol::DOT) => {
+                            let dot = self.tokens.next()?;
+
+                            if let LValueType::Super = prev.lvalue_type {
                                 self.error(
-                                    &"Only super methods can be indexed using '::'".into(),
-                                    colon.range,
+                                    &"Super methods have to be indexed using '::'".into(),
+                                    dot.range,
                                 );
                             }
                         }
-                    }
-                    TokenType::Symbol(tokenizer::Symbol::DOT) => {
-                        let dot = self.tokens.next()?;
-
-                        if let LValueType::Super = prev.lvalue_type {
-                            self.error(
-                                &"Super methods have to be indexed using '::'".into(),
-                                dot.range,
-                            );
-                        }
-                    }
-                    TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
-                        let lbrace = self.tokens.next()?;
-                        let res = match self.parse_expression(is_sql)? {
-                            Ok(exp) => {
-                                match self.expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))? {
-                                    Ok(rbrace) => Ok((rbrace.range.end, exp)),
-                                    Err(err) => Err((err, Some((exp.range.end, exp)))),
+                        TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
+                            let lbrace = self.tokens.next()?;
+                            let res = match self.parse_expression(is_sql)? {
+                                Ok(exp) => {
+                                    match self
+                                        .expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))?
+                                    {
+                                        Ok(rbrace) => Ok((rbrace.range.end, exp)),
+                                        Err(err) => Err((err, Some((exp.range.end, exp)))),
+                                    }
                                 }
-                            }
-                            Err((err, exp)) => Err((err, exp.map(|exp| (exp.range.end, exp)))),
-                        };
-                        let expression = match res {
-                            Ok((_, exp)) => exp,
-                            Err((err, res)) => {
-                                let (end, exp) = res.unzip();
-                                let lvalue = LValue {
-                                    range: prev
-                                        .range
-                                        .clone()
-                                        .expanded(&end.unwrap_or(lbrace.range.end)),
-                                    lvalue_type: LValueType::Index(
-                                        Box::new(previous.take().unwrap()),
-                                        Box::new(exp.unwrap_or(Expression {
-                                            expression_type: ExpressionType::Error,
-                                            range: Range::new_point(lbrace.range.end, self.uri()),
-                                        })),
-                                    ),
-                                };
+                                Err((err, exp)) => Err((err, exp.map(|exp| (exp.range.end, exp)))),
+                            };
+                            let expression = match res {
+                                Ok((_, exp)) => exp,
+                                Err((err, res)) => {
+                                    let (end, exp) = res.unzip();
+                                    let lvalue = LValue {
+                                        range: prev
+                                            .range
+                                            .clone()
+                                            .expanded(&end.unwrap_or(lbrace.range.end)),
+                                        lvalue_type: LValueType::Index(
+                                            Box::new(previous.take().unwrap()),
+                                            Box::new(exp.unwrap_or(Expression {
+                                                expression_type: ExpressionType::Error,
+                                                range: Range::new_point(
+                                                    lbrace.range.end,
+                                                    self.uri(),
+                                                ),
+                                            })),
+                                        ),
+                                    };
 
-                                return Some(Err((err, Some(lvalue))));
-                            }
-                        };
+                                    return Some(Err((err, Some(lvalue))));
+                                }
+                            };
 
-                        previous = Some(LValue {
-                            range: prev.range.clone().merged(&expression.range),
-                            lvalue_type: LValueType::Index(
-                                Box::new(previous.take().unwrap()),
-                                Box::new(expression),
-                            ),
-                        });
+                            previous = Some(LValue {
+                                range: prev.range.clone().merged(&expression.range),
+                                lvalue_type: LValueType::Index(
+                                    Box::new(previous.take().unwrap()),
+                                    Box::new(expression),
+                                ),
+                            });
 
-                        continue;
+                            continue;
+                        }
+                        _ => break,
                     }
-                    _ => break,
-                },
+                }
 
                 None => {}
             }
@@ -440,13 +451,14 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     | TokenType::Keyword(tokenizer::Keyword::POST),
                     _,
                 )
+                | (TokenType::Symbol(tokenizer::Symbol::LPAREN), _)
                 | (_, TokenType::Symbol(tokenizer::Symbol::LPAREN)) => {
                     let mut dynamics = Vec::new();
                     let mut events = Vec::new();
                     let mut posts = Vec::new();
                     let mut statics = Vec::new();
                     if !is_sql
-                    /* TODO: || colon.is_some()*/
+                    /* TODO(sql): || colon.is_some()*/
                     {
                         loop {
                             match self.tokens.peek()?.token_type {
@@ -467,7 +479,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         }
                     }
 
-                    let name = ret_res!(self.expect(TokenType::ID)?);
+                    let name = self.id_or_invalid(&None, None)?;
 
                     if !dynamics.is_empty() && !statics.is_empty() {
                         self.error(
@@ -546,9 +558,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     }
                 }
                 _ => {
-                    let mut range = Range::empty(self.uri());
                     let var = VariableAccess {
-                        name: self.id_or_invalid(&None, &mut range)?,
+                        name: self.id_or_invalid(&None, None)?,
                         is_write: false,
                     };
 

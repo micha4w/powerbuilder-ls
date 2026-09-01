@@ -215,12 +215,14 @@ impl<I: Iterator<Item = char>> Parser<I> {
     pub(super) fn id_or_invalid(
         &mut self,
         err: &Option<ParseError>,
-        range: &mut Range,
+        range: Option<&mut Range>,
     ) -> EOFOr<Token> {
         if err.is_none() {
             match self.optional(TokenType::ID)? {
                 Some(token) => {
-                    range.end = token.range.end;
+                    if let Some(range) = range {
+                        range.end = token.range.end;
+                    }
                     return Some(token);
                 }
                 None => {

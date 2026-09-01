@@ -38,7 +38,7 @@ impl<'pars> Builder {
             .for_each(|arg| self.request_class_load(&arg.data_type.powerscript_type));
         throws
             .iter()
-            .map(|throw| self.request_class_load(&throw.powerscript_type));
+            .for_each(|throw| self.request_class_load(&throw.powerscript_type));
     }
 
     fn build_function_declaration(
@@ -315,6 +315,7 @@ impl<'pars> Builder {
 
             // Remove classes Arcs so we can run get_mut
             built.classes.clear();
+            built.variables.clear();
 
             let mut class_ref: Option<&mut Arc<Class>> = None;
             for top_level in &mut built.top_levels {

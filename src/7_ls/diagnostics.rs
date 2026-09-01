@@ -8,7 +8,7 @@ impl PowerBuilderLS {
 
     pub(super) async fn diagnostics_post_rebuild(&self, inner: &PowerBuilderLSInner) {
         for (uri, _) in &inner.opened_files {
-            match inner.get_file_diagnostics(&uri) {
+            match inner.build_file_diagnostics(&uri) {
                 Ok(Some(items)) => {
                     eprintln!("Sending diagnostics");
                     self.client
@@ -32,7 +32,7 @@ impl PowerBuilderLS {
 }
 
 impl PowerBuilderLSInner {
-    fn get_file_diagnostics(
+    fn build_file_diagnostics(
         &self,
         uri: &Url,
     ) -> anyhow::Result<Option<Vec<lsp_types::Diagnostic>>> {

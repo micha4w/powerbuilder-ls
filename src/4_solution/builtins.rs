@@ -56,11 +56,18 @@ impl BuiltinsParsed {
         Range::empty(BUILTIN_URL.clone())
     }
 
-    fn parse_type(mut name: String) -> parser::DataType {
+    fn parse_type(mut name: String, array_bounds: &Option<String>) -> parser::DataType {
         name += "\n\n";
 
         let mut parser = Parser::new(name.chars(), BUILTIN_URL.clone());
-        if let Some(Ok(dt) | Err((_, Some(dt)))) = parser.parse_type() {
+        if let Some(Ok(mut dt) | Err((_, Some(mut dt)))) = parser.parse_type() {
+            if let Some(bounds) = array_bounds {
+                if bounds != "[]" {
+                    panic!("Unexpected array bounds in builtin type: {}", bounds);
+                }
+                dt.array_bounds = Some(Vec::new());
+            };
+
             return dt;
         }
 
@@ -90,12 +97,12 @@ impl BuiltinsParsed {
 
         if let Some(ret) = ret {
             if ret != "\u{1}void" {
-                returns = Some(Self::parse_type(ret));
+                returns = Some(Self::parse_type(ret, &None));
             }
         }
 
         for arg in argument {
-            let flags = arg.flags.unwrap_or(0);
+            let flags = arg.flags();
 
             if flags & variable::Flag::IsVarlist as u32 > 0 {
                 has_vararg = true;
@@ -105,7 +112,7 @@ impl BuiltinsParsed {
                     variable: parser::Variable {
                         help: None,
                         constant: flags & variable::Flag::NoWrite as u32 > 0,
-                        data_type: Self::parse_type(arg.r#type.unwrap()),
+                        data_type: Self::parse_type(arg.r#type.unwrap(), &arg.array_bounds),
                         access: VariableAccess {
                             name: Token {
                                 token_type: TokenType::ID,
@@ -115,6 +122,7 @@ impl BuiltinsParsed {
                             },
                             is_write: true,
                         },
+                        descriptors: Vec::new(),
                         initial_value: None,
                         range: Self::empty(),
                     },
@@ -178,13 +186,14 @@ impl BuiltinsParsed {
             },
             variable: parser::Variable {
                 help: None,
-                constant: var.flags.unwrap_or(0) & variable::Flag::NoWrite as u32 > 0,
-                data_type: Self::parse_type(var.r#type.unwrap()),
+                constant: var.flags() & variable::Flag::NoWrite as u32 > 0,
+                data_type: Self::parse_type(var.r#type.unwrap(), &var.array_bounds),
                 access: VariableAccess {
                     name: Token::fake_identifier(var.name.unwrap(), Self::empty()),
                     is_write: true,
                 },
                 initial_value: None,
+                descriptors: Vec::new(),
                 range: Self::empty(),
             },
         }
@@ -200,6 +209,7 @@ impl BuiltinsParsed {
                 within: None,
                 autoinstantiate: None,
                 native: None,
+                descriptors: Vec::new(),
             },
 
             variables: class

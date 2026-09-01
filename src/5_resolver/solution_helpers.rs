@@ -296,13 +296,25 @@ impl<'sol> Solution {
                     }
                 };
 
+                // TODO(groups): correct order?
+                // TODO(errors): can this lead to infinite recursion
+                if let Some(within) = class_ref.class.within() {
+                    if let Found::Yes(solution::Complex::Class(parent)) =
+                        self.find_class(class_ref.file, &within.into())
+                    {
+                        for var in Box::new(self.variables_in_class(parent, next_filter.clone())) {
+                            yield var;
+                        }
+                    }
+                }
+
                 if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())
                 {
                     for var in Box::new(self.variables_in_class(base, next_filter)) {
-                        yield var
+                        yield var;
                     }
-                };
+                }
             },
         )
     }
@@ -330,6 +342,17 @@ impl<'sol> Solution {
                         }
                     }
                 };
+
+                // TODO(groups): correct order?
+                if let Some(within) = class_ref.class.within() {
+                    if let Found::Yes(solution::Complex::Class(parent)) =
+                        self.find_class(class_ref.file, &within.into())
+                    {
+                        for ev in Box::new(self.events_in_class(parent, filter.clone())) {
+                            yield ev;
+                        }
+                    }
+                }
 
                 if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())
@@ -411,6 +434,17 @@ impl<'sol> Solution {
                         FunctionFilter::ForCall(iname, arguments, next_access)
                     }
                 };
+
+                // TODO(groups): correct order? (parent before base?)
+                if let Some(within) = class_ref.class.within() {
+                    if let Found::Yes(solution::Complex::Class(parent)) =
+                        self.find_class(class_ref.file, &within.into())
+                    {
+                        for func in Box::new(self.functions_in_class(parent, next_filter.clone())) {
+                            yield func;
+                        }
+                    }
+                }
 
                 if let Found::Yes(solution::Complex::Class(base)) =
                     self.find_class(class_ref.file, &class_ref.class.base().into())

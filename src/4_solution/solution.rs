@@ -54,7 +54,7 @@ impl Project {
             bail!("XML Format Invalid (<Libraries> not found)",);
         };
 
-        for lib in libs.children() {
+        for lib in libs.children().filter(roxmltree::Node::is_element) {
             if !lib.has_tag_name("Library") {
                 eprintln!("Warning: Ignoring unknown tag {}", &content[lib.range()],);
                 continue;
@@ -167,7 +167,8 @@ impl<'sol> Solution {
 
         eprintln!("Want default path {}", default_path);
 
-        for proj in projs.children() {
+        let mut projects = BTreeMap::new();
+        for proj in projs.children().filter(roxmltree::Node::is_element) {
             if !proj.has_tag_name("Project") {
                 eprintln!(
                     "Warning: Ignoring unknown tag {} in {}",
@@ -250,7 +251,10 @@ impl<'sol> Solution {
                     let path = file?.path();
                     if path.extension().is_some_and(|ext| {
                         // TODO: add all extensions
-                        vec!["sru", "srw", "srs", "sra", "srf"].contains(&&*ext.to_string_lossy())
+                        vec![
+                            "sru", "srd", "srm", "srw", "srs", "srf", "sra", "srp", "srj", "srq",
+                        ]
+                        .contains(&&*ext.to_string_lossy())
                     }) {
                         let mut uri = (**lib).clone();
                         uri.set_path(&path.to_string_lossy());

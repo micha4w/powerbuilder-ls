@@ -274,6 +274,7 @@ pub struct Variable {
     pub constant: bool,
     pub data_type: DataType,
     pub access: VariableAccess,
+    pub descriptors: Vec<Descriptor>,
     pub initial_value: Option<Expression>,
 
     pub range: Range,
@@ -410,8 +411,9 @@ impl fmt::Display for Function {
 #[derive(Debug, Clone)]
 pub enum EventType {
     User(Option<DataType>, Vec<Argument>),
-    Predefined,
     System(String),
+    /// No arguments passed, they must be defined somewhere else (class declaration, base class, ...)
+    DeclaredElseWhere,
 }
 
 #[derive(Debug, Clone)]
@@ -449,7 +451,7 @@ impl fmt::Display for Event {
                 Ok(())
             }
             EventType::System(event) => write!(f, "{} {}", self.name.content, event),
-            EventType::Predefined => write!(f, "{}", self.name.content),
+            EventType::DeclaredElseWhere => write!(f, "{}", self.name.content),
         }
     }
 }
@@ -471,7 +473,7 @@ impl Event {
                 returns = &None;
                 // TODO get system events from where?
             }
-            EventType::Predefined => {
+            EventType::DeclaredElseWhere => {
                 arguments = &EMPTY;
                 returns = &None;
                 // TODO get arguments and return value from base class using parsed.name
@@ -530,6 +532,7 @@ pub struct Class {
     pub within: Option<DataType>,
     pub autoinstantiate: Option<Token>,
     pub native: Option<Token>,
+    pub descriptors: Vec<Descriptor>,
 }
 
 #[derive(Debug, Clone)]
@@ -935,6 +938,7 @@ pub enum StatementType {
     Label(Token),
     Exit,
     Continue,
+    Halt,
     Error,
 }
 

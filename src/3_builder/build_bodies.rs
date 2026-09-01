@@ -130,6 +130,7 @@ impl<'pars> Builder {
             }
             parser::StatementType::Exit => {}
             parser::StatementType::Continue => {}
+            parser::StatementType::Halt => {}
             parser::StatementType::SQL(_) => {}
             parser::StatementType::Error => {}
         };

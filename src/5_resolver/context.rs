@@ -184,6 +184,21 @@ impl<'sol> Context<'sol> {
                     }
                 }
 
+                if let Some(arguments) = &self.arguments {
+                    match &filter {
+                        VariableFilter::All => {
+                            for var in arguments.values() {
+                                yield Ok(FoundVariable::new(self.file, var));
+                            }
+                        }
+                        VariableFilter::ForAccess(variable, _) => {
+                            if let Some(var) = arguments.get(&(&variable.name.content).into()) {
+                                yield Ok(FoundVariable::new(self.file, var));
+                            }
+                        }
+                    }
+                }
+
                 if let Some(class) = self.class {
                     for var in self.sol.variables_in_class(
                         class,

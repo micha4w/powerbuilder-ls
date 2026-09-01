@@ -144,6 +144,12 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 data_type.array_bounds = Some(bounds);
             }
 
+            // TODO(diagnostics): descriptors are only allowed for instance variables
+            let mut descriptors = None;
+            if err.is_none() {
+                (descriptors, err) = self.parse_descriptors()?.split();
+            }
+
             let expression = if err.is_none()
                 && self
                     .optional(TokenType::Operator(tokenizer::Operator::EQ))?
@@ -175,6 +181,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     is_write: true,
                 },
                 constant: constant.is_some(),
+                descriptors: descriptors.unwrap_or_default(),
                 initial_value: expression,
             });
 
@@ -604,6 +611,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
             TokenType::Keyword(
                 keyword @ (tokenizer::Keyword::WHILE | tokenizer::Keyword::UNTIL),
             ) => {
+                self.tokens.next()?;
+
                 let mut err = None;
                 let condition = ret_opt!(self.parse_expression(false)?, err);
 
@@ -637,7 +646,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
         }
 
-        let mut end = self.tokens.next()?.range.end;
+        let mut end = self.tokens.next()?.range.end; // LOOP
         if is_inversed {
             (condition, err) = match self.tokens.peek()?.token_type {
                 TokenType::Keyword(
@@ -660,7 +669,9 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         let condition = match condition {
             Some(condition) => {
-                end = condition.range.end;
+                if is_inversed {
+                    end = condition.range.end;
+                }
                 condition
             }
             None => Expression {
@@ -780,6 +791,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                                                 name,
                                                 is_write: true,
                                             },
+                                            descriptors: Vec::new(),
                                             initial_value: None,
                                         },
                                     },
@@ -1179,6 +1191,14 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 Some(Some(Statement {
                     range,
                     statement_type: StatementType::Continue,
+                }))
+            }
+            TokenType::Keyword(tokenizer::Keyword::HALT) => {
+                let range = self.tokens.next()?.range;
+                self.expect_newline();
+                Some(Some(Statement {
+                    range,
+                    statement_type: StatementType::Halt,
                 }))
             }
             TokenType::Keyword(

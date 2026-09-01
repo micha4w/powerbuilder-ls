@@ -65,7 +65,7 @@ impl<'sol> Linter<'sol> {
                 }
             }
             parser::LValueType::Function(call) => {
-                let types = self.lint_expressions(&call.arguments, scope);
+                self.lint_expressions(&call.arguments, scope);
 
                 if !resolved.found() {
                     // TODO(diagnostic): ...
@@ -77,16 +77,24 @@ impl<'sol> Linter<'sol> {
             }
             parser::LValueType::Method(lvalue, call) => {
                 let data_type = self.lint_lvalue(lvalue, scope);
-                let types = self.lint_expressions(&call.arguments, scope);
+                self.lint_expressions(&call.arguments, scope);
 
                 match data_type {
-                    ResolvedType::Complex(solution::Complex::Class(fc)) => {
+                    ResolvedType::Complex(solution::Complex::Class(_)) => {
                         if !resolved.found() {
-                            // TODO(diagnostic): show args, also do events
-                            self.diagnostic_error(
-                                "Could not find a method that is callable by the Arguments".into(),
-                                call.name.range.clone(),
-                            );
+                            // TODO(diagnostic): show args
+                            // TODO(events): ...?
+                            self.push_diagnostic(Diagnostic {
+                                severity: if call.dynamic.is_some() {
+                                    Severity::Hint
+                                } else {
+                                    Severity::Error
+                                },
+                                message:
+                                    "Could not find a method that is callable by the Arguments"
+                                        .into(),
+                                range: call.name.range.clone(),
+                            });
                         }
                     }
                     ResolvedType::Base(builder::BaseType::Any) | ResolvedType::Unknown => {}
@@ -193,6 +201,15 @@ impl<'sol> Linter<'sol> {
                 let right_type = self.lint_expression(right, scope);
 
                 match op {
+                    tokenizer::Operator::EQ | tokenizer::Operator::GTLT => {
+                        if !self.sol.is_convertible(&left_type, &right_type) {
+                            self.diagnostic_error(
+                                "Types do not match".into(),
+                                expression.range.clone(),
+                            );
+                        }
+                    }
+
                     tokenizer::Operator::AND | tokenizer::Operator::OR => {
                         if !self.sol.is_convertible(
                             &left_type,
@@ -214,45 +231,38 @@ impl<'sol> Linter<'sol> {
                             );
                         }
                     }
-                    tokenizer::Operator::EQ | tokenizer::Operator::GTLT => {
-                        if !self.sol.is_convertible(&left_type, &right_type) {
-                            self.diagnostic_error(
-                                "Types do not match".into(),
-                                expression.range.clone(),
-                            );
-                        }
-                    }
-                    tokenizer::Operator::GT
+
+                    tokenizer::Operator::PLUS
+                    | tokenizer::Operator::GT
                     | tokenizer::Operator::GTE
                     | tokenizer::Operator::LT
                     | tokenizer::Operator::LTE => {
-                        if !(left_type.is_numeric() && right_type.is_numeric()) {
-                            self.diagnostic_error(
-                                "Invalid types for Operation, expected numeric".into(),
-                                expression.range.clone(),
-                            );
-                        }
-                    }
-                    tokenizer::Operator::PLUS
-                        if self.sol.is_convertible(
+                        if !(self.sol.is_convertible(
                             &left_type,
                             &ResolvedType::Base(builder::BaseType::String),
                         ) && self.sol.is_convertible(
                             &right_type,
                             &ResolvedType::Base(builder::BaseType::String),
-                        ) => {}
-                    _ => {
-                        match (
-                            left_type.numeric_precedence(),
-                            right_type.numeric_precedence(),
-                        ) {
-                            (Some(left), Some(right)) => {}
-                            (..) => {
+                        )) {
+                            if !(left_type.is_numeric() && right_type.is_numeric()) {
                                 self.diagnostic_error(
-                                    "Invalid types for Operation".into(),
+                                    "Invalid types for Operation, expected numeric or string"
+                                        .into(),
                                     expression.range.clone(),
                                 );
                             }
+                        }
+                    }
+
+                    tokenizer::Operator::MINUS
+                    | tokenizer::Operator::MULT
+                    | tokenizer::Operator::DIV
+                    | tokenizer::Operator::CARAT => {
+                        if !(left_type.is_numeric() && right_type.is_numeric()) {
+                            self.diagnostic_error(
+                                "Invalid types for Operation, expected numeric".into(),
+                                expression.range.clone(),
+                            );
                         }
                     }
                 }
@@ -831,6 +841,7 @@ impl<'sol> Linter<'sol> {
             }
             parser::StatementType::Exit => {}
             parser::StatementType::Continue => {}
+            parser::StatementType::Halt => {}
             parser::StatementType::SQL(sql) => self.lint_sql_statement(sql, scope),
             parser::StatementType::Error => {}
         }
