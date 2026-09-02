@@ -6,11 +6,11 @@ import which from "which";
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { createWriteStream } from "node:fs";
-import { release } from "node:os";
 
 const PBLS_EXECUTABLE_BASE = "powerbuilder-ls";
 const EXECUTABLE_EXT = (process.platform === "win32" ? "powerbuilder-ls.exe" : "");
@@ -99,30 +99,56 @@ export async function getExecutablePath(context: vsc.ExtensionContext): Promise<
 		return null;
 	}
 
-	await vsc.window.showInformationMessage("Found a Rust setup, would you like to build the server from source? (installs a nightly toolchain)", "Yes", "No, don't start the server");
+	await vsc.window.showInformationMessage("No suitable release found. But a Rust setup was found, would you like to build the server from source? (installs a nightly toolchain)", "Yes", "No, don't start the server");
 	if (msg !== "Yes") {
 		return null;
 	}
 
 	try {
-		const buildDir = await fs.mkdtemp("powerbuilder-ls-build-");
+		return await vsc.window.withProgress(
+			{
+				location: vsc.ProgressLocation.Notification,
+				title: "PowerBuilder-LS",
+				cancellable: true
+			},
+			async (progress, token) => {
+				const controller = new AbortController();
+				token.onCancellationRequested(() => controller.abort());
 
-		const git = await promisify(execFile)(gitPath, ["clone", "https://github.com/micha4w/powerbuilder-ls", buildDir]);
-		if (git.stderr) {
-			await vsc.window.showErrorMessage(`Failed to clone PowerBuilder-LS: ${git.stderr}`);
-			return null;
-		}
+				const buildDir = await fs.mkdtemp(path.join(os.tmpdir(), "powerbuilder-ls-build-"));
 
-		const build = await promisify(execFile)(cargoPath, ["build", "--release"], { cwd: buildDir });
-		if (build.stderr) {
-			await vsc.window.showErrorMessage(`Failed to build PowerBuilder-LS: ${build.stderr}`);
-			return null;
-		}
+				progress.report({ message: "Cloning..." });
+				await promisify(execFile)(
+					gitPath, ["clone", "https://github.com/micha4w/powerbuilder-ls", buildDir],
+					{ signal: controller.signal }
+				);
+				if (controller.signal.aborted) {
+					return null;
+				}
 
-		const builtServerPath = path.join(context.extensionPath, "target", "release", PBLS_EXECUTABLE);
-		await fs.copyFile(builtServerPath, storageServerPath);
-		await fs.chmod(storageServerPath, 0o755);
-		return storageServerPath;
+				progress.report({ message: "Building..." });
+				await promisify(execFile)(
+					cargoPath, ["build", "--release"],
+					{ cwd: buildDir, signal: controller.signal }
+				);
+				if (controller.signal.aborted) {
+					return null;
+				}
+
+				console.info(`Building PowerBuilder-LS from source in ${buildDir}`);
+
+				progress.report({ message: "Installing..." });
+				const builtServerPath = path.join(buildDir, "target", "release", PBLS_EXECUTABLE);
+
+				console.info(`Copying built PowerBuilder-LS executable from ${builtServerPath} to ${storageServerPath}`);
+				await fs.mkdir(storagePath, { recursive: true });
+				await fs.copyFile(builtServerPath, storageServerPath);
+				await fs.chmod(storageServerPath, 0o755);
+
+				return storageServerPath;
+			}
+		);
+
 	} catch (e) {
 		await vsc.window.showErrorMessage(`Failed to build PowerBuilder-LS: ${e}`);
 		return null;
@@ -141,7 +167,8 @@ export async function activate(context: vsc.ExtensionContext) {
 		return;
 	}
 
-	let disposable = vsc.commands.registerCommand("powerbuilder.restart-ls", async () => await client.restart());
+	await vsc.commands.executeCommand("setContext", "powerbuilder.lsFound", true);
+	let disposable = vsc.commands.registerCommand("powerbuilder.restartLs", async () => await client.restart());
 	context.subscriptions.push(disposable);
 
 	const outputChannel = vsc.window.createOutputChannel("PowerBuilder-LS Logs", { log: true });
