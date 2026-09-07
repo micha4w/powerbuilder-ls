@@ -4,6 +4,8 @@ mod completion;
 mod diagnostics;
 #[cfg(feature = "goto-definition")]
 mod goto_definition;
+#[cfg(feature = "goto-type")]
+mod goto_type;
 #[cfg(feature = "hover")]
 mod hover;
 

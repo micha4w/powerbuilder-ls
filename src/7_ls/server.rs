@@ -8,6 +8,8 @@ use crate::{
 };
 use tokio::{sync::oneshot, time::timeout};
 
+#[cfg(feature = "goto-type")]
+use tower_lsp::lsp_types::request::{GotoTypeDefinitionParams, GotoTypeDefinitionResponse};
 use tower_lsp::{jsonrpc, lsp_types::*, LanguageServer};
 
 #[tower_lsp::async_trait]
@@ -42,6 +44,8 @@ impl LanguageServer for PowerBuilderLS {
         self.completion_capabilities(&mut capabilities);
         #[cfg(feature = "goto-definition")]
         self.goto_definition_capabilities(&mut capabilities);
+        #[cfg(feature = "goto-type")]
+        self.goto_type_capabilities(&mut capabilities);
         #[cfg(feature = "diagnostics")]
         self.diagnostics_capabilities(&mut capabilities);
 
@@ -107,6 +111,28 @@ impl LanguageServer for PowerBuilderLS {
         let range = self
             .with_context(params.text_document_position_params, |ctx| {
                 self.goto_definition_impl(&ctx)
+            })
+            .await?;
+
+        if let Some(r) = range {
+            if !Arc::ptr_eq(&r.uri, &solution::BUILTIN_URL) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: (*r.uri).clone(),
+                    range: r.into(),
+                })));
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(feature = "goto-type")]
+    async fn goto_type_definition(
+        &self,
+        params: GotoTypeDefinitionParams,
+    ) -> jsonrpc::Result<Option<GotoTypeDefinitionResponse>> {
+        let range = self
+            .with_context(params.text_document_position_params, |ctx| {
+                self.goto_type_impl(&ctx)
             })
             .await?;
 

@@ -8,3 +8,4 @@ Features:
 - basic autocompletion
 - hover
 - go to definition
+- go to type definition

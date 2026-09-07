@@ -9,6 +9,7 @@ Currently working features:
  - Linting Statements and complaining about type Errors
  - LSP Features (only for the most basic cases):
    - Go to definition
+   - Go to type definition
    - Completion (only with objects)
    - Hover
 
@@ -17,6 +18,7 @@ TODOs:
  - Add smarter linting (loops, try catch)
  - Make comments not be ignored (Help String, autocomplete inside comments)
  - Make the LSP Features work in more cases
+ - Dont ignore groups (_**group**_`class)
 
 ## Building
 Best to build this in release mode because speed matters:

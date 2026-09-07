@@ -7,10 +7,12 @@ edition = "2021"
 default = [
     "diagnostics",
     "goto-definition",
+    "goto-type",
     "hover",
     "completion",
 ]
 goto-definition = []
+goto-type = []
 hover = []
 completion = []
 diagnostics = []
