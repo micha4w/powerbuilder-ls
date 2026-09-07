@@ -1,4 +1,4 @@
-use std::{iter, ptr, sync::Arc};
+use std::{iter, pin::pin, ptr, sync::Arc};
 
 use super::types::*;
 use crate::{
@@ -16,30 +16,40 @@ impl<'sol> Solution {
     ) -> ResolvedType<'sol> {
         match ps_type {
             builder::PowerScriptType::Base(base) => ResolvedType::Base(base.clone()),
-            builder::PowerScriptType::Complex(name) => match self.find_class(current_file, name) {
-                Found::Yes(class) => ResolvedType::Complex(class),
-                Found::No => ResolvedType::Unknown,
-            },
+            builder::PowerScriptType::Complex(name) => {
+                match self.find_class(current_file, &Grouped::simple(name.clone())) { // TODO(perf): unnecessary clone
+                    Found::Yes(class) => ResolvedType::Complex(class),
+                    Found::No => ResolvedType::Unknown,
+                }
+            }
             builder::PowerScriptType::Array(inner) => {
                 ResolvedType::Array(Box::new(self.to_resolved_type(current_file, inner)))
             }
         }
     }
 
-    pub fn classes(
+    pub fn classes<'a>(
         &'sol self,
         current_file: Option<&'sol BuiltFile>,
-    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'sol {
+        filter: ClassFilter<'a>,
+    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'a
+    where
+        'sol: 'a,
+    {
         // TODO: return an error if the class is shadowed
-        iter::from_coroutine(
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
+            static move || {
                 // Do current file first because the order decides which one is shadowed
                 if let Some(file) = current_file {
-                    for class in file.inner().classes.values() {
-                        yield Ok(solution::Complex::Class(solution::ClassRef::new(
-                            file, class,
-                        )));
+                    for (class, err) in filter
+                        .name
+                        .filter_hash_map(&file.inner().classes, ListError::WrongName)
+                    {
+                        yield (
+                            solution::Complex::Class(solution::ClassRef::new(file, class)),
+                            err,
+                        );
                     }
                 }
 
@@ -48,135 +58,162 @@ impl<'sol> Solution {
                         continue;
                     }
 
-                    for class in file.inner().classes.values() {
-                        yield Ok(solution::Complex::Class(solution::ClassRef::new(
-                            file, class,
-                        )));
+                    for (class, err) in filter
+                        .name
+                        .filter_hash_map(&file.inner().classes, ListError::WrongName)
+                    {
+                        yield (
+                            solution::Complex::Class(solution::ClassRef::new(file, class)),
+                            err,
+                        );
                     }
                 }
 
-                for en in self.builtins.borrow_dependent().enums.values() {
-                    yield Ok(solution::Complex::Enum(en));
+                for (en, err) in filter.name.filter_hash_map(
+                    &self.builtins.borrow_dependent().enums,
+                    ListError::WrongName,
+                ) {
+                    yield (solution::Complex::Enum(en), err);
                 }
 
-                for class in self.builtins.borrow_dependent().classes.values() {
-                    yield Ok(solution::Complex::Class(solution::ClassRef::builtin(class)));
+                for (class, err) in filter.name.filter_hash_map(
+                    &self.builtins.borrow_dependent().classes,
+                    ListError::WrongName,
+                ) {
+                    yield (
+                        solution::Complex::Class(solution::ClassRef::builtin(class)),
+                        err,
+                    );
                 }
             },
-        )
+        ))
     }
 
-    pub fn global_variables(
+    pub fn global_variables<'a>(
         &'sol self,
-        filter: VariableFilter<'sol>,
-    ) -> impl Iterator<Item = ListResult<&'sol Arc<builder::Variable<'sol>>>> + 'sol {
-        iter::from_coroutine(
+        filter: GlobalVariableFilter<'a>,
+    ) -> impl Iterator<Item = ListResult<&'sol Arc<builder::Variable<'sol>>>> + 'a
+    where
+        'sol: 'a,
+    {
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
-                match filter {
-                    VariableFilter::All => {
-                        if let Some(file) = self.application() {
-                            for var in file.inner().variables.values() {
-                                yield Ok(var);
-                            }
-                        }
-
-                        for file in self.files.values() {
-                            for var in file.inner().variables.values() {
-                                yield Ok(var);
-                            }
-                        }
+            static move || {
+                if let Some(file) = self.application() {
+                    for var in filter
+                        .name
+                        .filter_hash_map(&file.inner().variables, ListError::WrongName)
+                    {
+                        yield var;
                     }
-                    VariableFilter::ForAccess(variable, _) => {
-                        let iname = (&variable.name.content).into();
+                }
 
-                        if let Some(file) = self.application() {
-                            // TODO: ensure the application is always built
-                            if let Some(var) = file.inner().variables.get(&iname) {
-                                yield Ok(var);
-                            }
-                        }
+                let files = filter.name.filter(
+                    self.files.iter(),
+                    |(uri, _), want| {
+                        uri.to_file_path()
+                            .ok()
+                            .as_ref()
+                            .and_then(|p| p.file_prefix())
+                            .map_or(false, |p| {
+                                Into::<IString>::into(&*p.to_string_lossy()) == **want
+                            })
+                    },
+                    ListError::WrongName,
+                );
 
-                        for (uri, file) in &self.files {
-                            if let Some(prefix) = uri
-                                .to_file_path()
-                                .ok()
-                                .as_ref()
-                                .and_then(|p| p.file_prefix())
-                            {
-                                if variable
-                                    .name
-                                    .content
-                                    .eq_ignore_ascii_case(&prefix.to_string_lossy())
-                                {
-                                    if let Some(var) = file.inner().variables.get(&iname) {
-                                        if var.unwrap_scoped().scope
-                                            == tokenizer::ScopeModif::GLOBAL
-                                        {
-                                            yield Ok(var);
-                                        }
-                                    }
-                                }
-                            };
-                        }
+                for ((_, file), file_err) in files {
+                    let file_vars = filter
+                        .name
+                        .filter_hash_map(&file.inner().variables, ListError::WrongName);
+
+                    let global_vars = filter.accessible.filter_res(
+                        file_vars,
+                        |var, _| var.unwrap_scoped().scope == tokenizer::ScopeModif::GLOBAL,
+                        ListError::NotAccessible,
+                    );
+
+                    for (var, var_err) in global_vars {
+                        yield (var, file_err | var_err);
                     }
                 }
             },
-        )
+        ))
     }
 
     pub fn global_functions<'a>(
         &'sol self,
         caller_file: Option<&'sol BuiltFile>,
-        filter: FunctionFilter<'sol, 'a>,
-    ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
-    {
-        iter::from_coroutine(
+        filter: GlobalFunctionFilter<'sol, 'a>,
+    ) -> impl Iterator<
+        Item = ListResult<(
+            Option<solution::ClassRef<'sol>>,
+            &'sol builder::Function<'sol>,
+        )>,
+    > + 'a {
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
-                match filter {
-                    FunctionFilter::All => {
-                        // TODO: find all global functions (store all srf?)
-                    }
-                    FunctionFilter::ForCall(name, arguments, _) => {
-                        if let Found::Yes(complex @ solution::Complex::Class(class)) =
-                            self.find_class(caller_file, &name)
-                        {
-                            // TODO(load): also ensure global functions are loaded when loading?
-                            // TODO: also check file extension (.srf)?
-                            let is_function = self
-                                .inherits_from(
-                                    &complex,
-                                    &solution::Complex::Class(
-                                        self.builtin_class("function_object"),
-                                    ),
-                                )
-                                .unwrap_or(false);
+            static move || {
+                let classes = self.classes(
+                    caller_file,
+                    ClassFilter {
+                        name: filter.name.clone(),
+                    },
+                );
+                for (complex, class_err) in classes {
+                    let solution::Complex::Class(class) = complex else {
+                        break;
+                    };
 
-                            for func in self.functions_in_class(
-                                class,
-                                FunctionFilter::ForCall(
-                                    name,
-                                    arguments,
-                                    tokenizer::AccessType::PUBLIC,
-                                ),
-                            ) {
-                                yield match func {
-                                    Ok(func) if !is_function => {
-                                        Err((ListError::NotAFunctionObject, func))
-                                    }
-                                    res => res,
-                                }
-                            }
-                        }
+                    let funcs = self.functions_in_class(
+                        class,
+                        FunctionFilter {
+                            name: filter.name.clone(),
+                            access: match filter.accessible {
+                                SearchFilter::Filter { do_error, .. } => SearchFilter::Filter {
+                                    want: tokenizer::AccessType::PUBLIC,
+                                    do_error,
+                                },
+                                SearchFilter::All => SearchFilter::All,
+                            },
+                            arguments: filter.arguments.clone(),
+                        },
+                    );
+                    let global_funcs = filter.accessible.filter_res(
+                        funcs,
+                        |(_, func), _| {
+                            func.header().parsed.scope_modif == Some(tokenizer::ScopeModif::GLOBAL)
+                        },
+                        ListError::NotAccessible,
+                    );
+
+                    for ((class_ref, func), func_err) in global_funcs {
+                        yield ((Some(class_ref), func), class_err | func_err);
                     }
                 }
+
+                let all_funcs = filter.name.filter_hash_map(
+                    &self.builtins.borrow_dependent().functions,
+                    ListError::WrongName,
+                );
+                let funcs_iter =
+                    all_funcs.flat_map(|(f, err)| f.values().map(move |func| (func, err)));
+
+                let funcs_iter = filter.arguments.filter_res(
+                    funcs_iter,
+                    |func, args| self.is_function_callable(caller_file, func.header(), &args),
+                    ListError::WrongArguments,
+                );
+
+                for (func, err) in funcs_iter {
+                    yield ((None, func), err);
+                }
             },
-        )
+        ))
     }
 
     // TODO: why does this not return a Found<bool>
-    // This is symmetric
+    /// This is symmetric
     pub fn is_convertible(&self, a: &ResolvedType<'_>, b: &ResolvedType<'_>) -> bool {
         match (a, b) {
             (ResolvedType::Unknown, _) | (_, ResolvedType::Unknown) => true,
@@ -248,105 +285,105 @@ impl<'sol> Solution {
             })
     }
 
-    pub fn variables_in_class(
+    pub fn variables_in_class<'a>(
         &'sol self,
         class_ref: solution::ClassRef<'sol>,
-        filter: VariableFilter<'sol>,
+        mut filter: VariableFilter<'a>,
     ) -> impl Iterator<
         Item = ListResult<(solution::ClassRef<'sol>, &'sol Arc<builder::Variable<'sol>>)>,
-    > + 'sol {
-        iter::from_coroutine(
+    > + 'a
+    where
+        'sol: 'a,
+    {
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
-                let next_filter = match filter {
-                    VariableFilter::All => {
-                        for var in class_ref.class.instance_variables.values() {
-                            yield Ok((class_ref, var));
-                        }
-
-                        filter
-                    }
-                    VariableFilter::ForAccess(variable, access) => {
-                        let iname = (&variable.name.content).into();
-
-                        if let Some(var) = class_ref.class.instance_variables.get(&iname) {
-                            let var_protection = &var.unwrap_instance().access;
-
-                            if variable
-                                .is_write
-                                .then_some(&var_protection.write)
-                                .unwrap_or(&var_protection.read)
-                                .map_or(0, |acc| acc.strictness())
-                                <= access.strictness()
-                            {
-                                yield Ok((class_ref, var));
-                            } else {
-                                yield Err((ListError::NotAccessible, (class_ref, var)));
-                            }
-                        };
-
-                        let next_access =
-                            if access.strictness() <= tokenizer::AccessType::PRIVATE.strictness() {
-                                tokenizer::AccessType::PROTECTED
-                            } else {
-                                access
-                            };
-
-                        VariableFilter::ForAccess(variable, next_access)
-                    }
+            static move || {
+                let variables: BoxIter<_> = match filter.name {
+                    SearchFilter::Filter {
+                        want,
+                        do_error: false,
+                    } => Box::new(class_ref.class.instance_variables.get(want).into_iter()),
+                    _ => Box::new(class_ref.class.instance_variables.values()),
                 };
+
+                let variables = filter.name.filter(
+                    variables,
+                    |var, name| var.iname() == **name,
+                    ListError::WrongName,
+                );
+
+                let variables = filter.access.filter_res(
+                    variables,
+                    |var, (access, is_write)| {
+                        is_write
+                            .then_some(&var.unwrap_instance().access.write)
+                            .unwrap_or(&var.unwrap_instance().access.read)
+                            .map_or(0, |acc| acc.strictness())
+                            <= access.strictness()
+                    },
+                    ListError::NotAccessible,
+                );
+
+                for (var, err) in variables {
+                    yield ((class_ref, var), err);
+                }
+
+                filter.access = filter.access.map(|(access, is_write)| {
+                    (
+                        if access.strictness() <= tokenizer::AccessType::PRIVATE.strictness() {
+                            tokenizer::AccessType::PROTECTED
+                        } else {
+                            access
+                        },
+                        is_write,
+                    )
+                });
 
                 // TODO(groups): correct order?
                 // TODO(errors): can this lead to infinite recursion
                 if let Some(within) = class_ref.class.within() {
                     if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &within.into())
+                        self.find_class(class_ref.file, &(&within).into())
                     {
-                        for var in Box::new(self.variables_in_class(parent, next_filter.clone())) {
+                        for var in Box::new(self.variables_in_class(parent, filter.clone())) {
                             yield var;
                         }
                     }
                 }
 
                 if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &class_ref.class.base().into())
+                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
                 {
-                    for var in Box::new(self.variables_in_class(base, next_filter)) {
-                        yield var;
+                    for var in Box::new(self.variables_in_class(base, filter)) {
+                        yield var
                     }
                 }
             },
-        )
+        ))
     }
 
     pub fn events_in_class<'a>(
         &'sol self,
         class_ref: solution::ClassRef<'sol>,
         filter: EventFilter<'a>,
-    ) -> impl Iterator<Item = (solution::ClassRef<'sol>, &'sol builder::Event<'sol>)> + 'a
+    ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Event<'sol>)>> + 'a
     where
         'sol: 'a,
     {
-        iter::from_coroutine(
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
-                match filter {
-                    EventFilter::All => {
-                        for ev in class_ref.class.events.values() {
-                            yield (class_ref, ev);
-                        }
-                    }
-                    EventFilter::WithName(name) => {
-                        if let Some(ev) = class_ref.class.events.get(&name) {
-                            yield (class_ref, ev);
-                        }
-                    }
-                };
+            static move || {
+                let events = filter
+                    .name
+                    .filter_hash_map(&class_ref.class.events, ListError::WrongName);
+                for (ev, err) in events {
+                    yield ((class_ref, ev), err);
+                }
 
                 // TODO(groups): correct order?
                 if let Some(within) = class_ref.class.within() {
                     if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &within.into())
+                        self.find_class(class_ref.file, &(&within).into())
                     {
                         for ev in Box::new(self.events_in_class(parent, filter.clone())) {
                             yield ev;
@@ -355,105 +392,95 @@ impl<'sol> Solution {
                 }
 
                 if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &class_ref.class.base().into())
+                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
                 {
-                    for ev in Box::new(self.events_in_class(base, filter)) {
+                    for ev in self.events_in_class(base, filter) {
                         yield ev;
                     }
                 }
             },
-        )
+        ))
     }
 
     pub fn functions_in_class<'a>(
         &'sol self,
         class_ref: solution::ClassRef<'sol>,
-        filter: FunctionFilter<'sol, 'a>,
+        mut filter: FunctionFilter<'sol, 'a>,
     ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
-        iter::from_coroutine(
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
+            static move || {
                 for functions in vec![
                     &class_ref.class.functions,
                     &class_ref.class.external_functions,
                 ] {
-                    match filter {
-                        FunctionFilter::All => {
-                            for overloads in functions.values() {
-                                for overload in overloads.values() {
-                                    yield Ok((class_ref, overload));
-                                }
-                            }
-                        }
-                        FunctionFilter::ForCall(iname, arguments, access) => {
-                            if let Some(overloads) = functions.get(&iname) {
-                                for overload in overloads.values() {
-                                    let accessible = overload
-                                        .header()
-                                        .parsed
-                                        .access
-                                        .map_or(0, |acc| acc.strictness())
-                                        <= access.strictness();
+                    let all_funcs = filter
+                        .name
+                        .filter_hash_map(functions, ListError::WrongArguments);
+                    let funcs_iter =
+                        all_funcs.flat_map(|(f, err)| f.values().map(move |func| (func, err)));
 
-                                    let callable = self.is_function_callable(
-                                        class_ref.file,
-                                        overload.header(),
-                                        &arguments,
-                                    );
+                    // let funcs_iter: BoxIter<_> = match filter.signature {
+                    //     SearchFilter::Filter {
+                    //         want,
+                    //         do_error: false,
+                    //     } => Box::new(all_funcs.flat_map(|f| f.get(want).into_iter())),
+                    //     _ => Box::new(all_funcs.flat_map(|f| f.values())),
+                    // };
 
-                                    if accessible && callable {
-                                        yield Ok((class_ref, overload));
-                                    } else if !accessible {
-                                        yield Err((
-                                            ListError::NotAccessible,
-                                            (class_ref, overload),
-                                        ));
-                                    } else {
-                                        yield Err((
-                                            ListError::WrongArguments,
-                                            (class_ref, overload),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    };
+                    let funcs_iter = filter.arguments.filter_res(
+                        funcs_iter,
+                        |func, args| {
+                            self.is_function_callable(class_ref.file, func.header(), &args)
+                        },
+                        ListError::WrongArguments,
+                    );
+
+                    let funcs_iter = filter.access.filter_res(
+                        funcs_iter,
+                        |func, access| {
+                            func.header()
+                                .parsed
+                                .access
+                                .map_or(0, |acc| acc.strictness())
+                                <= access.strictness()
+                        },
+                        ListError::NotAccessible,
+                    );
+
+                    for (func, err) in funcs_iter {
+                        yield ((class_ref, func), err);
+                    }
                 }
 
-                let next_filter = match filter {
-                    FunctionFilter::All => filter,
-                    FunctionFilter::ForCall(iname, arguments, access) => {
-                        let next_access =
-                            if access.strictness() <= tokenizer::AccessType::PRIVATE.strictness() {
-                                tokenizer::AccessType::PROTECTED
-                            } else {
-                                access
-                            };
-
-                        FunctionFilter::ForCall(iname, arguments, next_access)
+                filter.access = filter.access.map(|access| {
+                    if access.strictness() <= tokenizer::AccessType::PRIVATE.strictness() {
+                        tokenizer::AccessType::PROTECTED
+                    } else {
+                        access
                     }
-                };
+                });
 
                 // TODO(groups): correct order? (parent before base?)
                 if let Some(within) = class_ref.class.within() {
                     if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &within.into())
+                        self.find_class(class_ref.file, &(&within).into())
                     {
-                        for func in Box::new(self.functions_in_class(parent, next_filter.clone())) {
+                        for func in Box::new(self.functions_in_class(parent, filter.clone())) {
                             yield func;
                         }
                     }
                 }
 
                 if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &class_ref.class.base().into())
+                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
                 {
-                    for func in Box::new(self.functions_in_class(base, next_filter)) {
+                    for func in self.functions_in_class(base, filter) {
                         yield func;
                     }
                 }
             },
-        )
+        ))
     }
 }

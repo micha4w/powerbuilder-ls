@@ -35,7 +35,10 @@ impl<T: Sized> Mutex<T> {
             match tokio::time::timeout(Duration::from_secs(5), self.m.lock()).await {
                 Ok(lock) => return lock,
                 Err(_) => {
-                    warn!(backtrace=Backtrace::capture().to_string(), "possible deadlock");
+                    warn!(
+                        backtrace = Backtrace::capture().to_string(),
+                        "possible deadlock"
+                    );
                 }
             }
         }
@@ -371,6 +374,47 @@ impl std::ops::Deref for IString {
 impl std::fmt::Display for IString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self._str.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Grouped<T> {
+    pub group: Option<T>,
+    pub name: T,
+}
+
+impl<T> Grouped<T> {
+    pub fn new(group: Option<T>, name: T) -> Self {
+        Self { group, name }
+    }
+    pub fn simple(name: T) -> Self {
+        Self { group: None, name }
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for Grouped<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(group) = &self.group {
+            write!(f, "{}`", group)?;
+        }
+        write!(f, "{}", self.name)
+    }
+}
+impl<T> From<(Option<T>, T)> for Grouped<T> {
+    fn from((group, name): (Option<T>, T)) -> Self {
+        Self { group, name }
+    }
+}
+
+impl<T, U> From<&Grouped<T>> for Grouped<U>
+where
+    T: Into<U> + Copy,
+{
+    fn from(value: &Grouped<T>) -> Self {
+        Self {
+            group: value.group.map(|g| g.into()),
+            name: value.name.into(),
+        }
     }
 }
 

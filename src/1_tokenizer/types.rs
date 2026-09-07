@@ -77,6 +77,14 @@ impl AccessType {
             AccessType::SYSTEMREAD | AccessType::SYSTEMWRITE => 3,
         }
     }
+
+    pub fn stricter(a: Self, b: Self) -> Self {
+        if a.strictness() >= b.strictness() {
+            a
+        } else {
+            b
+        }
+    }
 }
 
 #[derive(Clone, Copy, EnumString, Debug, PartialEq)]

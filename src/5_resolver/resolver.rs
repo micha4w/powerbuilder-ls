@@ -39,49 +39,38 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 return (ResolvedType::Unknown, None);
             };
 
-            let mut events = self
-                .ctx
-                .sol
-                .events_in_class(class, EventFilter::WithName(&iname));
+            let events = self.ctx.sol.events_in_class(
+                class,
+                EventFilter {
+                    name: SearchFilter::simple(&iname),
+                },
+            );
 
-            match events.next() {
-                Some((fc, event)) => {
-                    return (
-                        resolve_return_value(self, Some(fc), &event.header().returns),
-                        Some(ResolvedLValue::Method(class, OneOf::Right(event))),
-                    )
-                }
-
-                None => {}
+            if let Found::Yes(((fc, event), _err)) = Context::first(events) {
+                return (
+                    resolve_return_value(self, Some(fc), &event.header().returns),
+                    Some(ResolvedLValue::Method(class, OneOf::Right(event))),
+                );
             }
         } else {
+            let filter = FunctionFilter {
+                name: SearchFilter::simple(&iname),
+                access: SearchFilter::simple(tokenizer::AccessType::SYSTEMREAD),
+                arguments: SearchFilter::simple(arguments),
+            };
             match method_of {
                 Some(class) => {
-                    let funcs = self.ctx.functions_in_class(
-                        class,
-                        FunctionFilter::ForCall(
-                            &iname,
-                            &arguments,
-                            tokenizer::AccessType::SYSTEMREAD,
-                        ),
-                    );
+                    let funcs = self.ctx.functions_in_class(class, filter);
 
-                    match Context::first(funcs) {
-                        Found::Yes(((fc, func), _err)) => {
-                            return (
-                                resolve_return_value(self, Some(fc), &func.header().returns),
-                                Some(ResolvedLValue::Method(fc, OneOf::Left(func))),
-                            );
-                        }
-                        Found::No => {}
+                    if let Found::Yes(((fc, func), _err)) = Context::first(funcs) {
+                        return (
+                            resolve_return_value(self, Some(fc), &func.header().returns),
+                            Some(ResolvedLValue::Method(fc, OneOf::Left(func))),
+                        );
                     }
                 }
                 None => {
-                    let funcs = self.ctx.functions(FunctionFilter::ForCall(
-                        &iname,
-                        &arguments,
-                        tokenizer::AccessType::SYSTEMREAD,
-                    ));
+                    let funcs = self.ctx.functions(filter);
 
                     match Context::first(funcs) {
                         Found::Yes(((fc, func), _err)) => {
@@ -144,7 +133,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 let base = self
                     .ctx
                     .class
-                    .and_then(|fc| self.ctx.find_class(&fc.class.base().into()).as_option());
+                    .and_then(|fc| self.ctx.find_class(&(&fc.class.base()).into()).as_option());
 
                 resolved_lvalue = base.map(ResolvedLValue::Super);
                 resolved_type = base.map_or(ResolvedType::Unknown, ResolvedType::Complex);
@@ -152,7 +141,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
             parser::LValueType::Parent => {
                 let parent = self.ctx.class.and_then(|fc| {
                     match fc.class.within() {
-                        Some(within) => self.ctx.find_class(&within.into()).as_option(),
+                        Some(within) => self.ctx.find_class(&(&within).into()).as_option(),
                         None => {
                             // TODO(groups): is this correct?
                             let window_object = solution::Complex::Class(
@@ -174,10 +163,14 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 resolved_type = parent.map_or(ResolvedType::Unknown, ResolvedType::Complex);
             }
             parser::LValueType::Variable(access) => {
-                let vars = self.ctx.variables(VariableFilter::ForAccess(
-                    &access,
-                    tokenizer::AccessType::SYSTEMREAD,
-                ));
+                let iname = (&access.name.content).into();
+                let vars = self.ctx.variables(VariableFilter {
+                    name: SearchFilter::simple(&iname),
+                    access: SearchFilter::simple((
+                        tokenizer::AccessType::SYSTEMREAD,
+                        access.is_write,
+                    )),
+                });
 
                 match Context::first(vars) {
                     Found::Yes((var, _err)) => {
@@ -198,9 +191,16 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                     ResolvedType::Complex(solution::Complex::Class(class))
                         if member.name.token_type != tokenizer::TokenType::INVALID =>
                     {
+                        let iname = (&member.name.content).into();
                         let vars = self.ctx.variables_in_class(
                             class,
-                            VariableFilter::ForAccess(&member, tokenizer::AccessType::SYSTEMREAD),
+                            VariableFilter {
+                                name: SearchFilter::simple(&iname),
+                                access: SearchFilter::simple((
+                                    tokenizer::AccessType::SYSTEMREAD,
+                                    member.is_write,
+                                )),
+                            },
                         );
 
                         match Context::first(vars) {

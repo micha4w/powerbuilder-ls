@@ -1,22 +1,28 @@
-use std::any::Any;
+use std::{any::Any, default, fmt::format};
 
+use serde::de;
+use strum::IntoEnumIterator;
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser, solution,
-    resolver::{self, ResolvedType},
-    tokenizer,
-    types::Found,
+    builder, parser,
+    resolver::{self, FunctionFilter, ResolvedType, SearchFilter, VariableFilter},
+    solution, tokenizer,
+    types::{unwrap_enum, Url},
 };
 
-use super::{ls::PowerBuilderLS, ls_context::LSContext};
+use super::{
+    ls::{PowerBuilderLS, SolutionCell},
+    ls_context::LSContext,
+};
 
 impl PowerBuilderLS {
     pub(super) fn completion_capabilities(&self, caps: &mut lsp_types::ServerCapabilities) {
         caps.completion_provider = Some(lsp_types::CompletionOptions {
-            completion_item: Some(lsp_types::CompletionOptionsCompletionItem {
-                label_details_support: Some(true),
-            }),
+            // resolve_provider: Some(true),
+            // completion_item: Some(lsp_types::CompletionOptionsCompletionItem {
+            //     label_details_support: Some(true),
+            // }),
             ..Default::default()
         });
     }
@@ -67,7 +73,6 @@ impl PowerBuilderLS {
         err: Option<String>,
     ) {
         let mut name = func.header().parsed.name.content.clone() + "(";
-        let insert = name.clone() + ")";
         let has_args = func.header().arguments.len() > 0 || func.header().parsed.vararg.is_some();
         if has_args {
             name += "…";
@@ -88,8 +93,6 @@ impl PowerBuilderLS {
 
         items.push(lsp_types::CompletionItem {
             label: name,
-            label_details: None,
-            detail: None,
             deprecated: Some(err.is_some()),
             documentation: Some(lsp_types::Documentation::MarkupContent(
                 lsp_types::MarkupContent {
@@ -103,106 +106,278 @@ impl PowerBuilderLS {
         });
     }
 
-    // fn add_data_type(
-    //     items: &mut Vec<lsp_types::CompletionItem>,
-    //     data_type: &parser::DataType,
-    //     err: Option<String>,
-    // ) {
-    //     let name = data_type.to_string();
+    fn add_complex(
+        items: &mut Vec<lsp_types::CompletionItem>,
+        complex: &solution::Complex,
+        err: Option<String>,
+    ) {
+        let name = complex.name().to_string();
+        let mut documentation = format!(
+            "```powerbuilder\n{}\n```",
+            match complex {
+                solution::Complex::Class(fc) => fc.class.to_string(),
+                solution::Complex::Enum(en) => en.to_string(),
+            }
+        );
+        if let Some(help) = &complex.help() {
+            if !help.trim().is_empty() {
+                documentation += "\n---\n";
+                documentation += help;
+            }
+        }
 
-    //     items.push(lsp_types::CompletionItem {
-    //         label: name,
-    //         // label_details: Some(CompletionItemLabelDetails {
-    //         // detail: None,
-    //         // description: Some(data_type),
-    //         // }),
-    //         // detail: Some(detail),
-    //         deprecated: Some(err.is_some()),
-    //         documentation: err.map(lsp_types::Documentation::String),
-    //         kind: Some(lsp_types::CompletionItemKind::CLASS),
-    //         ..Default::default()
-    //     });
-    // }
+        items.push(lsp_types::CompletionItem {
+            label: name,
+            deprecated: Some(err.is_some()),
+            documentation: Some(lsp_types::Documentation::MarkupContent(
+                lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value: documentation,
+                },
+            )),
+            kind: Some(match complex {
+                solution::Complex::Class(_) => lsp_types::CompletionItemKind::CLASS,
+                solution::Complex::Enum(_) => lsp_types::CompletionItemKind::ENUM,
+            }),
+            ..Default::default()
+        });
+    }
+
+    fn add_builtin_types(items: &mut Vec<lsp_types::CompletionItem>) {
+        for t in builder::BaseType::iter() {
+            items.push(lsp_types::CompletionItem {
+                label: t.to_string(),
+                documentation: Some(lsp_types::Documentation::MarkupContent(
+                    lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: format!("```powerbuilder\n{}\n```", t),
+                    },
+                )),
+                kind: Some(lsp_types::CompletionItemKind::CLASS),
+                ..Default::default()
+            });
+        }
+    }
+    fn add_builtin_variables(items: &mut Vec<lsp_types::CompletionItem>, ctx: &LSContext<'_>) {
+        let Some(fc) = &ctx.class else {
+            return;
+        };
+
+        items.push(lsp_types::CompletionItem {
+            label: "this".to_string(),
+            detail: Some(fc.class.name().clone()),
+            kind: Some(lsp_types::CompletionItemKind::KEYWORD),
+            ..Default::default()
+        });
+
+        items.push(lsp_types::CompletionItem {
+            label: "super".to_string(),
+            detail: Some(fc.class.base().to_string()),
+            kind: Some(lsp_types::CompletionItemKind::KEYWORD),
+            ..Default::default()
+        });
+
+        if let Some(parent) = fc.class.within() {
+            items.push(lsp_types::CompletionItem {
+                label: "parent".to_string(),
+                detail: Some(parent.to_string()),
+                kind: Some(lsp_types::CompletionItemKind::KEYWORD),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn resolve_args<'sol>(
+        ctx: &'sol LSContext<'sol>,
+        args: &Vec<parser::Expression>,
+    ) -> Vec<&'sol ResolvedType<'sol>> {
+        args.iter()
+            .map(|expr| ctx.annotations.must_type(&expr.range))
+            .collect()
+    }
 
     pub(super) fn completion_impl(
         &self,
         ctx: &LSContext<'_>,
     ) -> jsonrpc::Result<Vec<lsp_types::CompletionItem>> {
         let mut items = Vec::new();
+        // TODO(perf): completionItem/resolve
 
-        match ctx.lowest_node {
-            builder::Node::InstanceVariableDeclaration(var) => {}
-            builder::Node::ScopedVariableDeclaration(var) => {}
-            builder::Node::VariableDeclaration(var) => {}
-            builder::Node::Label(token) => {}
-            builder::Node::FunctionDeclaration(func) => {}
-            builder::Node::EventDeclaration(event) => {}
-            builder::Node::LValue(lvalue) => match &lvalue.lvalue_type {
-                parser::LValueType::This
-                | parser::LValueType::Super
-                | parser::LValueType::Parent
-                | parser::LValueType::Variable(_) => {
+        match ctx.nodes.last() {
+            Some(builder::Node::InstanceVariableDeclaration(var)) => {}
+            Some(builder::Node::ScopedVariableDeclaration(var)) => {}
+            Some(builder::Node::VariableDeclaration(var)) => {}
+            Some(builder::Node::Label(token)) => {}
+            Some(builder::Node::FunctionDeclaration(func)) => {}
+            Some(builder::Node::EventDeclaration(event)) => {}
+            opt @ (None | Some(builder::Node::LValue(_))) => match opt
+                .map(|n| &unwrap_enum!(n, builder::Node::LValue).lvalue_type)
+            {
+                None
+                | Some(
+                    parser::LValueType::This
+                    | parser::LValueType::Super
+                    | parser::LValueType::Parent
+                    | parser::LValueType::Variable(_),
+                ) => {
                     // TODO(completion): correct behaviour for this, super, parent?
                     // TODO(completion): also add builtins to the completion list
 
-                    for var in ctx.variables(resolver::VariableFilter::All) {
-                        let found = var.expect("filter All does not error");
-                        Self::add_variable(&mut items, &found.class_ref(), found.variable, None);
+                    for (found, err) in ctx.variables(VariableFilter {
+                        access: SearchFilter::error((tokenizer::AccessType::PUBLIC, false)),
+                        ..Default::default()
+                    }) {
+                        Self::add_variable(
+                            &mut items,
+                            &found.class_ref(),
+                            found.variable,
+                            err.try_into().ok(),
+                        );
                     }
 
-                    for func in ctx.functions(resolver::FunctionFilter::All) {
-                        let (class, func) = func.expect("filter All does not error");
-                        Self::add_function(&mut items, &class, func, None);
+                    for ((class, func), err) in ctx.functions(FunctionFilter {
+                        access: SearchFilter::error(tokenizer::AccessType::PRIVATE),
+                        ..Default::default()
+                    }) {
+                        Self::add_function(&mut items, &class, func, err.try_into().ok());
                     }
 
-                    for (_, file) in &ctx.sol.files {
-                        for class in &file.inner().classes {
-                            // TODO(completion): add class
-                            // TODO(proj): also store class base and within
+                    for (class, err) in ctx.classes(Default::default()) {
+                        Self::add_complex(&mut items, &class, err.try_into().ok());
+                    }
+
+                    for en in ctx.sol.builtins().enums.values() {
+                        for val in &en.values {
+                            items.push(lsp_types::CompletionItem {
+                                label: val.clone(),
+                                documentation: Some(lsp_types::Documentation::MarkupContent(
+                                    lsp_types::MarkupContent {
+                                        kind: lsp_types::MarkupKind::Markdown,
+                                        value: format!(
+                                            "```powerbuilder\n{}\n{} {}\n```",
+                                            en, en.name, val
+                                        ),
+                                    },
+                                )),
+                                kind: Some(lsp_types::CompletionItemKind::ENUM_MEMBER),
+                                ..Default::default()
+                            });
                         }
                     }
+
+                    Self::add_builtin_types(&mut items);
+                    Self::add_builtin_variables(&mut items, ctx);
                 }
-                parser::LValueType::Member(lvalue, access) => {
+                Some(parser::LValueType::Member(lvalue, access)) => {
                     if let ResolvedType::Complex(solution::Complex::Class(fc)) =
                         ctx.annotations.must_type(&lvalue.range)
                     {
-                        // TODO(completion): error when member is not accessible
-                        for var in ctx.variables_in_class(*fc, resolver::VariableFilter::All) {
-                            let (class, var) = var.expect("filter All does not error");
-                            Self::add_variable(&mut items, &Some(class), var, None);
+                        for ((class, var), err) in ctx.variables_in_class(
+                            *fc,
+                            VariableFilter {
+                                access: SearchFilter::error((
+                                    tokenizer::AccessType::PUBLIC,
+                                    access.is_write,
+                                )),
+                                ..Default::default()
+                            },
+                        ) {
+                            Self::add_variable(&mut items, &Some(class), var, err.try_into().ok());
                         }
 
-                        for func in ctx.functions_in_class(*fc, resolver::FunctionFilter::All) {
-                            let (class, func) = func.expect("filter All does not error");
-                            Self::add_function(&mut items, &Some(class), func, None);
+                        for ((class, func), err) in ctx.functions_in_class(
+                            *fc,
+                            FunctionFilter {
+                                access: SearchFilter::error(tokenizer::AccessType::PUBLIC),
+                                ..Default::default()
+                            },
+                        ) {
+                            Self::add_function(&mut items, &Some(class), func, err.try_into().ok());
                         }
                     }
                 }
-                parser::LValueType::Function(call) => {
-                    // TODO(completion): error when arguments do not match
-                    for func in ctx.functions(resolver::FunctionFilter::All) {
-                        let (class, func) = func.expect("filter All does not error");
-                        Self::add_function(&mut items, &class, func, None);
+                Some(parser::LValueType::Function(call)) => {
+                    for ((class, func), err) in ctx.functions(FunctionFilter {
+                        arguments: SearchFilter::error(&Self::resolve_args(ctx, &call.arguments)),
+                        access: SearchFilter::error(tokenizer::AccessType::PRIVATE),
+                        ..Default::default()
+                    }) {
+                        Self::add_function(&mut items, &class, func, err.try_into().ok());
                     }
                 }
-                parser::LValueType::Method(lvalue, call) => {
+                Some(parser::LValueType::Method(lvalue, call)) => {
                     if let ResolvedType::Complex(solution::Complex::Class(fc)) =
                         ctx.annotations.must_type(&lvalue.range)
                     {
-                        for func in ctx.functions_in_class(*fc, resolver::FunctionFilter::All) {
-                            let (class, func) = func.expect("filter All does not error");
-                            Self::add_function(&mut items, &Some(class), func, None);
+                        for ((class, func), err) in ctx.functions_in_class(
+                            *fc,
+                            FunctionFilter {
+                                arguments: SearchFilter::error(&Self::resolve_args(
+                                    ctx,
+                                    &call.arguments,
+                                )),
+                                access: SearchFilter::error(tokenizer::AccessType::PUBLIC),
+                                ..Default::default()
+                            },
+                        ) {
+                            Self::add_function(&mut items, &Some(class), func, err.try_into().ok());
                         }
                     }
                 }
-                parser::LValueType::Index(..) => {}
-                parser::LValueType::SQLAccess(..) => {}
+                Some(parser::LValueType::Index(..)) => {}
+                Some(parser::LValueType::SQLAccess(..)) => {}
             },
-            builder::Node::Expression(expr) => {}
-            builder::Node::Statement(_) => {}
-            builder::Node::DataType(dt) => {}
+            Some(builder::Node::Expression(expr)) => {}
+            Some(builder::Node::Statement(_)) => {}
+            Some(builder::Node::DataType(dt)) => {}
         }
 
         Ok(items)
     }
+
+    fn completion_resolve_impl(
+        &self,
+        sol: &SolutionCell,
+        mut params: lsp_types::CompletionItem,
+    ) -> jsonrpc::Result<lsp_types::CompletionItem> {
+        let Some(data) = &params.data else {
+            return Ok(params);
+        };
+
+        Ok(params)
+    }
 }
+
+// #[derive(serde::Serialize, serde::Deserialize)]
+// struct CompletionDataClass {
+//     file: Url,
+//     name: String,
+// }
+
+// #[derive(serde::Serialize, serde::Deserialize)]
+// struct CompletionDataFunction {
+//     class: CompletionDataClass,
+//     name: String,
+//     signature: String,
+// }
+
+// #[derive(serde::Serialize, serde::Deserialize)]
+// enum CompletionDataBody {
+//     Function(CompletionDataFunction),
+// }
+
+// #[derive(serde::Serialize, serde::Deserialize)]
+// struct CompletionDataVariable {
+//     body: CompletionDataFunction,
+//     name: String,
+// }
+
+// #[derive(serde::Serialize, serde::Deserialize)]
+// enum CompletionData {
+//     Variable(CompletionDataVariable),
+//     Function(CompletionDataFunction),
+//     Class(CompletionDataClass),
+
+//     Enum(String),
+//     EnumVariant(String, String),
+// }

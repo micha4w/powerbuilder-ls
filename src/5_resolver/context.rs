@@ -140,105 +140,107 @@ impl<'sol> Context<'sol> {
         );
     }
 
-    pub fn find_class(&self, name: &IString) -> Found<solution::Complex<'sol>> {
+    pub fn find_class(&self, name: &Grouped<IString>) -> Found<solution::Complex<'sol>> {
         self.sol.find_class(Some(self.file), name)
     }
 
-    pub fn variables_in_class(
+    pub fn classes<'a>(
+        &'a self,
+        filter: ClassFilter<'sol>,
+    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'a
+    where
+        'sol: 'a,
+    {
+        self.sol.classes(Some(self.file), filter)
+    }
+
+    pub fn variables_in_class<'a>(
         &self,
         class: solution::ClassRef<'sol>,
-        filter: VariableFilter<'sol>,
+        mut filter: VariableFilter<'a>,
     ) -> impl Iterator<
         Item = ListResult<(solution::ClassRef<'sol>, &'sol Arc<builder::Variable<'sol>>)>,
-    > + '_ {
+    > + 'a
+    where
+        'sol: 'a,
+    {
         let level = self
             .class
             .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
                 self.sol.get_access_for(current_class, class)
             });
 
-        self.sol
-            .variables_in_class(class, filter.with_access(level))
+        filter.access = filter
+            .access
+            .map(|(old_level, w)| (tokenizer::AccessType::stricter(level, old_level), w));
+
+        self.sol.variables_in_class(class, filter)
     }
 
-    pub fn variables(
-        &self,
-        filter: VariableFilter<'sol>,
-    ) -> impl Iterator<Item = ListResult<FoundVariable<'sol>>> + '_ {
-        iter::from_coroutine(
+    pub fn variables<'a>(
+        &'a self,
+        filter: VariableFilter<'a>,
+    ) -> impl Iterator<Item = ListResult<FoundVariable<'sol>>> + 'a {
+        iter::from_coroutine(Box::pin(
             #[coroutine]
-            move || {
+            static move || {
                 if let Some(body) = self.body {
-                    match &filter {
-                        VariableFilter::All => {
-                            for var in body.variables.values() {
-                                yield Ok(FoundVariable::new(self.file, var));
-                            }
-                        }
-                        VariableFilter::ForAccess(variable, _) => {
-                            if let Some(var) = body.variables.get(&(&variable.name.content).into())
-                            {
-                                yield Ok(FoundVariable::new(self.file, var));
-                            }
-                        }
+                    for (var, err) in filter
+                        .name
+                        .filter_hash_map(&body.variables, ListError::WrongName)
+                    {
+                        yield (FoundVariable::new(self.file, var), err);
                     }
                 }
 
                 if let Some(arguments) = &self.arguments {
-                    match &filter {
-                        VariableFilter::All => {
-                            for var in arguments.values() {
-                                yield Ok(FoundVariable::new(self.file, var));
-                            }
-                        }
-                        VariableFilter::ForAccess(variable, _) => {
-                            if let Some(var) = arguments.get(&(&variable.name.content).into()) {
-                                yield Ok(FoundVariable::new(self.file, var));
-                            }
-                        }
+                    for (var, err) in filter
+                        .name
+                        .filter_hash_map(&arguments, ListError::WrongName)
+                    {
+                        yield (FoundVariable::new(self.file, var), err);
                     }
                 }
 
                 if let Some(class) = self.class {
-                    for var in self.sol.variables_in_class(
-                        class,
-                        filter.clone().with_access(tokenizer::AccessType::PRIVATE),
-                    ) {
-                        yield Self::map_res(var, |(class, t)| {
-                            FoundVariable::new_instance(class, t)
-                        });
+                    let mut filter = filter.clone();
+                    filter.access = filter
+                        .access
+                        .map(|(_, is_write)| (tokenizer::AccessType::PRIVATE, is_write));
+
+                    for ((class, var), err) in self.sol.variables_in_class(class, filter) {
+                        yield (FoundVariable::new_instance(class, var), err);
                     }
                 }
 
-                match &filter {
-                    VariableFilter::All => {
-                        for var in self.file.inner().variables.values() {
-                            yield Ok(FoundVariable::new(self.file, var));
-                        }
-                    }
-                    VariableFilter::ForAccess(variable, _) => {
-                        if let Some(var) = self
-                            .file
-                            .inner()
-                            .variables
-                            .get(&(&variable.name.content).into())
-                        {
-                            yield Ok(FoundVariable::new(self.file, var));
-                        }
-                    }
+                for (var, err) in filter
+                    .name
+                    .filter_hash_map(&self.file.inner().variables, ListError::WrongName)
+                {
+                    yield (FoundVariable::new(self.file, var), err);
                 }
 
-                for var in self.sol.global_variables(filter) {
-                    yield Self::map_res(var, |var| FoundVariable::new(self.file, var));
+                let globals = self.sol.global_variables(GlobalVariableFilter {
+                    name: filter.name,
+                    accessible: match filter.access {
+                        SearchFilter::Filter { do_error: true, .. } => SearchFilter::Filter {
+                            want: (),
+                            do_error: true,
+                        },
+                        _ => SearchFilter::All,
+                    },
+                });
+                for (var, err) in globals {
+                    yield (FoundVariable::new(self.file, var), err);
                 }
             },
-        )
+        ))
     }
 
     pub fn functions_in_class<'a>(
         &'a self,
         class: solution::ClassRef<'sol>,
-        filter: FunctionFilter<'sol, 'a>,
+        mut filter: FunctionFilter<'sol, 'a>,
     ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
         let level = self
@@ -247,8 +249,11 @@ impl<'sol> Context<'sol> {
                 self.sol.get_access_for(current_class, class)
             });
 
-        self.sol
-            .functions_in_class(class, filter.with_access(level))
+        filter.access = filter
+            .access
+            .map(|old_level| tokenizer::AccessType::stricter(level, old_level));
+
+        self.sol.functions_in_class(class, filter)
     }
 
     pub fn functions<'a>(
@@ -264,55 +269,34 @@ impl<'sol> Context<'sol> {
             #[coroutine]
             move || {
                 if let Some(class) = self.class {
-                    for func in self.sol.functions_in_class(
-                        class,
-                        filter.clone().with_access(tokenizer::AccessType::PRIVATE),
-                    ) {
-                        yield Self::map_res(func, |(class, t)| (Some(class), t));
+                    let mut filter = filter.clone();
+                    filter.access = filter.access.map(|old_level| {
+                        tokenizer::AccessType::stricter(tokenizer::AccessType::PRIVATE, old_level)
+                    });
+
+                    for ((class, func), err) in self.sol.functions_in_class(class, filter) {
+                        yield ((Some(class), func), err);
                     }
                 }
 
-                match filter {
-                    FunctionFilter::ForCall(iname, arg_types, _) => {
-                        for func in self.sol.global_functions(Some(self.file), filter) {
-                            yield Self::map_res(func, |(class, t)| (Some(class), t));
-                        }
-
-                        if let Some(overloads) =
-                            self.sol.builtins.borrow_dependent().functions.get(&iname)
-                        {
-                            for overload in overloads {
-                                if self.sol.is_function_callable(
-                                    Some(self.file),
-                                    &overload.header(),
-                                    &arg_types,
-                                ) {
-                                    yield Ok((None, overload));
-                                } else {
-                                    yield Err((ListError::WrongArguments, (None, overload)));
-                                }
-                            }
-                        }
-                    }
-                    FunctionFilter::All => {
-                        // TODO: find all global functions
-
-                        for overloads in self.sol.builtins.borrow_dependent().functions.values() {
-                            for overload in overloads {
-                                yield Ok((None, overload));
-                            }
-                        }
-                    }
+                for func in self.sol.global_functions(
+                    Some(self.file),
+                    GlobalFunctionFilter {
+                        name: filter.name,
+                        accessible: match filter.access {
+                            SearchFilter::Filter { do_error: true, .. } => SearchFilter::Filter {
+                                want: (),
+                                do_error: true,
+                            },
+                            _ => SearchFilter::All,
+                        },
+                        arguments: filter.arguments,
+                    },
+                ) {
+                    yield func;
                 }
             },
         )
-    }
-
-    pub fn map_res<T, U>(res: ListResult<T>, f: impl FnOnce(T) -> U) -> ListResult<U> {
-        match res {
-            Ok(val) => Ok(f(val)),
-            Err((err, val)) => Err((err, f(val))),
-        }
     }
 
     // pub fn some_class<T>(
@@ -327,27 +311,27 @@ impl<'sol> Context<'sol> {
     //     Self::map_res(val, |t| (None, t))
     // }
 
-    pub fn gather<T>(iter: impl Iterator<Item = ListResult<T>>) -> Result<T, Vec<(ListError, T)>> {
+    pub fn gather<T>(iter: impl Iterator<Item = ListResult<T>>) -> Result<T, Vec<(T, ListError)>> {
         let mut errors = Vec::new();
 
-        for item in iter {
-            match item {
-                Ok(ok) => return Ok(ok),
-                Err(err) => errors.push(err),
+        for (val, err) in iter {
+            if err.is_empty() {
+                return Ok(val);
             }
+            errors.push((val, err));
         }
 
         Err(errors)
     }
 
-    pub fn first<T>(iter: impl Iterator<Item = ListResult<T>>) -> Found<(T, Option<ListError>)> {
+    pub fn first<T>(iter: impl Iterator<Item = ListResult<T>>) -> Found<(T, ListError)> {
         let mut fail = Found::No;
 
         for item in iter {
-            match item {
-                Ok(ok) => return Found::Yes((ok, None)),
-                Err((err, t)) => fail = Found::Yes((t, Some(err))),
+            if item.1.is_empty() {
+                return Found::Yes(item);
             }
+            fail = Found::Yes(item);
         }
 
         fail

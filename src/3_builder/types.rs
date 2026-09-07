@@ -1,9 +1,12 @@
 use core::panic;
 use std::{
+    borrow::Cow,
     collections::{hash_map, HashMap},
     fmt,
     sync::Arc,
 };
+
+use strum::EnumIter;
 
 use crate::{
     parser::{self, SQLDeclareProcedureStatement, SQLSelectStatement},
@@ -13,7 +16,7 @@ use crate::{
 
 pub type TopLevelIndex = usize;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EnumIter)]
 pub enum BaseType {
     Blob(Option<usize>),
     Boolean,
@@ -68,30 +71,42 @@ impl BaseType {
             _ => None,
         }
     }
+
+    pub fn name(&self) -> Cow<'static, str> {
+        match self {
+            BaseType::Boolean => "boolean".into(),
+            BaseType::Byte => "byte".into(),
+            BaseType::Char => "char".into(),
+            BaseType::Date => "date".into(),
+            BaseType::Datetime => "datetime".into(),
+            BaseType::Double => "double".into(),
+            BaseType::Int => "int".into(),
+            BaseType::Long => "long".into(),
+            BaseType::Longlong => "longlong".into(),
+            BaseType::Longptr => "longptr".into(),
+            BaseType::Real => "real".into(),
+            BaseType::String => "string".into(),
+            BaseType::Time => "time".into(),
+            BaseType::Uint => "uint".into(),
+            BaseType::Ulong => "ulong".into(),
+            BaseType::Any => "any".into(),
+            BaseType::Blob(size) => {
+                let mut cow: Cow<'static, str> = "blob".into();
+                size.map(|s| cow.to_mut().push_str(&format!("{{{}}}", s)));
+                cow
+            }
+            BaseType::Decimal(prec) => {
+                let mut cow: Cow<'static, str> = "decimal".into();
+                prec.map(|p| cow.to_mut().push_str(&format!("{{{}}}", p)));
+                cow
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for BaseType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BaseType::Blob(_) => write!(f, "blob"),
-            BaseType::Boolean => write!(f, "boolean"),
-            BaseType::Byte => write!(f, "byte"),
-            BaseType::Char => write!(f, "char"),
-            BaseType::Date => write!(f, "date"),
-            BaseType::Datetime => write!(f, "datetime"),
-            BaseType::Double => write!(f, "double"),
-            BaseType::Int => write!(f, "int"),
-            BaseType::Long => write!(f, "long"),
-            BaseType::Longlong => write!(f, "longlong"),
-            BaseType::Longptr => write!(f, "longptr"),
-            BaseType::Real => write!(f, "real"),
-            BaseType::String => write!(f, "string"),
-            BaseType::Time => write!(f, "time"),
-            BaseType::Uint => write!(f, "uint"),
-            BaseType::Ulong => write!(f, "ulong"),
-            BaseType::Decimal(_) => write!(f, "decimal"),
-            BaseType::Any => write!(f, "any"),
-        }
+        write!(f, "type {} from builtins", self.name())
     }
 }
 
@@ -332,7 +347,8 @@ pub struct EventDefinition<'pars> {
     pub body: Body<'pars>,
 }
 
-pub type Event<'pars> = DefinitionDeclaration<Arc<EventDefinition<'pars>>, Arc<EventDeclaration<'pars>>>;
+pub type Event<'pars> =
+    DefinitionDeclaration<Arc<EventDefinition<'pars>>, Arc<EventDeclaration<'pars>>>;
 
 impl<'pars> Event<'pars> {
     pub fn header(&self) -> &EventHeader<'pars> {
@@ -362,20 +378,13 @@ pub struct FunctionHeader<'pars> {
 impl FunctionHeader<'_> {
     pub fn new(parsed: &parser::Function) -> FunctionHeader<'_> {
         FunctionHeader {
-            returns: parsed
-                .returns
-                .as_ref()
-                .map(DataType::new),
+            returns: parsed.returns.as_ref().map(DataType::new),
             arguments: parsed
                 .arguments
                 .iter()
                 .map(|arg| Arc::new(Variable::new_argument(arg)))
                 .collect(),
-            throws: parsed
-                .throws
-                .iter()
-                .map(DataType::new)
-                .collect(),
+            throws: parsed.throws.iter().map(DataType::new).collect(),
 
             parsed,
         }
@@ -443,7 +452,13 @@ impl Function<'_> {
 pub struct Enum {
     pub name: String,
     pub help: Option<String>,
-    pub values: Vec<String>,
+    pub values: Vec<String>, // values including suffix !
+}
+
+impl fmt::Display for Enum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "type {} from enumerated", self.name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +476,7 @@ pub struct Class<'pars> {
 }
 
 impl<'pars> Class<'pars> {
-    pub fn new(parsed: &'pars parser::DatatypeDecl) -> Class<'pars>{
+    pub fn new(parsed: &'pars parser::DatatypeDecl) -> Class<'pars> {
         Class {
             is_global: matches!(parsed.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
 
@@ -484,12 +499,18 @@ impl<'pars> Class<'pars> {
         self.name().into()
     }
 
-    pub fn base(&self) -> &String {
-        &self.parsed.class.base.name.content
+    pub fn base(&self) -> Grouped<&String> {
+        Grouped {
+            group: self.parsed.class.base.group.as_ref().map(|b| &b.content),
+            name: &self.parsed.class.base.name.content,
+        }
     }
 
-    pub fn within(&self) -> Option<&String> {
-        self.parsed.class.within.as_ref().map(|g| &g.name.content)
+    pub fn within(&self) -> Option<Grouped<&String>> {
+        self.parsed.class.within.as_ref().map(|g| Grouped {
+            group: g.group.as_ref().map(|b| &b.content),
+            name: &g.name.content,
+        })
     }
 
     pub fn function_entry<'a>(

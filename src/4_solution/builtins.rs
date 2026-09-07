@@ -247,7 +247,8 @@ pub struct BuiltinsInner<'pars> {
     pub enums_value_cache: HashMap<IString, IString>,
     pub functions: HashMap<
         IString,
-        Vec<
+        HashMap<
+            IString,
             DefinitionDeclaration<
                 Arc<builder::FunctionDefinition<'pars>>,
                 Arc<builder::FunctionDeclaration<'pars>>,
@@ -342,7 +343,10 @@ impl<'pars> BuiltinsInner<'pars> {
             self.functions
                 .entry(new_func.header.iname())
                 .or_default()
-                .push(DefinitionDeclaration::declaration(Arc::new(new_func)));
+                .insert(
+                    new_func.header.signature(),
+                    DefinitionDeclaration::declaration(Arc::new(new_func)),
+                );
         }
     }
 }

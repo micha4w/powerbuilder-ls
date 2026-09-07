@@ -138,6 +138,17 @@ impl LanguageServer for PowerBuilderLS {
         Ok(items.map(CompletionResponse::Array))
     }
 
+    // #[cfg(feature = "completion")]
+    // async fn completion_resolve(&self, params: CompletionItem) -> jsonrpc::Result<CompletionItem> {
+    //     let items = self
+    //         .with_context(params.text_document_position, |ctx| {
+    //             self.completion_impl(ctx).map(Some)
+    //         })
+    //         .await?;
+
+    //     Ok(items.map(CompletionResponse::Array))
+    // }
+
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = Arc::new(params.text_document.uri);
 

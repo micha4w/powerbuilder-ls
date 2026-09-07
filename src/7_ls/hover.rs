@@ -1,9 +1,9 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser, solution,
+    builder, parser,
     resolver::{ResolvedLValue, ResolvedType},
-    tokenizer,
+    solution, tokenizer,
     types::*,
 };
 
@@ -18,11 +18,15 @@ impl PowerBuilderLS {
         &self,
         ctx: &LSContext<'_>,
     ) -> jsonrpc::Result<Option<(String, Range)>> {
+        let Some(lowest_node) = ctx.nodes.last() else {
+            return Ok(None);
+        };
+
         let mut title = None;
         let mut description = None;
-        let mut range = ctx.lowest_node.get_range();
+        let range = lowest_node.get_range();
 
-        match ctx.lowest_node {
+        match lowest_node {
             builder::Node::VariableDeclaration(var) => {
                 title = Some(var.to_string());
                 description = var.help.clone();
@@ -134,11 +138,11 @@ impl PowerBuilderLS {
                 description = fc.class.help.cloned();
             }
             ResolvedType::Complex(solution::Complex::Enum(en)) => {
-                title = format!("type {} from enumerated", en.name);
+                title = en.name.to_string();
                 description = en.help.clone();
             }
             ResolvedType::Base(base_type) => {
-                title = format!("type {} from primitives", base_type);
+                title = base_type.to_string();
             }
             ResolvedType::Array(inner) => {
                 let (inner_title, inner_description) = Self::hover_type(&inner);

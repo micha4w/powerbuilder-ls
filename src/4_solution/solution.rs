@@ -361,7 +361,7 @@ impl<'sol> Solution {
             return Found::Yes(false);
         };
 
-        match self.find_class(r#ref.file, &r#ref.class.base().into()) {
+        match self.find_class(r#ref.file, &(&r#ref.class.base()).into()) {
             Found::Yes(parent) => self.inherits_from(&parent, base),
             Found::No => Found::No,
         }
@@ -370,7 +370,7 @@ impl<'sol> Solution {
     pub fn get_parent(&'sol self, class_ref: ClassRef<'sol>) -> Option<ClassRef<'sol>> {
         if let Some(within) = class_ref.class.within() {
             if let Found::Yes(Complex::Class(class)) =
-                self.find_class(class_ref.file, &within.into())
+                self.find_class(class_ref.file, &(&within).into())
             {
                 return Some(class);
             }
@@ -406,23 +406,26 @@ impl<'sol> Solution {
     pub fn find_class(
         &'sol self,
         current_file: Option<&'sol BuiltFile>,
-        name: &IString,
+        id: &Grouped<IString>,
     ) -> Found<Complex<'sol>> {
         if let Some(file) = current_file {
-            if let Some(class) = file.inner().classes.get(name) {
-                return Found::Yes(Complex::Class(ClassRef::new(file, class)));
+            if let Some(class) = file.inner().classes.get(&id.name) {
+                if class.within().map(|w| w.name.into()) == id.group {
+                    return Found::Yes(Complex::Class(ClassRef::new(file, class)));
+                }
             }
         }
 
-        if let Some((file, class)) = self.get_file_for_class(name) {
+        if let Some((file, class)) = self.get_file_for_class(id.group.as_ref().unwrap_or(&id.name))
+        {
             return Found::Yes(Complex::Class(ClassRef::new(file, class)));
         }
 
-        if let Some(en) = self.builtins.borrow_dependent().enums.get(name) {
+        if let Some(en) = self.builtins.borrow_dependent().enums.get(&id.name) {
             return Found::Yes(Complex::Enum(en));
         }
 
-        if let Some(class) = self.builtins.borrow_dependent().classes.get(name) {
+        if let Some(class) = self.builtins.borrow_dependent().classes.get(&id.name) {
             return Found::Yes(Complex::Class(ClassRef::builtin(class)));
         }
 

@@ -129,38 +129,12 @@ pub(super) use ret_res;
 //     }
 // }
 
-#[derive(Debug, Clone)]
-pub struct GroupedName {
-    pub group: Option<Token>,
-    pub name: Token,
-}
-
-impl From<(Option<Token>, Token)> for GroupedName {
-    fn from((group, name): (Option<Token>, Token)) -> Self {
-        Self { group, name }
-    }
-}
+pub type GroupedName = Grouped<Token>;
 
 impl GroupedName {
-    pub fn new(group: Option<Token>, name: Token) -> Self {
-        Self { group, name }
-    }
-    pub fn simple(name: Token) -> Self {
-        Self { group: None, name }
-    }
-
     pub fn same_type(a: &GroupedName, b: &GroupedName) -> bool {
         return a.name.content == b.name.content
             && a.group.as_ref().map(|g| &g.content) == b.group.as_ref().map(|g| &g.content);
-    }
-}
-
-impl fmt::Display for GroupedName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(g) = &self.group {
-            write!(f, "{}`", g.content)?;
-        }
-        write!(f, "{}", self.name.content)
     }
 }
 
@@ -650,7 +624,14 @@ impl fmt::Display for ExpressionType {
                 left.expression_type, operator, right.expression_type
             ),
             Self::UnaryOperation(operator, expression) => {
-                write!(f, "{} {}", operator, expression.expression_type)
+                write!(f, "{}", operator)?;
+                if !matches!(
+                    operator,
+                    tokenizer::Operator::PLUS | tokenizer::Operator::MINUS,
+                ) {
+                    write!(f, " ")?;
+                };
+                write!(f, "{}", expression.expression_type)
             }
             Self::IncrementDecrement(expression, operator) => write!(
                 f,

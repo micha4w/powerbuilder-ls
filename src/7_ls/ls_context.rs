@@ -18,8 +18,8 @@ pub struct LSContext<'sol> {
     pub ctx: resolver::Context<'sol>,
     pub annotations: &'sol FileAnnotations<'sol>,
 
+    pub top_level: &'sol builder::TopLevel<'sol>,
     pub nodes: Vec<builder::Node<'sol>>,
-    pub lowest_node: builder::Node<'sol>,
 }
 
 impl<'sol> LSContext<'sol> {
@@ -46,7 +46,6 @@ impl<'sol> LSContext<'sol> {
         let ctx = resolver::Context::new(sol, file, &pos);
 
         let (top_level, nodes) = file.inner().get_nodes_at(pos)?;
-        let lowest_node = nodes.last()?.clone();
 
         Some(LSContext {
             uri,
@@ -55,8 +54,8 @@ impl<'sol> LSContext<'sol> {
             ctx,
             annotations,
 
+            top_level,
             nodes,
-            lowest_node,
         })
     }
 }

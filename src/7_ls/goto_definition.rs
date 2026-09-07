@@ -17,9 +17,12 @@ impl PowerBuilderLS {
         &self,
         ctx: &LSContext<'_>,
     ) -> jsonrpc::Result<Option<Range>> {
-        let mut range = None;
+        let Some(lowest_node) = ctx.nodes.last() else {
+            return Ok(None);
+        };
 
-        match &ctx.lowest_node {
+        let mut range = None;
+        match &lowest_node {
             builder::Node::VariableDeclaration(var) => {
                 range = Some(var.access.name.range.clone());
             }
