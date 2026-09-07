@@ -45,14 +45,11 @@ impl LanguageServer for PowerBuilderLS {
         #[cfg(feature = "diagnostics")]
         self.diagnostics_capabilities(&mut capabilities);
 
-        let Some(root) = params.root_uri else {
-            return Err(jsonrpc::Error::invalid_params("Missing root URI"));
-        };
-        let sol = solution::Solution::new(&root).map_err(|err| {
-            jsonrpc::Error::invalid_params(format!(
-                "Failed to load solution from root URI ({}) {:?}",
-                root, err
-            ))
+        // let Some(root) = params.root_uri else {
+        //     return Err(jsonrpc::Error::invalid_params("Missing root URI"));
+        // };
+        let sol = solution::Solution::new(params.root_uri.as_ref()).map_err(|err| {
+            jsonrpc::Error::invalid_params(format!("Failed to load solution {:?}", err))
         })?;
 
         let mut lock = self.m.write().await;

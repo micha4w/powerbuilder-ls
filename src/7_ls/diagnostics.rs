@@ -38,7 +38,13 @@ impl PowerBuilderLSInner {
         self.sol.with_dependent(|sol, dep| {
             let Some(file) = sol.files.get(uri) else {
                 warn!(%uri, "file not found when sending diagnostics");
-                return Ok(None);
+                return Ok(Some(vec![lsp_types::Diagnostic {
+                    range: lsp_types::Range::default(),
+                    severity: Some(lsp_types::DiagnosticSeverity::INFORMATION),
+                    message: "File is not part of the current project".to_string(),
+                    ..Default::default()
+                }]));
+                // return Ok(None);
             };
             let Some(annotations) = dep.annotations.get(uri) else {
                 warn!(%uri, "annotations not found when sending diagnostics");

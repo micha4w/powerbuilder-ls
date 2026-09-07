@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     builder::{self},
@@ -33,8 +33,8 @@ impl<'sol> LSContext<'sol> {
         let uri = Arc::new(uri.clone());
 
         let Some(file) = sol.files.get(&uri) else {
-            // TODO(errors): return error here
-            warn!(%uri, "file not found");
+            // this happens when the user opens a file that is not part of the project
+            info!(%uri, "file not found");
             return None;
         };
         let Some(annotations) = dep.annotations.get(&uri) else {
