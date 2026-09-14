@@ -9,24 +9,21 @@ A PowerBuilder Language Server with support for some basic features:
    - Basic Completion
    - Hover
 
-## Usage
-Preferably open a workspace with a `.pbsln` at the root of the project, the Server will detect the file and load the default project.
-
-If you open a PowerBuilder file outside of a Solution, the Server will only use files that have been opened.
-
-## Building
-Best to build this in release mode because speed:
-```rust
-cargo build --release
-```
-
 ## Install
 VSCode is the only editor supported by this project, but since this uses the LSP standard you should be able to install it on any editor that supports adding Custom Language Servers.
 
 ### VSCode
 Get a `.vsix` file from the [Releases](../../releases) and install it using `code --install-extension powerbuilder-*.vsix` or using `> Extensions: Install from VSIX...`.
 
+
+## Usage
+Preferably open a workspace with a `.pbsln` at the root of the project, the Server will detect the file and load the default project.
+
+If you open a PowerBuilder file outside of a Solution, the Server will only use files that have been opened.
+
 ## Contributing
+Take a look at [ARCHITECTURE.md](./ARCHITECTURE.md) to get a base idea of the project.
+
 ### TODOs
 Here are PowerBuilder features that are not supported yet or other general improvements that need work on, most of them have `TODO(*topic*)` comments inside the code that you can search for
 
