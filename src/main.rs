@@ -1,30 +1,30 @@
 #![feature(try_trait_v2, try_trait_v2_residual)]
-#![feature(coroutines, coroutine_trait, stmt_expr_attributes, iter_from_coroutine)]
-
+#![feature(coroutines, stmt_expr_attributes, iter_from_coroutine)]
 
 mod types;
-mod utils;
 
-#[path="1_tokenizer/mod.rs"]
-mod tokenizer;
-#[path="2_parser/mod.rs"]
-mod parser;
-#[path="3_builder/mod.rs"]
+#[path = "3_builder/mod.rs"]
 mod builder;
-#[path="4_solution/mod.rs"]
-mod solution;
-#[path="5_resolver/mod.rs"]
-mod resolver;
-#[path="6_linter/mod.rs"]
+#[path = "6_linter/mod.rs"]
 mod linter;
-#[path="7_ls/mod.rs"]
+#[path = "7_ls/mod.rs"]
 mod ls;
+#[path = "2_parser/mod.rs"]
+mod parser;
+#[path = "5_resolver/mod.rs"]
+mod resolver;
+#[path = "4_solution/mod.rs"]
+mod solution;
+#[path = "1_tokenizer/mod.rs"]
+mod tokenizer;
 
-use std::{panic::{self, PanicHookInfo}, process, time::Duration};
+use std::{
+    panic::{self, PanicHookInfo},
+    process,
+};
 
 use ls::PowerBuilderLS;
-use tokio::time::sleep;
-use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 fn panic_hook(info: &PanicHookInfo) {
     eprintln!("{}", info);
@@ -34,6 +34,26 @@ fn panic_hook(info: &PanicHookInfo) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     panic::set_hook(Box::new(panic_hook));
+
+    let mut args = std::env::args();
+    if args.len() > 1 {
+        if args.len() == 2 && args.nth(1) == Some("--version".into()) {
+            let version =
+                option_env!("POWERBUILDER_LS_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            let build_info = option_env!("POWERBUILDER_LS_BUILD");
+
+            println!("PowerBuilder-LS {version}");
+            if let Some(info) = build_info {
+                println!(" ({info})");
+            }
+
+            return Ok(());
+        }
+
+        eprintln!("PowerBuilder-LS does not take any arguments. Use --version to get the version.");
+        process::exit(1);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_span_events(FmtSpan::CLOSE)
@@ -41,89 +61,13 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // sleep(Duration::from_secs(10)).await;
-
-    // creator
-    //     .proj
-    //     .write()
-    //     .await
-    //     .add_file(
-    //         &"res/2025-Solution/pfc libs/pfcapsrv.pbl/pfc_n_cst_conversion.sru".into(),
-    //         linter::LintProgress::Complete,
-    //     )
-    //     .await?;
-
-    // for (path, file) in &creator.proj.read().await.files {
-    //     println!(
-    //         "{:?}: diagnostics count {:?}",
-    //         path,
-    //         file.read().await.diagnostics.len()
-    //     );
-    // }
-
-    // creator.proj.write().await.add_default_project(&Url::from_str("file:///home/micha4w/Code/Rust/powerbuilder-ls/res/2025-Solution/")?).await?;
-
-    // return Ok(());
-
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-
     let (service, socket) = tower_lsp::LspService::new(move |client| PowerBuilderLS::new(client));
-    // println!("{:?}", service
-    //     .inner()
-    //     .hover_impl(tower_lsp::lsp_types::HoverParams {
-    //         text_document_position_params: tower_lsp::lsp_types::TextDocumentPositionParams {
-    //             text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: tower_lsp::lsp_types::Url::parse("file:///home/micha4w/Code/Rust/powerbuilder-ls/res/2025-Solution/pfc libs/pfcapsrv.pbl/pfc_n_cst_conversion.sru")? },
-    //             position: tower_lsp::lsp_types::Position {
-    //                 line: 26303,
-    //                 character: 12,
-    //             },
-    //         },
-    //         work_done_progress_params: tower_lsp::lsp_types::WorkDoneProgressParams {
-    //             work_done_token: None,
-    //         },
-    //     }).await);
+
     tower_lsp::Server::new(stdin, stdout, socket)
         .serve(service)
         .await;
-
-    // lsp::add_file(
-    //     proj_arc.clone(),
-    //     "res/test.sru".into(),
-    //     lsp_types::LintProgress::Complete,
-    // )
-    // .await?;
-
-    // let path = "res/test.sru";
-    // let mut tokens = FileTokenizer::open(path)?;
-    // tokens.skip_headers();
-    // // TODO stream the tokens
-
-    // let mut parser = Parser::new(&mut tokens);
-    // parser.parse_tokens();
-
-    // let buf = Bytes::from_iter(std::fs::read("system/classes.pb")?.iter().cloned());
-    // let classes = powerbuilder::Classes::decode(buf)?;
-
-    // let file = File::open("system/system_functions.json")?;
-    // let reader = BufReader::new(file);
-    // let u : powerbuilder::Functions = serde_json::from_reader(reader)?;
-
-    // let v = u.encode_to_vec();
-    // std::fs::write("system/system_functions.pb", v)?;
-
-    // let buf = Bytes::from_iter(std::fs::read("system/enums2.pb")?.iter().cloned());
-    // let classes = powerbuilder::Enums::decode(buf)?;
-
-    // let buf = std::fs::read("system/enums2.pb")?;
-    // let mut cursor: Cursor<Vec<u8>> = Cursor::new(buf);
-    // let enums = output::Enums::decode_length_delimited(&mut cursor)?;
-    // lsp.add_file("res/u_filehandler.sru".into(), LintState::Complete)?;
-    // lsp.add_file("res/pfc_w_find.srw".into(), LintState::Complete)?;
-
-    // for token in tokens {
-    //     println!("{:?} {:?} {}:{}-{}:{}", token.token_type, token.content, token.range.start.line, token.range.start.column, token.range.end.line, token.range.end.column);
-    // }
 
     Ok(())
 }

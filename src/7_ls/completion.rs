@@ -1,14 +1,10 @@
-use std::{any::Any, default, fmt::format};
-
-use serde::de;
 use strum::IntoEnumIterator;
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser,
-    resolver::{self, FunctionFilter, ResolvedType, SearchFilter, VariableFilter},
+    builder, check_enum, parser,
+    resolver::{FunctionFilter, ResolvedType, SearchFilter, VariableFilter},
     solution, tokenizer,
-    types::{unwrap_enum, Url},
 };
 
 use super::{
@@ -204,14 +200,15 @@ impl PowerBuilderLS {
         // TODO(perf): completionItem/resolve
 
         match ctx.nodes.last() {
-            Some(builder::Node::InstanceVariableDeclaration(var)) => {}
-            Some(builder::Node::ScopedVariableDeclaration(var)) => {}
-            Some(builder::Node::VariableDeclaration(var)) => {}
-            Some(builder::Node::Label(token)) => {}
-            Some(builder::Node::FunctionDeclaration(func)) => {}
-            Some(builder::Node::EventDeclaration(event)) => {}
-            opt @ (None | Some(builder::Node::LValue(_))) => match opt
-                .map(|n| &unwrap_enum!(n, builder::Node::LValue).lvalue_type)
+            Some(builder::Node::InstanceVariableDeclaration(_var)) => {}
+            Some(builder::Node::ScopedVariableDeclaration(_var)) => {}
+            Some(builder::Node::VariableDeclaration(_var)) => {}
+            Some(builder::Node::Label(_token)) => {}
+            Some(builder::Node::FunctionDeclaration(_func)) => {}
+            Some(builder::Node::EventDeclaration(_event)) => {}
+            opt @ (None | Some(builder::Node::DataType(_) | builder::Node::LValue(_))) => match opt
+                .and_then(|n| check_enum!(n, builder::Node::LValue))
+                .map(|lvalue| &lvalue.lvalue_type)
             {
                 None
                 | Some(
@@ -221,7 +218,6 @@ impl PowerBuilderLS {
                     | parser::LValueType::Variable(_),
                 ) => {
                     // TODO(completion): correct behaviour for this, super, parent?
-                    // TODO(completion): also add builtins to the completion list
 
                     for (found, err) in ctx.variables(VariableFilter {
                         access: SearchFilter::error((tokenizer::AccessType::PUBLIC, false)),
@@ -327,9 +323,8 @@ impl PowerBuilderLS {
                 Some(parser::LValueType::Index(..)) => {}
                 Some(parser::LValueType::SQLAccess(..)) => {}
             },
-            Some(builder::Node::Expression(expr)) => {}
+            Some(builder::Node::Expression(_expr)) => {}
             Some(builder::Node::Statement(_)) => {}
-            Some(builder::Node::DataType(dt)) => {}
         }
 
         Ok(items)

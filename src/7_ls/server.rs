@@ -49,12 +49,7 @@ impl LanguageServer for PowerBuilderLS {
         #[cfg(feature = "diagnostics")]
         self.diagnostics_capabilities(&mut capabilities);
 
-        // let Some(root) = params.root_uri else {
-        //     return Err(jsonrpc::Error::invalid_params("Missing root URI"));
-        // };
-        let sol = solution::Solution::new(params.root_uri.as_ref()).map_err(|err| {
-            jsonrpc::Error::invalid_params(format!("Failed to load solution {:?}", err))
-        })?;
+        let sol = solution::Solution::new(params.root_uri);
 
         let mut lock = self.m.write().await;
         *lock = Some(PowerBuilderLSInner {
@@ -62,6 +57,7 @@ impl LanguageServer for PowerBuilderLS {
             opened_files: HashMap::new(),
             change_timeout: None,
             pending_changes: HashMap::new(),
+            solution_changed: false,
         });
         let mut inner = lock.as_mut().unwrap();
 
@@ -194,6 +190,10 @@ impl LanguageServer for PowerBuilderLS {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
         lock_inner_if_initialized!(self, inner);
+
+        if let Some((_, "pbproj" | "pbsln")) = uri.path().rsplit_once(".") {
+            inner.solution_changed = true;
+        }
 
         self.rebuild_solution(&mut inner, |sol| {
             sol.files.remove(&uri);

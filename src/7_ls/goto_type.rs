@@ -1,8 +1,7 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder,
-    resolver::{ResolvedLValue, ResolvedType},
+    resolver::ResolvedType,
     solution,
     types::*,
 };

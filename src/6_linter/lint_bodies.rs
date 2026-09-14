@@ -2,8 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use super::linter::{Linter, Scope};
 use crate::{
-    builder,
-    parser::{self, GroupedName},
+    builder, parser,
     resolver::{self, ResolvedType},
     solution, tokenizer,
     types::*,
@@ -109,7 +108,7 @@ impl<'sol> Linter<'sol> {
             parser::LValueType::Member(lvalue, member) => {
                 let data_type = self.lint_lvalue(lvalue, scope);
                 match data_type {
-                    ResolvedType::Complex(solution::Complex::Class(fc)) => {
+                    ResolvedType::Complex(solution::Complex::Class(_)) => {
                         if !resolved.found() {
                             // TODO(diagnostic): ...
                             self.diagnostic_error(
@@ -342,8 +341,8 @@ impl<'sol> Linter<'sol> {
         typ
     }
 
-    fn lint_sql_statement(&self, statement: &parser::SQLStatement, scope: &Scope) {
-        if let Some(access) = statement.get_transaction() {
+    fn lint_sql_statement(&self, statement: &parser::SQLStatement, _scope: &Scope) {
+        if let Some(_access) = statement.get_transaction() {
             // TODO(sql): ...
             // let trans_type = self.lint_variable_access(None, access, scope);
 
@@ -509,7 +508,7 @@ impl<'sol> Linter<'sol> {
                     .for_each(|s| self.lint_statement(s, scope));
             }
             parser::StatementType::Throw(exception) => {
-                let ex = self.lint_expression(exception, scope);
+                let _ex = self.lint_expression(exception, scope);
                 // TODO(diagnostic): check if the exception is of a type that can be thrown
             }
             parser::StatementType::Destroy(object) => {
@@ -758,18 +757,18 @@ impl<'sol> Linter<'sol> {
                 call_type,
                 function,
             }) => {
-                let types = self.lint_expressions(&function.arguments, scope);
+                let _types = self.lint_expressions(&function.arguments, scope);
 
-                match call_type {
-                    parser::CallType::Super => {
-                        if self.class.is_none() {
-                            self.diagnostic_error(
-                                "Cannot use `super` outside of a class".into(),
-                                function.range.clone(),
-                            );
-                        }
+                if let parser::CallType::Super = call_type {
+                    if self.class.is_none() {
+                        self.diagnostic_error(
+                            "Cannot use `super` outside of a class".into(),
+                            function.range.clone(),
+                        );
                     }
-                    parser::CallType::Ancestor(GroupedName { name, .. }) => {
+                }
+                match call_type {
+                    _ => {
                         // (Some((&name.content).into()), &name.range)
                     }
                 };
@@ -843,7 +842,6 @@ impl<'sol> Linter<'sol> {
             parser::StatementType::Continue => {}
             parser::StatementType::Halt => {}
             parser::StatementType::SQL(sql) => self.lint_sql_statement(sql, scope),
-            parser::StatementType::Error => {}
         }
     }
 

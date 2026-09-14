@@ -7,10 +7,7 @@ use prost::{bytes::Bytes, Message as _};
 use self_cell::self_cell;
 use tracing::{info, info_span};
 
-use super::{
-    powerbuilder_proto::{self, variable},
-    types::*,
-};
+use super::powerbuilder_proto::{self, variable};
 use crate::{
     builder,
     parser::{self, Parser, VariableAccess},
@@ -76,7 +73,7 @@ impl BuiltinsParsed {
             return dt;
         }
 
-        let errors = parser.get_syntax_errors();
+        let errors = parser.to_diagnostics();
         if errors.is_empty() {
             panic!(
                 "Syntax error in builtin type ({}): {}",

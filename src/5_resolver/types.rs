@@ -1,8 +1,8 @@
 use bitflags::bitflags;
 use core::fmt;
-use std::{collections::HashMap, fmt::write, hash::Hash, ops::Deref};
+use std::{collections::HashMap, hash::Hash, ops::Deref};
 
-use crate::{builder, parser, solution, tokenizer, types::*};
+use crate::{builder, solution, tokenizer, types::*};
 
 pub type BoxIter<'a, T> = Box<dyn Iterator<Item = T> + 'a>;
 
@@ -230,7 +230,7 @@ impl<T> SearchFilter<T> {
         &'flt self,
         map: &'a HashMap<T::Target, U>,
         err: ListError,
-    ) -> BoxIter<'_, ListResult<&'a U>>
+    ) -> BoxIter<'flt, ListResult<&'a U>>
     where
         'a: 'flt,
         T: Deref,
@@ -247,7 +247,7 @@ impl<T> SearchFilter<T> {
             ),
             _ => Box::new(
                 self.filter(map.iter(), |(t, _), t_want| **t == **t_want, err)
-                    .map(|((t, u), err)| (u, err)),
+                    .map(|((_, u), err)| (u, err)),
             ),
         }
     }

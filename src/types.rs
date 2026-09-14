@@ -5,10 +5,9 @@ use tracing::warn;
 // };
 use std::{
     backtrace::Backtrace,
-    marker::PhantomData,
     ops::{FromResidual, Residual, Try},
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::Arc,
     time::Duration,
 };
 // pub use tokio::sync::RwLock;
@@ -622,7 +621,6 @@ pub(crate) fn url_join_path(mut base: Url, path: &str) -> Url {
     base
 }
 
-
 pub(crate) fn replace_with<T, F>(slot: &mut T, f: F)
 where
     F: FnOnce(T) -> T,
@@ -635,20 +633,31 @@ where
     }
 }
 
-macro_rules! unwrap_enum {
+#[macro_export]
+macro_rules! check_enum {
     ($var:expr, $enum:path $(,)?) => {
         match $var {
-            $enum(inner) => inner,
-            _ => unreachable!(
-                "Expected enum variant to be {}, but was {:?}",
-                stringify!($enum),
-                $var
-            ),
+            $enum(inner) => Some(inner),
+            _ => None,
         }
     };
 }
-pub(crate) use unwrap_enum;
 
+#[macro_export]
+macro_rules! unwrap_enum {
+    ($var:expr, $enum:path $(,)?) => {{
+        let Some(inner) = check_enum!($var, $enum) else {
+            unreachable!(
+                "Expected enum variant to be {}, but was {:?}",
+                stringify!($enum),
+                $var
+            );
+        };
+        inner
+    }};
+}
+
+#[allow(dead_code)]
 /// for debugging stuf...
 pub fn assert_lifetime<'a, T>(x: &'a T) -> &'a T {
     x

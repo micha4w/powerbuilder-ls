@@ -1,10 +1,8 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, parser,
-    resolver::{ResolvedLValue, ResolvedType},
-    solution, tokenizer,
-    types::*,
+    builder, resolver::{ResolvedLValue, ResolvedType},
+    solution, types::*,
 };
 
 use super::{ls::PowerBuilderLS, ls_context::LSContext};

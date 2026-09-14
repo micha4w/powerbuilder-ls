@@ -38,13 +38,6 @@ impl<'sol> Linter<'sol> {
         }
     }
 
-    pub(super) fn get_access_for(&self, class: solution::ClassRef<'sol>) -> tokenizer::AccessType {
-        self.class
-            .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.sol.get_access_for(current_class, class)
-            })
-    }
-
     pub fn push_diagnostic(&self, mut diagnostic: Diagnostic) {
         if cfg!(debug_assertions) {
             diagnostic.message += "\n";

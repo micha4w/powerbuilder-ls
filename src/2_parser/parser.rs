@@ -1,8 +1,8 @@
 use std::{backtrace::Backtrace, sync::Arc};
 
-use super::{token_iter::TokenIter, types::*};
+use super::types::*;
 use crate::{
-    tokenizer::{Token, TokenType, Tokenizer},
+    tokenizer::{Token, TokenIter, TokenType, Tokenizer},
     types::*,
 };
 
@@ -271,7 +271,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
         top_levels
     }
 
-    pub fn get_syntax_errors(self) -> Vec<Diagnostic> {
+    pub fn to_diagnostics(mut self) -> Vec<Diagnostic> {
+        self.syntax_errors.extend(self.tokens.to_diagnostics());
         self.syntax_errors
     }
 }

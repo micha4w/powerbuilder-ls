@@ -1,11 +1,4 @@
-use std::{
-    collections::{
-        hash_map::{self, Entry},
-        HashMap,
-    },
-    mem::{replace, swap, take},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use tracing::{debug_span, info_span};
 
@@ -313,11 +306,11 @@ impl<'pars> Builder {
 
     pub fn build_file_bodies(&mut self, file: &mut BuiltFile) {
         file.with_dependent_mut(|parsed, built| {
-            let _e = info_span!("build.bodies", %parsed.meta.uri).entered();
-
             if built.bodies_processed {
                 return;
             }
+
+            let _e = info_span!("build.bodies", %parsed.meta.uri).entered();
 
             // Remove classes Arcs so we can run get_mut
             built.classes.clear();

@@ -1,5 +1,3 @@
-use std::{collections::hash_map, sync::Arc};
-
 use tower_lsp::lsp_types::OneOf;
 use tracing::info_span;
 
@@ -556,7 +554,6 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
             parser::StatementType::Continue => {}
             parser::StatementType::Halt => {}
             parser::StatementType::SQL(_) => {}
-            parser::StatementType::Error => {}
         };
     }
 

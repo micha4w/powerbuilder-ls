@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ptr, sync::Arc};
+use std::{ptr, sync::Arc};
 
 use tracing::info_span;
 
@@ -16,17 +16,19 @@ impl<'sol> Linter<'sol> {
         let parsed = var.parsed();
 
         self.lint_datatype(&parsed.data_type);
-        if let Some(expr) = &parsed.initial_value {
-            let mut scope = Scope {
-                context: resolver::Context::new_for_body(self.sol, self.file, self.class),
-                return_type: None,
-            };
-            if let builder::VariableType::Scoped(_) = &var.variable_type {
-                scope.context.class = None;
-            }
+        let mut scope = Scope {
+            context: resolver::Context::new_for_body(self.sol, self.file, self.class),
+            return_type: None,
+        };
+        if let builder::VariableType::Scoped(_) = &var.variable_type {
+            scope.context.class = None;
+        }
 
+        if let Some(expr) = &parsed.initial_value {
             self.lint_expression(expr, &scope);
         }
+
+        // TODO(diagnostic): do a bit smarter (get existing variables and check if the variable shadows/replaces something)
 
         match &var.variable_type {
             builder::VariableType::Scoped(_) => {
@@ -67,8 +69,8 @@ impl<'sol> Linter<'sol> {
                 }
             }
 
-            builder::VariableType::Argument(argument) => {}
-            builder::VariableType::Local(variable) => {}
+            builder::VariableType::Argument(_argument) => {}
+            builder::VariableType::Local(_variable) => {}
         }
     }
 

@@ -1,4 +1,4 @@
-use std::{iter, pin::pin, ptr, sync::Arc};
+use std::{iter, ptr, sync::Arc};
 
 use super::types::*;
 use crate::{
@@ -17,7 +17,8 @@ impl<'sol> Solution {
         match ps_type {
             builder::PowerScriptType::Base(base) => ResolvedType::Base(base.clone()),
             builder::PowerScriptType::Complex(name) => {
-                match self.find_class(current_file, &Grouped::simple(name.clone())) { // TODO(perf): unnecessary clone
+                match self.find_class(current_file, &Grouped::simple(name.clone())) {
+                    // TODO(perf): unnecessary clone
                     Found::Yes(class) => ResolvedType::Complex(class),
                     Found::No => ResolvedType::Unknown,
                 }

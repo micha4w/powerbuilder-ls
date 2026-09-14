@@ -32,7 +32,10 @@
           ".sra",
           ".srp",
           ".srj",
-          ".srq"
+          ".srq",
+
+          ".pbproj",
+          ".pbsln"
         ],
         "configuration": "./lang/language-configuration.json",
         "icon": {

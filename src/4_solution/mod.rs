@@ -2,8 +2,8 @@ mod builtins;
 mod solution;
 mod types;
 
-pub use solution::Solution;
 pub use builtins::BUILTIN_URL;
+pub use solution::{Solution, SolutionType};
 pub use types::*;
 
 pub mod powerbuilder_proto {

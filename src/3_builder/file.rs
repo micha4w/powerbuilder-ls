@@ -1,14 +1,9 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, fs, sync::Arc};
 
 use anyhow::Context;
 use encoding_rs_io::DecodeReaderBytes;
 use ropey::Rope;
-use tracing::{debug, debug_span, error, info};
+use tracing::{debug, debug_span, info};
 
 use super::{
     node_searcher::{Node, NodeGetter},
@@ -19,12 +14,6 @@ use crate::{
     types::*,
 };
 use self_cell::self_cell;
-
-#[derive(Debug)]
-pub struct FileDiagnostic {
-    pub messages: Vec<Diagnostic>,
-    pub changed: bool,
-}
 
 #[derive(Debug)]
 pub struct FileMeta {
@@ -48,7 +37,8 @@ impl ParsedFile {
 
             let mut parser = Parser::new_file(content.chars(), uri.clone());
             top_levels = parser.parse_tokens();
-            parse_diagnostics = parser.get_syntax_errors();
+            parse_diagnostics = parser.to_diagnostics();
+
             if !parse_diagnostics.is_empty() {
                 info!(%uri, diagnostics=parse_diagnostics.len(), "parsing resulted in errors");
             }

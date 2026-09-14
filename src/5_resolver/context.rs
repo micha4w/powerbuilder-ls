@@ -91,7 +91,7 @@ impl<'sol> Context<'sol> {
                             ctx.load_body(&event.body, &event.header.arguments);
                         }
                     }
-                    builder::TopLevelType::OnBody(on) => {} // TODO(on): ...
+                    builder::TopLevelType::OnBody(_on) => {} // TODO(on): ...
                     _ => {}
                 }
                 break;
@@ -154,6 +154,13 @@ impl<'sol> Context<'sol> {
         self.sol.classes(Some(self.file), filter)
     }
 
+    pub fn get_access_for(&self, class: solution::ClassRef<'sol>) -> tokenizer::AccessType {
+        self.class
+            .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
+                self.sol.get_access_for(current_class, class)
+            })
+    }
+
     pub fn variables_in_class<'a>(
         &self,
         class: solution::ClassRef<'sol>,
@@ -164,11 +171,7 @@ impl<'sol> Context<'sol> {
     where
         'sol: 'a,
     {
-        let level = self
-            .class
-            .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.sol.get_access_for(current_class, class)
-            });
+        let level = self.get_access_for(class);
 
         filter.access = filter
             .access
@@ -243,11 +246,7 @@ impl<'sol> Context<'sol> {
         mut filter: FunctionFilter<'sol, 'a>,
     ) -> impl Iterator<Item = ListResult<(solution::ClassRef<'sol>, &'sol builder::Function<'sol>)>> + 'a
     {
-        let level = self
-            .class
-            .map_or(tokenizer::AccessType::PUBLIC, |current_class| {
-                self.sol.get_access_for(current_class, class)
-            });
+        let level = self.get_access_for(class);
 
         filter.access = filter
             .access

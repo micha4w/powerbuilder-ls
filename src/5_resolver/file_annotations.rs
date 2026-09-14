@@ -1,9 +1,5 @@
-use std::sync::Arc;
-
-use tower_lsp::lsp_types::OneOf;
-
 use super::types::*;
-use crate::{builder, parser, solution, types::*};
+use crate::{parser, types::*};
 
 pub struct AnnotationTree<'sol> {
     pub range: &'sol Range,
@@ -47,10 +43,7 @@ impl<'a, 'sol> AnnotationTree<'sol> {
         None
     }
 
-    pub fn for_lvalue(
-        &'sol self,
-        lvalue: &parser::LValue,
-    ) -> Option<&'sol ResolvedLValue<'sol>> {
+    pub fn for_lvalue(&'sol self, lvalue: &parser::LValue) -> Option<&'sol ResolvedLValue<'sol>> {
         self.find_exact(&lvalue.range)
             .and_then(|anot| anot.lvalue.as_ref())
     }

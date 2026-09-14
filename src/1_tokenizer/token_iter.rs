@@ -1,6 +1,7 @@
 extern crate alloc;
 extern crate core as std;
 
+use crate::types::*;
 use alloc::collections::VecDeque;
 
 use crate::tokenizer::{Token, TokenType};
@@ -12,11 +13,11 @@ where
     iter: I,
     buf: VecDeque<Token>,
     prev: Option<Token>,
+    tokenizer_errors: Vec<Diagnostic>,
 
     comments: Vec<Token>,
     // appended_comments: Vec<Token>,
     // prepended_comments: Vec<Token>,
-
     pub ignore_literal_newlines: bool,
 }
 
@@ -26,10 +27,10 @@ impl<I: Iterator<Item = Token>> TokenIter<I> {
             iter,
             buf: VecDeque::new(),
             prev: None,
+            tokenizer_errors: Vec::new(),
             comments: Vec::new(),
             // appended_comments: Vec::new(),
             // prepended_comments: Vec::new(),
-
             ignore_literal_newlines: false,
         }
     }
@@ -44,6 +45,10 @@ impl<I: Iterator<Item = Token>> TokenIter<I> {
 
     pub fn comments(&self) -> &Vec<Token> {
         &self.comments
+    }
+
+    pub fn to_diagnostics(self) -> Vec<Diagnostic> {
+        self.tokenizer_errors
     }
 
     pub fn peek(&mut self) -> Option<Token> {
@@ -108,6 +113,13 @@ impl<I: Iterator<Item = Token>> Iterator for TokenIter<I> {
         }
 
         self.prev = Some(next.clone());
+        if let Some(err) = &next.error {
+            self.tokenizer_errors.push(Diagnostic {
+                severity: Severity::Error,
+                range: next.range.clone(),
+                message: err.clone(),
+            });
+        }
         Some(next)
     }
 

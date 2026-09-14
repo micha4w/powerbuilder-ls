@@ -1,21 +1,16 @@
 use core::str;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap},
-    ffi::OsStr,
     fs,
     io::Read,
     iter,
-    mem::take,
-    path::PathBuf,
-    str::FromStr,
-    string,
     sync::Arc,
 };
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::Context;
 
 use encoding_rs_io::DecodeReaderBytes;
-use tracing::{debug, error, info, info_span, span, warn};
+use tracing::{debug, error, info, info_span, warn};
 
 use crate::{
     builder::{self, Builder, BuiltFile, FileMeta, ParsedFile},
@@ -27,6 +22,68 @@ use super::{
     builtins::{Builtins, BuiltinsInner, BuiltinsParsed},
     types::*,
 };
+fn range_err(message: String, range: Range) -> Vec<Diagnostic> {
+    vec![Diagnostic {
+        range,
+        severity: Severity::Error,
+        message,
+    }]
+}
+
+fn pos_err(message: String, uri: Arc<Url>, pos: Position) -> Vec<Diagnostic> {
+    range_err(message, Range::new_point(pos, uri))
+}
+
+fn xml_pos(pos: roxmltree::TextPos) -> Position {
+    Position {
+        line: pos.row - 1,
+        column: pos.col - 1,
+    }
+}
+
+fn xml_range(doc: &roxmltree::Document<'_>, uri: Arc<Url>, range: std::ops::Range<usize>) -> Range {
+    let start = doc.text_pos_at(range.start);
+    let end = doc.text_pos_at(range.end);
+    Range::new(xml_pos(start), xml_pos(end), uri)
+}
+
+fn read_xml<'a>(
+    content: &'a mut String,
+    uri: &Arc<Url>,
+) -> Result<roxmltree::Document<'a>, Vec<Diagnostic>> {
+    let path = uri_to_path(&uri).map_err(|err| {
+        pos_err(
+            format!("Cannot convert URI to path: {}", err),
+            uri.clone(),
+            Position::default(),
+        )
+    })?;
+    let file = fs::File::open(&path).map_err(|err| {
+        pos_err(
+            format!("Failed to open file: {}", err),
+            uri.clone(),
+            Position::default(),
+        )
+    })?;
+    DecodeReaderBytes::new(file)
+        .read_to_string(content)
+        .map_err(|err| {
+            pos_err(
+                format!("Failed to read file: {}", err),
+                uri.clone(),
+                Position::default(),
+            )
+        })?;
+    let doc = roxmltree::Document::parse(content.as_str()).map_err(|err| {
+        pos_err(
+            format!("Failed to parse file: {}", err),
+            uri.clone(),
+            xml_pos(err.pos()),
+        )
+    })?;
+
+    Ok(doc)
+}
 
 #[derive(Debug)]
 pub struct Project {
@@ -35,15 +92,16 @@ pub struct Project {
 }
 
 impl Project {
-    fn new(folder: &Url, file: &str) -> anyhow::Result<Project> {
+    fn new(folder: &Url, file: &str) -> Result<Project, Vec<Diagnostic>> {
         let path = url_join_path(folder.clone(), file);
         let _e = info_span!("project.load", %path).entered();
+        let uri = Arc::new(path);
 
         let mut content = String::new();
-        DecodeReaderBytes::new(fs::File::open(&uri_to_path(&path)?)?)
-            .read_to_string(&mut content)?;
-
-        let doc = roxmltree::Document::parse(content.as_str())?;
+        let doc = read_xml(&mut content, &uri).map_err(|errs| {
+            error!(%file, "failed to read project");
+            errs
+        })?;
 
         let mut libraries = Vec::new();
 
@@ -52,20 +110,30 @@ impl Project {
             .children()
             .find(|node| node.has_tag_name("Libraries"))
         else {
-            bail!("XML Format Invalid (<Libraries> not found)",);
+            return Err(range_err(
+                "XML Format Invalid (<Libraries> not found)".to_string(),
+                xml_range(&doc, uri, doc.root_element().range()),
+            ));
         };
 
+        // TODO(diagnostic): ...
+        let mut _errs = Vec::new();
         for lib in libs.children().filter(roxmltree::Node::is_element) {
             if !lib.has_tag_name("Library") {
-                warn!(tag = &content[lib.range()], "ignoring unknown tag");
+                warn!(tag = &doc.input_text()[lib.range()], "unkwon tag");
+                // errs.push(Diagnostic {
+                //     severity: Severity::Warning,
+                //     message: format!("Ignoring unknown tag {}", &doc.input_text()[lib.range()],),
+                //     range: xml_range(&doc, uri.clone(), lib.range()),
+                // });
                 continue;
             }
 
             let Some(lib_path) = lib.attribute("Path") else {
-                bail!(
-                    "XML Format Invalid ({} missing Path attribute)",
-                    &content[lib.range()],
-                );
+                return Err(range_err(
+                    "XML Format Invalid (Path attribute missing)".to_string(),
+                    xml_range(&doc, uri, lib.range()),
+                ));
             };
 
             let lib_path = lib_path.replace('\\', std::path::MAIN_SEPARATOR_STR) + "/";
@@ -74,9 +142,15 @@ impl Project {
                 Vec::new(),
             ));
         }
+        if !_errs.is_empty() {
+            return Err(_errs);
+        }
 
         let Some(entry_lib) = libs.attribute("AppEntry") else {
-            bail!("XML Format Invalid (<Libraries> missing AppEntry attribute)",);
+            return Err(range_err(
+                "XML Format Invalid ('AppEntry' attribute missing)".to_string(),
+                xml_range(&doc, uri, libs.range()),
+            ));
         };
 
         let Some(application) = doc
@@ -84,13 +158,16 @@ impl Project {
             .children()
             .find(|node| node.has_tag_name("Application"))
         else {
-            bail!("XML Format Invalid (<Application> not found)",);
+            return Err(range_err(
+                "XML Format Invalid (<Application> not found)".to_string(),
+                xml_range(&doc, uri, doc.root_element().range()),
+            ));
         };
         let Some(app_name) = application.attribute("Name") else {
-            bail!(
-                "XML Format Invalid ({} missing Name attribute)",
-                &content[application.range()],
-            );
+            return Err(range_err(
+                "XML Format Invalid ('Name' attribute missing)".to_string(),
+                xml_range(&doc, uri, application.range()),
+            ));
         };
 
         let app_uri = url_join_path(
@@ -117,6 +194,7 @@ pub enum SolutionType {
         /// Always exists inside projects
         default: Arc<Url>,
     },
+    FailedPbSln(Vec<Diagnostic>),
     OneOff(Vec<Arc<Url>>),
 }
 
@@ -130,55 +208,88 @@ pub struct Solution {
 
     // TODO(perf): cache classes and variables by name
     pub builtins: Builtins,
+    pub root: Option<Url>,
 }
 
 impl<'sol> Solution {
-    pub fn new(folder: Option<&Url>) -> anyhow::Result<Solution> {
-        let _e = info_span!("solution.load", ?folder).entered();
+    pub fn new(root: Option<Url>) -> Solution {
+        let solution_type = Self::parse_solution(root.clone());
+
+        let builtins = Builtins::new(BuiltinsParsed::new(), |parsed| {
+            let mut inner = BuiltinsInner::new();
+            inner.load_enums();
+            inner.load_classes(parsed);
+            inner.load_functions(parsed);
+            inner
+        });
+
+        Solution {
+            solution_type,
+            files: HashMap::new(),
+            builtins,
+            root,
+        }
+    }
+
+    pub fn parse_solution(root: Option<Url>) -> SolutionType {
+        let _e = info_span!("solution.load", ?root).entered();
 
         let mut solution = None;
-        if let Some(folder) = folder {
-            for file in std::fs::read_dir(uri_to_path(&folder)?)? {
-                let path = file?.path();
-                if path.extension().is_some_and(|ext| ext == "pbsln") {
-                    if solution.is_some() {
-                        warn!(
-                            ignored = ?path,
-                            "found another *.pbsln",
-                        );
-                    } else {
-                        info!(
-                            solution = ?path,
-                            "found solution",
-                        );
-                        solution = Some(path);
+        let res = || -> anyhow::Result<_> {
+            if let Some(folder) = &root {
+                for file in std::fs::read_dir(uri_to_path(&folder)?)? {
+                    let file = file?;
+                    let path = file.path();
+                    if path.extension().is_some_and(|ext| ext == "pbsln") {
+                        if solution.is_some() {
+                            warn!(
+                                ignored = ?path,
+                                "found another *.pbsln",
+                            );
+                        } else {
+                            info!(
+                                solution = ?path,
+                                "found solution",
+                            );
+                            solution = Some(file.file_name());
+                        }
                     }
                 }
             }
+            Ok(())
+        }();
+        if let Err(err) = res {
+            error!(%err, "failed to look for pbsln");
         }
 
-        let solution_type;
-        if let (Some(solution), Some(folder)) = (solution, folder) {
+        if let (Some(solution), Some(folder)) = (solution, &root) {
             let mut content = String::new();
-            DecodeReaderBytes::new(fs::File::open(&solution)?).read_to_string(&mut content)?;
+            let uri = Arc::new(url_join_path(folder.clone(), &solution.to_string_lossy()));
 
-            let doc = roxmltree::Document::parse(content.as_str())?;
+            let doc = match read_xml(&mut content, &uri).map_err(|errs| {
+                error!(?solution, "failed to read solution");
+                errs
+            }) {
+                Ok(d) => d,
+                Err(err) => return SolutionType::FailedPbSln(err),
+            };
+
             let Some(projs) = doc
                 .root_element()
                 .children()
                 .find(|node| node.has_tag_name("Projects"))
             else {
-                bail!(
-                    "XML Format Invalid (<Projects> not found in {})",
-                    solution.display()
-                );
+                return SolutionType::FailedPbSln(range_err(
+                    "XML Format Invalid (<Projects> not found)".to_string(),
+                    xml_range(&doc, uri, doc.root_element().range()),
+                ));
             };
 
             let Some(default_path) = projs.attribute("Default") else {
-                bail!(
-                    "XML Format Invalid (<Projects> missing Default attribute in {})",
-                    solution.display()
-                );
+                return SolutionType::FailedPbSln(range_err(
+                    "XML Format Invalid ('Default' attribute missing)".to_string(),
+                    xml_range(&doc, uri, projs.range()),
+                ));
             };
 
             let default_path = default_path.replace('\\', "/");
@@ -189,19 +300,27 @@ impl<'sol> Solution {
                 "default project",
             );
 
+            let mut errs = Vec::new();
             let mut projects = BTreeMap::new();
             for proj in projs.children().filter(roxmltree::Node::is_element) {
                 if !proj.has_tag_name("Project") {
-                    warn!(tag = &content[proj.range()], "unkwon tag");
+                    warn!(tag = &doc.input_text()[proj.range()], "unkwon tag");
+                    // errs.push(Diagnostic {
+                    //     severity: Severity::Warning,
+                    //     message: format!(
+                    //         "Ignoring unknown tag {}",
+                    //         &doc.input_text()[proj.range()],
+                    //     ),
+                    //     range: xml_range(&doc, uri.clone(), proj.range()),
+                    // });
                     continue;
                 }
 
                 let Some(proj_path) = proj.attribute("Path") else {
-                    bail!(
-                        "XML Format Invalid ({} missing Path attribute in {})",
-                        &content[proj.range()],
-                        solution.display()
-                    );
+                    return SolutionType::FailedPbSln(range_err(
+                        "XML Format Invalid ('Path' attribute missing)".to_string(),
+                        xml_range(&doc, uri, proj.range()),
+                    ));
                 };
 
                 let proj_path = proj_path.replace('\\', "/");
@@ -217,38 +336,33 @@ impl<'sol> Solution {
 
                         projects.insert(uri, project);
                     }
-                    Err(err) => {
-                        error!(%err, ?proj_path, "failed to load project");
+                    Err(mut err) => {
+                        errs.append(&mut err);
+                        errs.append(&mut range_err(
+                            "Project failed to load".to_string(),
+                            xml_range(&doc, uri.clone(), proj.range()),
+                        ));
                     }
                 };
             }
+            if !errs.is_empty() {
+                return SolutionType::FailedPbSln(errs);
+            }
 
             let Some(default) = default_arc else {
-                bail!(
-                    "XML Format Invalid (Solution.Projects.Project with Path attribute = {} not found in {})",
-                    default_path,
-                    solution.display(),
-                );
+                return SolutionType::FailedPbSln(range_err(
+                    format!(
+                        "XML Format Invalid (No Project with Path = {})",
+                        default_path
+                    ),
+                    xml_range(&doc, uri, projs.range()),
+                ));
             };
 
-            solution_type = SolutionType::PbSln { projects, default };
+            SolutionType::PbSln { projects, default }
         } else {
-            solution_type = SolutionType::OneOff(Vec::new());
+            SolutionType::OneOff(Vec::new())
         }
-
-        let builtins = Builtins::new(BuiltinsParsed::new(), |parsed| {
-            let mut inner = BuiltinsInner::new();
-            inner.load_enums();
-            inner.load_classes(parsed);
-            inner.load_functions(parsed);
-            inner
-        });
-
-        Ok(Solution {
-            solution_type,
-            files: HashMap::new(),
-            builtins,
-        })
     }
 
     fn reload_file(
@@ -309,8 +423,7 @@ impl<'sol> Solution {
                             if path.extension().is_some_and(|ext| {
                                 // TODO: add all extensions
                                 vec![
-                                    "sru", "srd", "srm", "srw", "srs", "srf", "sra", "srp", "srj",
-                                    "srq",
+                                    "sru", "srm", "srw", "srs", "srf", "sra", "srp", "srj", "srq",
                                 ]
                                 .contains(&&*ext.to_string_lossy())
                             }) {
@@ -348,6 +461,7 @@ impl<'sol> Solution {
                     }
                 }
             }
+            SolutionType::FailedPbSln(_) => {}
         };
 
         (new, errs)
@@ -386,6 +500,7 @@ impl<'sol> Solution {
                 self.files.get(&proj.application)
             }
             SolutionType::OneOff(_) => None,
+            SolutionType::FailedPbSln(_) => None,
         }
     }
 
@@ -399,6 +514,7 @@ impl<'sol> Solution {
                     .flat_map(|(_, urls)| urls.iter()),
             ),
             SolutionType::OneOff(urls) => Box::new(urls.iter()),
+            SolutionType::FailedPbSln(_) => Box::new(iter::empty()),
         };
 
         uris.filter_map(|url| self.files.get(url))

@@ -6,8 +6,10 @@ use std::{
 use anyhow::anyhow;
 
 use crate::{
+    check_enum,
     tokenizer::{self, Token},
     types::*,
+    unwrap_enum,
 };
 
 pub enum ParseError {
@@ -130,13 +132,6 @@ pub(super) use ret_res;
 // }
 
 pub type GroupedName = Grouped<Token>;
-
-impl GroupedName {
-    pub fn same_type(a: &GroupedName, b: &GroupedName) -> bool {
-        return a.name.content == b.name.content
-            && a.group.as_ref().map(|g| &g.content) == b.group.as_ref().map(|g| &g.content);
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ArrayBounds {
@@ -854,6 +849,7 @@ pub struct SQLUpdateCursorStatement {
     pub cursor: Token,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum SQLStatement {
     OPEN(Token),
@@ -920,7 +916,6 @@ pub enum StatementType {
     Exit,
     Continue,
     Halt,
-    Error,
 }
 
 #[derive(Debug, Clone)]

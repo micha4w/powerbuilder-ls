@@ -1,9 +1,4 @@
-use std::{
-    collections::{hash_map, HashMap, HashSet},
-    mem::replace,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, mem::replace, sync::Arc};
 
 use super::ls_context::LSContext;
 
@@ -34,7 +29,7 @@ macro_rules! lock_inner_if_initialized {
     };
 }
 pub(super) use lock_inner_if_initialized;
-use tracing::{debug, info_span, warn};
+use tracing::{debug, error, info_span, warn};
 
 impl FileMeta {
     pub fn apply_pending_changes(&mut self, all_changes: Vec<Vec<TextDocumentContentChangeEvent>>) {
@@ -81,6 +76,7 @@ pub struct PowerBuilderLSInner {
     pub opened_files: HashMap<Arc<Url>, OpenedFile>,
     pub change_timeout: Option<oneshot::Sender<()>>,
     pub pending_changes: HashMap<Arc<Url>, Vec<Vec<TextDocumentContentChangeEvent>>>, // vec of vecs so we dont need to clone
+    pub solution_changed: bool,
 }
 
 impl PowerBuilderLSInner {}
@@ -111,6 +107,11 @@ impl PowerBuilderLS {
             replace_with(&mut inner.sol, |cell| {
                 let mut sol = cell.into_owner();
 
+                if inner.solution_changed {
+                    inner.solution_changed = false;
+                    sol = Solution::new(sol.root);
+                }
+
                 pre_load_files(&mut sol);
 
                 (sol, errs) = Solution::rebuilt(
@@ -127,7 +128,9 @@ impl PowerBuilderLS {
 
                 for (url, _) in &inner.opened_files {
                     debug!(%url, "opening previously opened file");
-                    sol.open_file(url);
+                    if let Err(err) = sol.open_file(url) {
+                        error!(%url, "failed to open previously opened file: {:?}", err);
+                    }
                 }
 
                 SolutionCell::new(sol, |sol| {

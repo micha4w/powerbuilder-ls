@@ -6,5 +6,5 @@ pub mod types;
 
 pub use resolver::Resolver;
 pub use context::Context;
-pub use file_annotations::{AnnotationTree, FileAnnotations};
+pub use file_annotations::FileAnnotations;
 pub use types::*;

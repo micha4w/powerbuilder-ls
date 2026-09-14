@@ -14,8 +14,6 @@ use crate::{
     types::*,
 };
 
-pub type TopLevelIndex = usize;
-
 #[derive(Debug, Clone, Copy, EnumIter)]
 pub enum BaseType {
     Blob(Option<usize>),
