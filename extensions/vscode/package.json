@@ -73,6 +73,10 @@
       "type": "object",
       "title": "PowerBuilder",
       "properties": {
+        "powerbuilder.languageServer.enable": {
+          "type": "boolean",
+          "default": true
+        },
         "powerbuilder.languageServer.path": {
           "type": "string"
         },
