@@ -1,4 +1,4 @@
-use std::u32;
+use std::collections::HashMap;
 
 use tower_lsp::lsp_types;
 use tracing::{info, warn};
@@ -10,6 +10,52 @@ impl PowerBuilderLS {
     pub(super) fn diagnostics_capabilities(&self, _: &mut lsp_types::ServerCapabilities) {}
 
     pub(super) async fn diagnostics_post_rebuild(&self, inner: &PowerBuilderLSInner) {
+        let diagnostics = inner.sol.with_dependent(|sol, _| {
+            let SolutionType::FailedPbSln(errors) = &sol.solution_type else {
+                return None;
+            };
+
+            let mut diagnostics = errors
+                .iter()
+                .map(|(file_id, err)| {
+                    (
+                        file_id.uri().clone(),
+                        err.iter().cloned().map(Into::into).collect(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            for (file_id, _) in &inner.opened_files {
+                if !sol.files.contains_key(file_id) {
+                    continue;
+                }
+
+                let mut file_diags = Vec::new();
+                file_diags.push(
+                    Diagnostic {
+                        range: Range::all(file_id.clone()),
+                        severity: Severity::Error,
+                        message: "Failed to parse solution, check your *.pbsln".to_string(),
+                    }
+                    .into(),
+                );
+
+                diagnostics.insert(file_id.uri().clone(), file_diags);
+            }
+
+            Some(diagnostics)
+        });
+        if let Some(diagnostics) = diagnostics {
+            info!(
+                "sending failed solution diagnostics for {} files",
+                diagnostics.len()
+            );
+            for (uri, items) in diagnostics {
+                self.client.publish_diagnostics(uri, items, None).await;
+            }
+            return;
+        }
+
         for (file_id, _) in &inner.opened_files {
             match inner.build_file_diagnostics(&file_id) {
                 Ok(Some(items)) => {
@@ -33,68 +79,29 @@ impl PowerBuilderLS {
 }
 
 impl PowerBuilderLSInner {
-    fn to_lsp_diagnostic(d: &Diagnostic) -> lsp_types::Diagnostic {
-        lsp_types::Diagnostic {
-            range: lsp_types::Range::new(
-                lsp_types::Position::new(d.range.start.line, d.range.start.column),
-                lsp_types::Position::new(d.range.end.line, d.range.end.column),
-            ),
-            severity: Some(match d.severity {
-                Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
-                Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
-                Severity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
-                Severity::Hint => lsp_types::DiagnosticSeverity::HINT,
-            }),
-            message: d.message.clone(),
-            ..Default::default()
-        }
-    }
-
     fn build_file_diagnostics(
         &self,
         file_id: &FileID,
     ) -> anyhow::Result<Option<Vec<lsp_types::Diagnostic>>> {
         self.sol.with_dependent(|sol, dep| {
-            if let SolutionType::FailedPbSln(errors) = &sol.solution_type {
-                let mut diagnostics = Vec::new();
-                for err in errors {
-                    if err.range.file_id == *file_id {
-                        diagnostics.push(Self::to_lsp_diagnostic(err));
+            let Some(file) = sol.files.get(file_id) else {
+                warn!(%file_id, "file not found when sending diagnostics");
+
+                if let SolutionType::PbSln {
+                    solution, projects, ..
+                } = &sol.solution_type
+                {
+                    if solution == file_id || projects.contains_key(file_id) {
+                        return Ok(None);
                     }
                 }
 
-                if diagnostics.is_empty() {
-                    diagnostics.push(lsp_types::Diagnostic {
-                        range: lsp_types::Range::new(
-                            lsp_types::Position::default(),
-                            lsp_types::Position {
-                                line: u32::MAX,
-                                character: u32::MAX,
-                            },
-                        ),
-                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                        message: "Failed to parse solution, check your *.pbsln".to_string(),
-                        ..Default::default()
-                    });
-                }
-
-                return Ok(Some(diagnostics));
-            }
-
-            let Some(file) = sol.files.get(file_id) else {
-                warn!(%file_id, "file not found when sending diagnostics");
-                return Ok(Some(vec![lsp_types::Diagnostic {
-                    range: lsp_types::Range::new(
-                        lsp_types::Position::default(),
-                        lsp_types::Position {
-                            line: u32::MAX,
-                            character: u32::MAX,
-                        },
-                    ),
-                    severity: Some(lsp_types::DiagnosticSeverity::INFORMATION),
+                return Ok(Some(vec![Diagnostic {
+                    range: Range::all(file_id.clone()),
+                    severity: Severity::Info,
                     message: "File is not part of the current project".to_string(),
-                    ..Default::default()
-                }]));
+                }
+                .into()]));
             };
             let Some(annotations) = dep.annotations.get(file_id) else {
                 warn!(%file_id, "annotations not found when sending diagnostics");
@@ -108,7 +115,8 @@ impl PowerBuilderLSInner {
                 file.borrow_owner().meta.parse_diagnostics.iter(),
                 linter.diagnostics.borrow().iter(),
             )
-            .map(Self::to_lsp_diagnostic)
+            .cloned()
+            .map(Into::into)
             .collect();
 
             Ok(Some(items))

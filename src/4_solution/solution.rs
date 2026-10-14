@@ -23,16 +23,20 @@ use super::{
     builtins::{Builtins, BuiltinsInner, BuiltinsParsed},
     types::*,
 };
-fn range_err(message: String, range: Range) -> Vec<Diagnostic> {
-    vec![Diagnostic {
+fn range_err(message: String, range: Range) -> Diagnostic {
+    Diagnostic {
         range,
         severity: Severity::Error,
         message,
-    }]
+    }
 }
 
-fn pos_err(message: String, file_id: FileID, pos: Position) -> Vec<Diagnostic> {
+fn pos_err(message: String, file_id: FileID, pos: Position) -> Diagnostic {
     range_err(message, Range::new_point(pos, file_id))
+}
+
+fn new_err_map(diag: Diagnostic) -> HashMap<FileID, Vec<Diagnostic>> {
+    iter::once((diag.range.file_id.clone(), vec![diag])).collect()
 }
 
 fn xml_pos(pos: roxmltree::TextPos) -> Position {
@@ -55,7 +59,7 @@ fn xml_range(
 fn read_xml<'a>(
     content: &'a mut String,
     file_id: &FileID,
-) -> Result<roxmltree::Document<'a>, Vec<Diagnostic>> {
+) -> Result<roxmltree::Document<'a>, Diagnostic> {
     let file = fs::File::open(file_id.path()).map_err(|err| {
         pos_err(
             format!("Failed to open file: {}", err),
@@ -90,7 +94,7 @@ pub struct Project {
 }
 
 impl Project {
-    fn new(folder: &FilePath, file: &str) -> Result<Project, Vec<Diagnostic>> {
+    fn new(folder: &FilePath, file: &str) -> Result<Project, Diagnostic> {
         let file_id = folder.join(file).into_id();
         let _e = info_span!("project.load", %file_id).entered();
 
@@ -114,7 +118,7 @@ impl Project {
         };
 
         // TODO(diagnostic): ...
-        let mut _errs = Vec::new();
+        // let mut _errs = HashMap::new();
         for lib in libs.children().filter(roxmltree::Node::is_element) {
             if !lib.has_tag_name("Library") {
                 warn!(tag = &doc.input_text()[lib.range()], "unkwon tag");
@@ -136,9 +140,9 @@ impl Project {
             let lib_path = lib_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
             libraries.push((folder.join(&lib_path).into_id(), Vec::new()));
         }
-        if !_errs.is_empty() {
-            return Err(_errs);
-        }
+        // if !_errs.is_empty() {
+        //     return Err(_errs);
+        // }
 
         let Some(entry_lib) = libs.attribute("AppEntry") else {
             return Err(range_err(
@@ -181,11 +185,12 @@ impl Project {
 #[derive(Debug)]
 pub enum SolutionType {
     PbSln {
+        solution: FileID,
         projects: IndexMap<FileID, Project>,
         /// Always exists inside projects
         default: FileID,
     },
-    FailedPbSln(Vec<Diagnostic>),
+    FailedPbSln(HashMap<FileID, Vec<Diagnostic>>),
     OneOff(Vec<FileID>),
 }
 
@@ -262,7 +267,7 @@ impl<'sol> Solution {
                 errs
             }) {
                 Ok(d) => d,
-                Err(err) => return SolutionType::FailedPbSln(err),
+                Err(err) => return SolutionType::FailedPbSln(new_err_map(err)),
             };
 
             let Some(projs) = doc
@@ -270,17 +275,17 @@ impl<'sol> Solution {
                 .children()
                 .find(|node| node.has_tag_name("Projects"))
             else {
-                return SolutionType::FailedPbSln(range_err(
+                return SolutionType::FailedPbSln(new_err_map(range_err(
                     "XML Format Invalid (<Projects> not found)".to_string(),
                     xml_range(&doc, file_id, doc.root_element().range()),
-                ));
+                )));
             };
 
             let Some(default_path) = projs.attribute("Default") else {
-                return SolutionType::FailedPbSln(range_err(
+                return SolutionType::FailedPbSln(new_err_map(range_err(
                     "XML Format Invalid ('Default' attribute missing)".to_string(),
                     xml_range(&doc, file_id, projs.range()),
-                ));
+                )));
             };
 
             let default_path = default_path.replace('\\', "/");
@@ -291,7 +296,7 @@ impl<'sol> Solution {
                 "default project",
             );
 
-            let mut errs = Vec::new();
+            let mut errs = HashMap::<_, Vec<Diagnostic>>::new();
             let mut projects = IndexMap::new();
             for proj in projs.children().filter(roxmltree::Node::is_element) {
                 if !proj.has_tag_name("Project") {
@@ -308,10 +313,10 @@ impl<'sol> Solution {
                 }
 
                 let Some(proj_path) = proj.attribute("Path") else {
-                    return SolutionType::FailedPbSln(range_err(
+                    return SolutionType::FailedPbSln(new_err_map(range_err(
                         "XML Format Invalid ('Path' attribute missing)".to_string(),
                         xml_range(&doc, file_id, proj.range()),
-                    ));
+                    )));
                 };
 
                 let proj_path = proj_path.replace('\\', "/");
@@ -327,9 +332,9 @@ impl<'sol> Solution {
 
                         projects.insert(proj_id, project);
                     }
-                    Err(mut err) => {
-                        errs.append(&mut err);
-                        errs.append(&mut range_err(
+                    Err(err) => {
+                        errs.entry(err.range.file_id.clone()).or_default().push(err);
+                        errs.entry(file_id.clone()).or_default().push(range_err(
                             "Project failed to load".to_string(),
                             xml_range(&doc, file_id.clone(), proj.range()),
                         ));
@@ -341,16 +346,20 @@ impl<'sol> Solution {
             }
 
             let Some(default) = default_arc else {
-                return SolutionType::FailedPbSln(range_err(
+                return SolutionType::FailedPbSln(new_err_map(range_err(
                     format!(
                         "XML Format Invalid (No Project with Path = {})",
                         default_path
                     ),
                     xml_range(&doc, file_id, projs.range()),
-                ));
+                )));
             };
 
-            SolutionType::PbSln { projects, default }
+            SolutionType::PbSln {
+                solution: file_id,
+                projects,
+                default,
+            }
         } else {
             SolutionType::OneOff(Vec::new())
         }
@@ -402,7 +411,9 @@ impl<'sol> Solution {
 
         // TODO(proj): also reread pbsln and pbproj files
         match &mut new.solution_type {
-            SolutionType::PbSln { projects, default } => {
+            SolutionType::PbSln {
+                projects, default, ..
+            } => {
                 let proj = projects.get_mut(default).expect("checked in new()");
                 for (lib, lib_files) in &mut proj.libraries {
                     lib_files.clear();
@@ -485,7 +496,9 @@ impl<'sol> Solution {
 
     pub fn application(&self) -> Option<&BuiltFile> {
         match &self.solution_type {
-            SolutionType::PbSln { projects, default } => {
+            SolutionType::PbSln {
+                projects, default, ..
+            } => {
                 let proj = projects.get(default)?;
                 self.files.get(&proj.application)
             }
@@ -496,7 +509,9 @@ impl<'sol> Solution {
 
     pub fn files_iter(&self) -> impl Iterator<Item = &BuiltFile> {
         let uris: Box<dyn Iterator<Item = _>> = match &self.solution_type {
-            SolutionType::PbSln { projects, default } => Box::new(
+            SolutionType::PbSln {
+                projects, default, ..
+            } => Box::new(
                 projects
                     .get(default)
                     .into_iter()

@@ -214,7 +214,7 @@ pub struct Position {
 }
 
 impl Position {
-    fn end() -> Position {
+    pub fn end() -> Position {
         Position {
             line: u32::MAX,
             column: u32::MAX,
@@ -308,6 +308,14 @@ impl Range {
 
     pub(crate) fn empty(file_id: FileID) -> Self {
         Self::new_point(Position::default(), file_id)
+    }
+
+    pub(crate) fn all(file_id: FileID) -> Self {
+        Self {
+            start: Position::default(),
+            end: Position::end(),
+            file_id,
+        }
     }
 
     pub fn contains(&self, pos: &Position) -> bool {
@@ -546,7 +554,7 @@ where
 
 // pub type WP<T> = Weak<Mutex<T>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Severity {
     Error,
     Warning,
@@ -554,11 +562,27 @@ pub enum Severity {
     Hint,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub range: Range,
+}
+
+impl From<Diagnostic> for tower_lsp::lsp_types::Diagnostic {
+    fn from(d: Diagnostic) -> Self {
+        tower_lsp::lsp_types::Diagnostic {
+            range: d.range.into(),
+            severity: Some(match d.severity {
+                Severity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
+                Severity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
+                Severity::Info => tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION,
+                Severity::Hint => tower_lsp::lsp_types::DiagnosticSeverity::HINT,
+            }),
+            message: d.message.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
