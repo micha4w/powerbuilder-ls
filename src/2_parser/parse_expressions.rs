@@ -282,36 +282,37 @@ impl<I: Iterator<Item = char>> Parser<I> {
             self.tokens.next()?;
             let right_side = ret_res!(self.parse_expression(is_sql)?, err);
 
-            let range = expression.range.clone().merged(&right_side.range);
-            expression = match right_side.expression_type {
-                ExpressionType::Operation(sub_left, sub_operator, sub_right)
-                    if operator.precedence() <= sub_operator.precedence() =>
-                {
-                    Expression {
+            fn insert_expression(
+                left: Expression,
+                operator: tokenizer::Operator,
+                right: Expression,
+            ) -> Expression {
+                let range = left.range.clone().merged(&right.range);
+                match right.expression_type {
+                    ExpressionType::Operation(sub_left, sub_operator, sub_right)
+                        if operator.precedence() <= sub_operator.precedence() =>
+                    {
+                        Expression {
+                            range,
+                            expression_type: ExpressionType::Operation(
+                                Box::new(insert_expression(left, operator, *sub_left)),
+                                sub_operator,
+                                sub_right,
+                            ),
+                        }
+                    }
+                    _ => Expression {
                         range,
                         expression_type: ExpressionType::Operation(
-                            Box::new(Expression {
-                                range: expression.range.clone().merged(&sub_left.range),
-                                expression_type: ExpressionType::Operation(
-                                    Box::new(expression),
-                                    operator,
-                                    sub_left,
-                                ),
-                            }),
-                            sub_operator,
-                            sub_right,
+                            Box::new(left),
+                            operator,
+                            Box::new(right),
                         ),
-                    }
+                    },
                 }
-                _ => Expression {
-                    range,
-                    expression_type: ExpressionType::Operation(
-                        Box::new(expression),
-                        operator,
-                        Box::new(right_side),
-                    ),
-                },
-            };
+            }
+
+            expression = insert_expression(expression, operator, right_side);
         }
 
         Some(ParseResult::new(expression, err))
