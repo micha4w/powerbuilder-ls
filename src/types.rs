@@ -1,10 +1,11 @@
-use anyhow::anyhow;
-use tracing::warn;
+use tracing::{error, warn};
 // pub use parking_lot::{
 //     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 // };
 use std::{
     backtrace::Backtrace,
+    cmp::Ordering,
+    hash::{Hash, Hasher},
     ops::{FromResidual, Residual, Try},
     path::PathBuf,
     sync::Arc,
@@ -92,6 +93,120 @@ impl<T: Sized> Mutex<T> {
 //     Right(Right),
 // }
 
+#[derive(Debug, Clone)]
+pub struct FilePath {
+    uri: Url,
+    path: PathBuf,
+}
+
+impl FilePath {
+    pub fn new(uri: Url) -> Option<FilePath> {
+        let Ok(path) = uri.to_file_path() else {
+            error!(%uri, "failed to convert Url to PathBuf");
+            return None;
+        };
+
+        Some(FilePath { uri, path })
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn uri(&self) -> &Url {
+        &self.uri
+    }
+
+    pub fn join(&self, add_path: &str) -> FilePath {
+        let path = self.path.join(add_path);
+        let mut uri = self.uri.clone();
+
+        let mut base_path = uri.path().to_string();
+        if !base_path.ends_with('/') {
+            base_path.push('/');
+        }
+        base_path.push_str(add_path);
+        uri.set_path(&base_path);
+        FilePath { uri, path }
+    }
+
+    pub fn into_id(self) -> FileID {
+        FileID { m: Arc::new(self) }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileID {
+    m: Arc<FilePath>,
+}
+impl FileID {
+    pub fn new(uri: Url) -> Option<FileID> {
+        Some(FileID {
+            m: Arc::new(FilePath::new(uri)?),
+        })
+    }
+
+    pub fn new_virtual(uri: Url) -> FileID {
+        FileID {
+            m: Arc::new(FilePath {
+                path: uri.to_string().into(),
+                uri,
+            }),
+        }
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.m.path
+    }
+
+    pub fn uri(&self) -> &Url {
+        &self.m.uri
+    }
+
+    pub fn join(&self, path: &str) -> FileID {
+        self.m.join(path).into_id()
+    }
+
+    pub fn ptr_eq(a: &Self, b: &Self) -> bool {
+        Arc::ptr_eq(&a.m, &b.m)
+    }
+
+    fn cmp_key(&self) -> &PathBuf {
+        self.path()
+    }
+}
+
+impl std::fmt::Display for FileID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.uri().fmt(f)
+    }
+}
+
+impl PartialEq for FileID {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp_key().eq(other.cmp_key())
+    }
+}
+impl Eq for FileID {}
+
+impl PartialOrd for FileID {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.cmp_key().partial_cmp(other.cmp_key())
+    }
+}
+
+impl Ord for FileID {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.cmp_key().cmp(other.cmp_key())
+    }
+}
+
+impl Hash for FileID {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.cmp_key().hash(state);
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Debug)]
 pub struct Position {
     pub line: u32,
@@ -135,12 +250,16 @@ pub type Url = tower_lsp::lsp_types::Url;
 pub struct Range {
     pub start: Position,
     pub end: Position,
-    pub uri: Arc<Url>,
+    pub file_id: FileID,
 }
 
 impl Range {
-    pub(crate) fn new(start: Position, end: Position, uri: Arc<Url>) -> Self {
-        Self { start, end, uri }
+    pub(crate) fn new(start: Position, end: Position, file_id: FileID) -> Self {
+        Self {
+            start,
+            end,
+            file_id,
+        }
     }
 
     pub(crate) fn merged(mut self, b: &Range) -> Self {
@@ -149,7 +268,10 @@ impl Range {
     }
 
     pub(crate) fn merge(&mut self, b: &Range) -> &Self {
-        assert!(self.uri == b.uri, "Merging Ranges from 2 different files");
+        assert!(
+            self.file_id == b.file_id,
+            "Merging Ranges from 2 different files"
+        );
 
         if b.start < self.start {
             self.start = b.start;
@@ -176,16 +298,16 @@ impl Range {
         self
     }
 
-    pub(crate) fn new_point(base_pos: Position, uri: Arc<Url>) -> Self {
+    pub(crate) fn new_point(base_pos: Position, file_id: FileID) -> Self {
         Self {
             start: base_pos,
             end: base_pos,
-            uri,
+            file_id,
         }
     }
 
-    pub(crate) fn empty(uri: Arc<Url>) -> Self {
-        Self::new_point(Position::default(), uri)
+    pub(crate) fn empty(file_id: FileID) -> Self {
+        Self::new_point(Position::default(), file_id)
     }
 
     pub fn contains(&self, pos: &Position) -> bool {
@@ -606,20 +728,23 @@ impl<T> FromResidual<<Found<T> as Try>::Residual> for Found<T> {
 //     }
 // }
 
-pub(crate) fn uri_to_path(uri: &Url) -> anyhow::Result<PathBuf> {
-    uri.to_file_path()
-        .map_err(|_| anyhow!("Failed to convert Url to PathBuf for {:?}", uri))
-}
+// pub(crate) fn uri_to_path(uri: &Url) -> Option<PathBuf> {
+//     if let Ok(path) = uri.to_file_path() {
+//         return Some(path);
+//     };
+//     error!(%uri, "failed to convert Url to PathBuf");
+//     None
+// }
 
-pub(crate) fn url_join_path(mut base: Url, path: &str) -> Url {
-    let mut base_path = base.path().to_string();
-    if !base_path.ends_with('/') {
-        base_path.push('/');
-    }
-    base_path.push_str(path);
-    base.set_path(&base_path);
-    base
-}
+// pub(crate) fn url_join_path(mut base: Url, path: &str) -> Url {
+//     let mut base_path = base.path().to_string();
+//     if !base_path.ends_with('/') {
+//         base_path.push('/');
+//     }
+//     base_path.push_str(path);
+//     base.set_path(&base_path);
+//     base
+// }
 
 pub(crate) fn replace_with<T, F>(slot: &mut T, f: F)
 where

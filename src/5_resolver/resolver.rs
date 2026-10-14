@@ -665,7 +665,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
     pub fn resolve_file(sol: &'sol Solution, file: &'sol BuiltFile) -> FileAnnotations<'sol> {
         assert!(file.inner().bodies_processed, "resolve_file should only be called on files that have not have had their bodies processed");
 
-        let _e = info_span!("resolver.file", url = %file.parsed().meta.uri).entered();
+        let _e = info_span!("resolver.file", url = %file.parsed().meta.file_id).entered();
 
         let mut annotator = Resolver {
             ctx: Context {

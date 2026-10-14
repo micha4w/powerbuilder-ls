@@ -10,12 +10,12 @@ impl PowerBuilderLS {
     pub(super) fn diagnostics_capabilities(&self, _: &mut lsp_types::ServerCapabilities) {}
 
     pub(super) async fn diagnostics_post_rebuild(&self, inner: &PowerBuilderLSInner) {
-        for (uri, _) in &inner.opened_files {
-            match inner.build_file_diagnostics(&uri) {
+        for (file_id, _) in &inner.opened_files {
+            match inner.build_file_diagnostics(&file_id) {
                 Ok(Some(items)) => {
                     info!("sending diagnostics");
                     self.client
-                        .publish_diagnostics((**uri).clone(), items, None)
+                        .publish_diagnostics(file_id.uri().clone(), items, None)
                         .await;
                 }
                 Ok(None) => {}
@@ -52,13 +52,13 @@ impl PowerBuilderLSInner {
 
     fn build_file_diagnostics(
         &self,
-        uri: &Url,
+        file_id: &FileID,
     ) -> anyhow::Result<Option<Vec<lsp_types::Diagnostic>>> {
         self.sol.with_dependent(|sol, dep| {
             if let SolutionType::FailedPbSln(errors) = &sol.solution_type {
                 let mut diagnostics = Vec::new();
                 for err in errors {
-                    if *err.range.uri == *uri {
+                    if err.range.file_id == *file_id {
                         diagnostics.push(Self::to_lsp_diagnostic(err));
                     }
                 }
@@ -81,8 +81,8 @@ impl PowerBuilderLSInner {
                 return Ok(Some(diagnostics));
             }
 
-            let Some(file) = sol.files.get(uri) else {
-                warn!(%uri, "file not found when sending diagnostics");
+            let Some(file) = sol.files.get(file_id) else {
+                warn!(%file_id, "file not found when sending diagnostics");
                 return Ok(Some(vec![lsp_types::Diagnostic {
                     range: lsp_types::Range::new(
                         lsp_types::Position::default(),
@@ -96,8 +96,8 @@ impl PowerBuilderLSInner {
                     ..Default::default()
                 }]));
             };
-            let Some(annotations) = dep.annotations.get(uri) else {
-                warn!(%uri, "annotations not found when sending diagnostics");
+            let Some(annotations) = dep.annotations.get(file_id) else {
+                warn!(%file_id, "annotations not found when sending diagnostics");
                 return Ok(None);
             };
 

@@ -1,10 +1,11 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use super::ls::{PowerBuilderLS, PowerBuilderLSInner, SolutionCell};
 
 use crate::{
     ls::ls::{lock_inner_if_initialized, OpenedFile},
     solution::{self},
+    types::*,
 };
 use tokio::{sync::oneshot, time::timeout};
 
@@ -49,7 +50,7 @@ impl LanguageServer for PowerBuilderLS {
         #[cfg(feature = "diagnostics")]
         self.diagnostics_capabilities(&mut capabilities);
 
-        let sol = solution::Solution::new(params.root_uri);
+        let sol = solution::Solution::new(params.root_uri.and_then(FilePath::new));
 
         let mut lock = self.m.write().await;
         *lock = Some(PowerBuilderLSInner {
@@ -111,9 +112,9 @@ impl LanguageServer for PowerBuilderLS {
             .await?;
 
         if let Some(r) = range {
-            if !Arc::ptr_eq(&r.uri, &solution::BUILTIN_URL) {
+            if !FileID::ptr_eq(&r.file_id, &solution::BUILTIN_FILE_ID) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: (*r.uri).clone(),
+                    uri: r.file_id.uri().clone(),
                     range: r.into(),
                 })));
             }
@@ -133,9 +134,9 @@ impl LanguageServer for PowerBuilderLS {
             .await?;
 
         if let Some(r) = range {
-            if !Arc::ptr_eq(&r.uri, &solution::BUILTIN_URL) {
+            if !FileID::ptr_eq(&r.file_id, &solution::BUILTIN_FILE_ID) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: (*r.uri).clone(),
+                    uri: r.file_id.uri().clone(),
                     range: r.into(),
                 })));
             }
@@ -169,52 +170,59 @@ impl LanguageServer for PowerBuilderLS {
     // }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = Arc::new(params.text_document.uri);
-
+        let Some(file_id) = FileID::new(params.text_document.uri) else {
+            return;
+        };
         lock_inner_if_initialized!(self, inner);
 
-        if !inner.opened_files.contains_key(&uri) {
-            inner.opened_files.insert(uri, OpenedFile {});
+        if !inner.opened_files.contains_key(&file_id) {
+            inner.opened_files.insert(file_id, OpenedFile {});
         }
 
         self.rebuild_solution(&mut inner, |_| {}).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri = params.text_document.uri;
+        let Some(file_id) = FileID::new(params.text_document.uri) else {
+            return;
+        };
         lock_inner_if_initialized!(self, inner);
 
-        inner.opened_files.remove(&uri);
+        inner.opened_files.remove(&file_id);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let uri = params.text_document.uri;
+        let Some(file_id) = FileID::new(params.text_document.uri) else {
+            return;
+        };
         lock_inner_if_initialized!(self, inner);
 
-        if let Some((_, "pbproj" | "pbsln")) = uri.path().rsplit_once(".") {
+        if let Some((_, "pbproj" | "pbsln")) = file_id.uri().path().rsplit_once(".") {
             inner.solution_changed = true;
         }
 
         self.rebuild_solution(&mut inner, |sol| {
-            sol.files.remove(&uri);
+            sol.files.remove(&file_id);
         })
         .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = Arc::new(params.text_document.uri);
+        let Some(file_id) = FileID::new(params.text_document.uri) else {
+            return;
+        };
 
         let (change_tx, change_rx) = oneshot::channel::<()>();
         {
             lock_inner_if_initialized!(self, inner);
-            if !inner.opened_files.contains_key(&uri) {
+            if !inner.opened_files.contains_key(&file_id) {
                 return;
             }
 
             inner.change_timeout = Some(change_tx);
             inner
                 .pending_changes
-                .entry(uri.clone())
+                .entry(file_id)
                 .or_default()
                 .push(params.content_changes);
         }

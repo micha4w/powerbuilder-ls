@@ -6,7 +6,7 @@ use crate::{
     builder::FileMeta,
     resolver::{FileAnnotations, Resolver},
     solution::{self, Solution},
-    types::replace_with,
+    types::*,
 };
 use async_lock::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use ropey::Rope;
@@ -33,7 +33,7 @@ use tracing::{debug, error, info_span, warn};
 
 impl FileMeta {
     pub fn apply_pending_changes(&mut self, all_changes: Vec<Vec<TextDocumentContentChangeEvent>>) {
-        debug!(uri=%self.uri, changes=all_changes.len(), "applying pending changes");
+        debug!(uri=%self.file_id, changes=all_changes.len(), "applying pending changes");
         for changes in all_changes {
             for change in changes {
                 match change.range {
@@ -59,7 +59,7 @@ pub struct OpenedFile {}
 
 #[derive(Default)]
 pub struct SolutionDependent<'sol> {
-    pub annotations: HashMap<Arc<Url>, FileAnnotations<'sol>>,
+    pub annotations: HashMap<FileID, FileAnnotations<'sol>>,
 }
 
 self_cell!(
@@ -73,9 +73,9 @@ self_cell!(
 
 pub struct PowerBuilderLSInner {
     pub sol: SolutionCell,
-    pub opened_files: HashMap<Arc<Url>, OpenedFile>,
+    pub opened_files: HashMap<FileID, OpenedFile>,
     pub change_timeout: Option<oneshot::Sender<()>>,
-    pub pending_changes: HashMap<Arc<Url>, Vec<Vec<TextDocumentContentChangeEvent>>>, // vec of vecs so we dont need to clone
+    pub pending_changes: HashMap<FileID, Vec<Vec<TextDocumentContentChangeEvent>>>, // vec of vecs so we dont need to clone
     pub solution_changed: bool,
 }
 
@@ -126,10 +126,10 @@ impl PowerBuilderLS {
                         .collect(),
                 );
 
-                for (url, _) in &inner.opened_files {
-                    debug!(%url, "opening previously opened file");
-                    if let Err(err) = sol.open_file(url) {
-                        error!(%url, "failed to open previously opened file: {:?}", err);
+                for (file_id, _) in &inner.opened_files {
+                    debug!(%file_id, "opening previously opened file");
+                    if let Err(err) = sol.open_file(file_id) {
+                        error!(%file_id, "failed to open previously opened file: {:?}", err);
                     }
                 }
 
@@ -195,7 +195,7 @@ impl PowerBuilderLS {
 
         self.with_solution(|cell| {
             cell.with_dependent(|sol, dep| {
-                let Some(ctx) = LSContext::new(sol, dep, &uri, &pos) else {
+                let Some(ctx) = LSContext::new(sol, dep, uri, &pos) else {
                     return Ok(None);
                 };
                 f(&ctx)

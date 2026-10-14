@@ -1205,6 +1205,7 @@ dependencies = [
  "encoding_rs",
  "encoding_rs_io",
  "futures",
+ "indexmap 2.5.0",
  "multipeek",
  "notify",
  "parking_lot",

@@ -116,7 +116,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 Range {
                     start,
                     end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
                 arguments,
                 vararg,
@@ -189,7 +189,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         Range {
                             start,
                             end,
-                            uri: self.uri(),
+                            file_id: self.file_id(),
                         },
                     );
                 }
@@ -219,7 +219,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     range: Range {
                         start,
                         end,
-                        uri: self.uri(),
+                        file_id: self.file_id(),
                     },
                 },
                 body_start,
@@ -360,7 +360,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                     range: Range {
                         start,
                         end,
-                        uri: self.uri(),
+                        file_id: self.file_id(),
                     },
                 },
                 body_start,
@@ -411,7 +411,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: event.range.start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             top_level_type: TopLevelType::EventBody(EventBody {
                 header: event,
@@ -419,7 +419,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 body_range: Range {
                     start: body_start,
                     end: body_end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
             }),
         }))
@@ -491,7 +491,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: function.range.start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             top_level_type: TopLevelType::FunctionBody(FunctionBody {
                 header: function,
@@ -499,7 +499,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 body_range: Range {
                     start: body_start,
                     end: body_end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
             }),
         }))
@@ -577,13 +577,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 body_range: Range {
                     start: body_start,
                     end: body_end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
             }),
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -613,7 +613,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         let base = base.unwrap_or_else(|| {
             DataType::simple(Token::fake_identifier(
                 "powerobject".into(),
-                Range::new_point(base_pos, self.uri()),
+                Range::new_point(base_pos, self.file_id()),
             ))
         });
 
@@ -732,13 +732,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 range: Range {
                     start,
                     end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
             }),
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -775,7 +775,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 range: Range {
                     start,
                     end: variable.range.end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
                 top_level_type: TopLevelType::ScopedVariableDecl(
                     vars.into_iter()
@@ -870,7 +870,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -950,7 +950,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -1000,7 +1000,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -1050,7 +1050,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }
@@ -1120,7 +1120,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
         }))
     }

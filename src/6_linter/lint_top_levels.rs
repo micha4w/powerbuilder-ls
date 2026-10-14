@@ -435,7 +435,7 @@ impl<'sol> Linter<'sol> {
     }
 
     pub fn lint_file(&mut self) {
-        let _e = info_span!("linter.file", url = %self.file.parsed().meta.uri).entered();
+        let _e = info_span!("linter.file", url = %self.file.parsed().meta.file_id).entered();
 
         for top_level in &self.file.inner().top_levels {
             self.lint_top_level(top_level);

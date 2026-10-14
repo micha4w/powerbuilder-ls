@@ -1,4 +1,4 @@
-use std::{backtrace::Backtrace, sync::Arc};
+use std::backtrace::Backtrace;
 
 use super::types::*;
 use crate::{
@@ -16,15 +16,15 @@ where
 }
 
 impl<I: Iterator<Item = char>> Parser<I> {
-    pub fn new(iter: I, uri: Arc<Url>) -> Self {
+    pub fn new(iter: I, file_id: FileID) -> Self {
         Parser {
-            tokens: TokenIter::new(Tokenizer::new(iter, uri)),
+            tokens: TokenIter::new(Tokenizer::new(iter, file_id)),
             syntax_errors: Vec::new(),
         }
     }
 
-    pub fn new_file(iter: I, uri: Arc<Url>) -> Self {
-        let mut tokenizer = Tokenizer::new(iter, uri);
+    pub fn new_file(iter: I, file_id: FileID) -> Self {
+        let mut tokenizer = Tokenizer::new(iter, file_id);
         tokenizer.skip_headers();
         Parser {
             tokens: TokenIter::new(tokenizer),
@@ -32,8 +32,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
         }
     }
 
-    pub(super) fn uri(&self) -> Arc<Url> {
-        self.tokens.underlying().uri.clone()
+    pub(super) fn file_id(&self) -> FileID {
+        self.tokens.underlying().file_id.clone()
     }
 
     pub(super) fn consume_line(&mut self) -> EOFOr<()> {

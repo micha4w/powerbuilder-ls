@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use multipeek::{multipeek, MultiPeek};
 use strum::Display;
@@ -51,7 +51,7 @@ where
     chars: MultiPeek<I>,
 
     buildup: String,
-    pub uri: Arc<Url>,
+    pub file_id: FileID,
 
     pos: Position,
     next: Option<Token>,
@@ -59,18 +59,18 @@ where
 }
 
 impl<I: Iterator<Item = char>> Tokenizer<I> {
-    pub fn new(iter: I, uri: Arc<Url>) -> Self {
+    pub fn new(iter: I, file_id: FileID) -> Self {
         Self {
             chars: multipeek(iter),
             buildup: String::new(),
             pos: Position { line: 0, column: 0 },
             next: None,
-            uri: uri.clone(),
+            file_id: file_id.clone(),
 
             previous: Token {
                 token_type: TokenType::INVALID,
                 content: String::new(),
-                range: Range::empty(uri),
+                range: Range::empty(file_id),
                 error: None,
             },
         }
@@ -445,7 +445,7 @@ impl<I: Iterator<Item = char>> Tokenizer<I> {
             range: Range {
                 start: start_pos,
                 end: self.pos,
-                uri: self.uri.clone(),
+                file_id: self.file_id.clone(),
             },
             error: error.map(str::to_owned),
         })

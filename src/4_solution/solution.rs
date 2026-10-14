@@ -1,6 +1,6 @@
 use core::str;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{hash_map::Entry, HashMap},
     fs,
     io::Read,
     iter,
@@ -10,6 +10,7 @@ use std::{
 use anyhow::Context;
 
 use encoding_rs_io::DecodeReaderBytes;
+use indexmap::IndexMap;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::{
@@ -30,8 +31,8 @@ fn range_err(message: String, range: Range) -> Vec<Diagnostic> {
     }]
 }
 
-fn pos_err(message: String, uri: Arc<Url>, pos: Position) -> Vec<Diagnostic> {
-    range_err(message, Range::new_point(pos, uri))
+fn pos_err(message: String, file_id: FileID, pos: Position) -> Vec<Diagnostic> {
+    range_err(message, Range::new_point(pos, file_id))
 }
 
 fn xml_pos(pos: roxmltree::TextPos) -> Position {
@@ -41,27 +42,24 @@ fn xml_pos(pos: roxmltree::TextPos) -> Position {
     }
 }
 
-fn xml_range(doc: &roxmltree::Document<'_>, uri: Arc<Url>, range: std::ops::Range<usize>) -> Range {
+fn xml_range(
+    doc: &roxmltree::Document<'_>,
+    file_id: FileID,
+    range: std::ops::Range<usize>,
+) -> Range {
     let start = doc.text_pos_at(range.start);
     let end = doc.text_pos_at(range.end);
-    Range::new(xml_pos(start), xml_pos(end), uri)
+    Range::new(xml_pos(start), xml_pos(end), file_id)
 }
 
 fn read_xml<'a>(
     content: &'a mut String,
-    uri: &Arc<Url>,
+    file_id: &FileID,
 ) -> Result<roxmltree::Document<'a>, Vec<Diagnostic>> {
-    let path = uri_to_path(&uri).map_err(|err| {
-        pos_err(
-            format!("Cannot convert URI to path: {}", err),
-            uri.clone(),
-            Position::default(),
-        )
-    })?;
-    let file = fs::File::open(&path).map_err(|err| {
+    let file = fs::File::open(file_id.path()).map_err(|err| {
         pos_err(
             format!("Failed to open file: {}", err),
-            uri.clone(),
+            file_id.clone(),
             Position::default(),
         )
     })?;
@@ -70,14 +68,14 @@ fn read_xml<'a>(
         .map_err(|err| {
             pos_err(
                 format!("Failed to read file: {}", err),
-                uri.clone(),
+                file_id.clone(),
                 Position::default(),
             )
         })?;
     let doc = roxmltree::Document::parse(content.as_str()).map_err(|err| {
         pos_err(
             format!("Failed to parse file: {}", err),
-            uri.clone(),
+            file_id.clone(),
             xml_pos(err.pos()),
         )
     })?;
@@ -87,18 +85,17 @@ fn read_xml<'a>(
 
 #[derive(Debug)]
 pub struct Project {
-    pub application: Arc<Url>,
-    pub libraries: Vec<(Arc<Url>, Vec<Arc<Url>>)>,
+    pub application: FileID,
+    pub libraries: Vec<(FileID, Vec<FileID>)>,
 }
 
 impl Project {
-    fn new(folder: &Url, file: &str) -> Result<Project, Vec<Diagnostic>> {
-        let path = url_join_path(folder.clone(), file);
-        let _e = info_span!("project.load", %path).entered();
-        let uri = Arc::new(path);
+    fn new(folder: &FilePath, file: &str) -> Result<Project, Vec<Diagnostic>> {
+        let file_id = folder.join(file).into_id();
+        let _e = info_span!("project.load", %file_id).entered();
 
         let mut content = String::new();
-        let doc = read_xml(&mut content, &uri).map_err(|errs| {
+        let doc = read_xml(&mut content, &file_id).map_err(|errs| {
             error!(%file, "failed to read project");
             errs
         })?;
@@ -112,7 +109,7 @@ impl Project {
         else {
             return Err(range_err(
                 "XML Format Invalid (<Libraries> not found)".to_string(),
-                xml_range(&doc, uri, doc.root_element().range()),
+                xml_range(&doc, file_id, doc.root_element().range()),
             ));
         };
 
@@ -124,7 +121,7 @@ impl Project {
                 // errs.push(Diagnostic {
                 //     severity: Severity::Warning,
                 //     message: format!("Ignoring unknown tag {}", &doc.input_text()[lib.range()],),
-                //     range: xml_range(&doc, uri.clone(), lib.range()),
+                //     range: xml_range(&doc, file_id.clone(), lib.range()),
                 // });
                 continue;
             }
@@ -132,15 +129,12 @@ impl Project {
             let Some(lib_path) = lib.attribute("Path") else {
                 return Err(range_err(
                     "XML Format Invalid (Path attribute missing)".to_string(),
-                    xml_range(&doc, uri, lib.range()),
+                    xml_range(&doc, file_id, lib.range()),
                 ));
             };
 
-            let lib_path = lib_path.replace('\\', std::path::MAIN_SEPARATOR_STR) + "/";
-            libraries.push((
-                Arc::new(url_join_path(folder.clone(), &lib_path)),
-                Vec::new(),
-            ));
+            let lib_path = lib_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
+            libraries.push((folder.join(&lib_path).into_id(), Vec::new()));
         }
         if !_errs.is_empty() {
             return Err(_errs);
@@ -149,7 +143,7 @@ impl Project {
         let Some(entry_lib) = libs.attribute("AppEntry") else {
             return Err(range_err(
                 "XML Format Invalid ('AppEntry' attribute missing)".to_string(),
-                xml_range(&doc, uri, libs.range()),
+                xml_range(&doc, file_id, libs.range()),
             ));
         };
 
@@ -160,28 +154,25 @@ impl Project {
         else {
             return Err(range_err(
                 "XML Format Invalid (<Application> not found)".to_string(),
-                xml_range(&doc, uri, doc.root_element().range()),
+                xml_range(&doc, file_id, doc.root_element().range()),
             ));
         };
         let Some(app_name) = application.attribute("Name") else {
             return Err(range_err(
                 "XML Format Invalid ('Name' attribute missing)".to_string(),
-                xml_range(&doc, uri, application.range()),
+                xml_range(&doc, file_id, application.range()),
             ));
         };
 
-        let app_uri = url_join_path(
-            folder.clone(),
-            &(entry_lib.to_string() + "/" + app_name + ".sra"),
-        );
+        let app_path = (folder
+            .join(entry_lib)
+            .join(&(app_name.to_string() + ".sra")))
+        .into_id();
 
-        info!(
-            %app_uri,
-            "application file",
-        );
+        info!(%app_path, "application file");
 
         Ok(Project {
-            application: Arc::new(app_uri),
+            application: app_path,
             libraries,
         })
     }
@@ -190,29 +181,29 @@ impl Project {
 #[derive(Debug)]
 pub enum SolutionType {
     PbSln {
-        projects: BTreeMap<Arc<Url>, Project>,
+        projects: IndexMap<FileID, Project>,
         /// Always exists inside projects
-        default: Arc<Url>,
+        default: FileID,
     },
     FailedPbSln(Vec<Diagnostic>),
-    OneOff(Vec<Arc<Url>>),
+    OneOff(Vec<FileID>),
 }
 
 #[derive(Debug)]
 pub struct Solution {
     pub solution_type: SolutionType,
 
-    pub files: HashMap<Arc<Url>, BuiltFile>,
+    pub files: HashMap<FileID, BuiltFile>,
     // TODO(globals): ...
     // pub global_functions: HashMap<IString, Url>,
 
     // TODO(perf): cache classes and variables by name
     pub builtins: Builtins,
-    pub root: Option<Url>,
+    pub root: Option<FilePath>,
 }
 
 impl<'sol> Solution {
-    pub fn new(root: Option<Url>) -> Solution {
+    pub fn new(root: Option<FilePath>) -> Solution {
         let solution_type = Self::parse_solution(root.clone());
 
         let builtins = Builtins::new(BuiltinsParsed::new(), |parsed| {
@@ -231,13 +222,13 @@ impl<'sol> Solution {
         }
     }
 
-    pub fn parse_solution(root: Option<Url>) -> SolutionType {
+    pub fn parse_solution(root: Option<FilePath>) -> SolutionType {
         let _e = info_span!("solution.load", ?root).entered();
 
         let mut solution = None;
         let res = || -> anyhow::Result<_> {
             if let Some(folder) = &root {
-                for file in std::fs::read_dir(uri_to_path(&folder)?)? {
+                for file in std::fs::read_dir(folder.path())? {
                     let file = file?;
                     let path = file.path();
                     if path.extension().is_some_and(|ext| ext == "pbsln") {
@@ -264,9 +255,9 @@ impl<'sol> Solution {
 
         if let (Some(solution), Some(folder)) = (solution, &root) {
             let mut content = String::new();
-            let uri = Arc::new(url_join_path(folder.clone(), &solution.to_string_lossy()));
+            let file_id = folder.join(&solution.to_string_lossy()).into_id();
 
-            let doc = match read_xml(&mut content, &uri).map_err(|errs| {
+            let doc = match read_xml(&mut content, &file_id).map_err(|errs| {
                 error!(?solution, "failed to read solution");
                 errs
             }) {
@@ -281,14 +272,14 @@ impl<'sol> Solution {
             else {
                 return SolutionType::FailedPbSln(range_err(
                     "XML Format Invalid (<Projects> not found)".to_string(),
-                    xml_range(&doc, uri, doc.root_element().range()),
+                    xml_range(&doc, file_id, doc.root_element().range()),
                 ));
             };
 
             let Some(default_path) = projs.attribute("Default") else {
                 return SolutionType::FailedPbSln(range_err(
                     "XML Format Invalid ('Default' attribute missing)".to_string(),
-                    xml_range(&doc, uri, projs.range()),
+                    xml_range(&doc, file_id, projs.range()),
                 ));
             };
 
@@ -301,7 +292,7 @@ impl<'sol> Solution {
             );
 
             let mut errs = Vec::new();
-            let mut projects = BTreeMap::new();
+            let mut projects = IndexMap::new();
             for proj in projs.children().filter(roxmltree::Node::is_element) {
                 if !proj.has_tag_name("Project") {
                     warn!(tag = &doc.input_text()[proj.range()], "unkwon tag");
@@ -311,7 +302,7 @@ impl<'sol> Solution {
                     //         "Ignoring unknown tag {}",
                     //         &doc.input_text()[proj.range()],
                     //     ),
-                    //     range: xml_range(&doc, uri.clone(), proj.range()),
+                    //     range: xml_range(&doc, file_id.clone(), proj.range()),
                     // });
                     continue;
                 }
@@ -319,7 +310,7 @@ impl<'sol> Solution {
                 let Some(proj_path) = proj.attribute("Path") else {
                     return SolutionType::FailedPbSln(range_err(
                         "XML Format Invalid ('Path' attribute missing)".to_string(),
-                        xml_range(&doc, uri, proj.range()),
+                        xml_range(&doc, file_id, proj.range()),
                     ));
                 };
 
@@ -327,20 +318,20 @@ impl<'sol> Solution {
 
                 match Project::new(&folder, &proj_path) {
                     Ok(project) => {
-                        let uri = Arc::new(url_join_path(folder.clone(), &proj_path));
+                        let proj_id = folder.join(&proj_path).into_id();
 
                         if proj_path.eq_ignore_ascii_case(&default_path) {
                             info!("default project found in list");
-                            default_arc = Some(uri.clone());
+                            default_arc = Some(proj_id.clone());
                         }
 
-                        projects.insert(uri, project);
+                        projects.insert(proj_id, project);
                     }
                     Err(mut err) => {
                         errs.append(&mut err);
                         errs.append(&mut range_err(
                             "Project failed to load".to_string(),
-                            xml_range(&doc, uri.clone(), proj.range()),
+                            xml_range(&doc, file_id.clone(), proj.range()),
                         ));
                     }
                 };
@@ -355,7 +346,7 @@ impl<'sol> Solution {
                         "XML Format Invalid (No Project with Path = {})",
                         default_path
                     ),
-                    xml_range(&doc, uri, projs.range()),
+                    xml_range(&doc, file_id, projs.range()),
                 ));
             };
 
@@ -366,39 +357,39 @@ impl<'sol> Solution {
     }
 
     fn reload_file(
-        uri: Arc<Url>,
-        pending_changes: &mut HashMap<Arc<Url>, impl FnOnce(&mut FileMeta)>,
-        old_files: &mut HashMap<Arc<Url>, BuiltFile>,
-        new_files: &mut HashMap<Arc<Url>, BuiltFile>,
+        file_id: FileID,
+        pending_changes: &mut HashMap<FileID, impl FnOnce(&mut FileMeta)>,
+        old_files: &mut HashMap<FileID, BuiltFile>,
+        new_files: &mut HashMap<FileID, BuiltFile>,
     ) -> anyhow::Result<()> {
-        debug!(%uri, "found file with pb extension");
+        debug!(%file_id, "found file with pb extension");
 
-        let file = if let Some(mut old_file) = old_files.remove(&uri) {
+        let file = if let Some(mut old_file) = old_files.remove(&file_id) {
             debug!("file already loaded, reusing");
 
             // TODO(proj): currently assuming no change happened except if it was opened in editor (so changes by scripts are ignored), do hashing or timesamping?
-            if let Some(changes) = pending_changes.remove(&uri) {
+            if let Some(changes) = pending_changes.remove(&file_id) {
                 let mut meta = old_file.into_owner().meta;
                 changes(&mut meta);
 
                 old_file =
-                    Builder::new().build_file_shallow(ParsedFile::new(meta.uri, meta.content));
+                    Builder::new().build_file_shallow(ParsedFile::new(meta.file_id, meta.content));
             }
 
             old_file
         } else {
-            let parse = ParsedFile::new_from_filesystem(uri.clone())
-                .with_context(|| format!("Failed to parse file: {}", uri))?;
+            let parse = ParsedFile::new_from_filesystem(file_id.clone())
+                .with_context(|| format!("Failed to parse file: {}", file_id))?;
             Builder::new().build_file_shallow(parse)
         };
 
-        new_files.insert(uri.clone(), file);
+        new_files.insert(file_id.clone(), file);
         Ok(())
     }
 
     pub fn rebuilt(
         mut old: Solution,
-        mut pending_changes: HashMap<Arc<Url>, impl FnOnce(&mut FileMeta)>,
+        mut pending_changes: HashMap<FileID, impl FnOnce(&mut FileMeta)>,
     ) -> (Solution, Vec<anyhow::Error>) {
         let _e = info_span!("solution.rebuild").entered();
 
@@ -417,27 +408,26 @@ impl<'sol> Solution {
                     lib_files.clear();
 
                     let res = || -> anyhow::Result<()> {
-                        let lib_path = uri_to_path(&lib)?;
-                        for file in std::fs::read_dir(&lib_path)? {
-                            let path = file?.path();
-                            if path.extension().is_some_and(|ext| {
-                                // TODO: add all extensions
-                                vec![
-                                    "sru", "srm", "srw", "srs", "srf", "sra", "srp", "srj", "srq",
-                                ]
-                                .contains(&&*ext.to_string_lossy())
-                            }) {
-                                let mut uri = (**lib).clone();
-                                uri.set_path(&path.to_string_lossy());
-                                let uri = Arc::new(uri);
+                        for file in std::fs::read_dir(lib.path())? {
+                            let file_name = file?.file_name();
+                            let name = file_name.to_string_lossy();
+                            let is_pb = vec![
+                                ".sru", ".srm", ".srw", ".srs", ".srf", ".sra", ".srp", ".srj",
+                                ".srq",
+                            ]
+                            .iter()
+                            .any(|ext| name.ends_with(ext));
+
+                            if is_pb {
+                                let file_id = lib.join(&name);
 
                                 Self::reload_file(
-                                    uri.clone(),
+                                    file_id.clone(),
                                     &mut pending_changes,
                                     &mut old.files,
                                     &mut new.files,
                                 )?;
-                                lib_files.push(uri);
+                                lib_files.push(file_id);
                             }
                         }
                         Ok(())
@@ -448,10 +438,10 @@ impl<'sol> Solution {
                     };
                 }
             }
-            SolutionType::OneOff(uris) => {
-                for uri in uris {
+            SolutionType::OneOff(file_ids) => {
+                for file_id in file_ids {
                     let res = Self::reload_file(
-                        uri.clone(),
+                        file_id.clone(),
                         &mut pending_changes,
                         &mut old.files,
                         &mut new.files,
@@ -467,19 +457,19 @@ impl<'sol> Solution {
         (new, errs)
     }
 
-    pub fn open_file(&mut self, uri: &Arc<Url>) -> anyhow::Result<()> {
-        let file = match self.files.entry(uri.clone()) {
+    pub fn open_file(&mut self, file_id: &FileID) -> anyhow::Result<()> {
+        let file = match self.files.entry(file_id.clone()) {
             Entry::Occupied(file) => file.into_mut(),
             Entry::Vacant(entry) => {
-                let SolutionType::OneOff(uris) = &mut self.solution_type else {
-                    info!(%uri, "file not part of pbsln");
+                let SolutionType::OneOff(file_ids) = &mut self.solution_type else {
+                    info!(%file_id, "file not part of pbsln");
                     return Ok(());
                 };
 
-                uris.push(uri.clone());
+                file_ids.push(file_id.clone());
 
-                let parse = ParsedFile::new_from_filesystem(uri.clone())
-                    .with_context(|| format!("Failed to parse file: {}", uri))?;
+                let parse = ParsedFile::new_from_filesystem(file_id.clone())
+                    .with_context(|| format!("Failed to parse file: {}", file_id))?;
                 let file = Builder::new().build_file_shallow(parse);
                 entry.insert(file)
             }

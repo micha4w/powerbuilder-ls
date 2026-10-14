@@ -54,7 +54,7 @@ impl<'pars> Builder {
     }
 
     pub fn build_file_shallow(&mut self, parsed: ParsedFile) -> BuiltFile {
-        let _e = debug_span!("build.shallow", %parsed.meta.uri).entered();
+        let _e = debug_span!("build.shallow", %parsed.meta.file_id).entered();
 
         BuiltFile::new(parsed, |parsed| {
             let mut top_levels: Vec<TopLevel> = parsed
@@ -310,7 +310,7 @@ impl<'pars> Builder {
                 return;
             }
 
-            let _e = info_span!("build.bodies", %parsed.meta.uri).entered();
+            let _e = info_span!("build.bodies", %parsed.meta.file_id).entered();
 
             // Remove classes Arcs so we can run get_mut
             built.classes.clear();

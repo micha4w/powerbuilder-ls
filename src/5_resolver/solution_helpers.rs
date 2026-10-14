@@ -111,14 +111,10 @@ impl<'sol> Solution {
 
                 let files = filter.name.filter(
                     self.files.iter(),
-                    |(uri, _), want| {
-                        uri.to_file_path()
-                            .ok()
-                            .as_ref()
-                            .and_then(|p| p.file_prefix())
-                            .map_or(false, |p| {
-                                Into::<IString>::into(&*p.to_string_lossy()) == **want
-                            })
+                    |(file_id, _), want| {
+                        file_id.path().file_prefix().map_or(false, |p| {
+                            Into::<IString>::into(&*p.to_string_lossy()) == **want
+                        })
                     },
                     ListError::WrongName,
                 );

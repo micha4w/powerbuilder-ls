@@ -263,7 +263,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         let mut expression = Expression {
             expression_type,
-            range: Range::new(start, end, self.uri()),
+            range: Range::new(start, end, self.file_id()),
         };
         if let Some(err) = err {
             return Some(Err((err, Some(expression))));
@@ -413,7 +413,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                                                 expression_type: ExpressionType::Error,
                                                 range: Range::new_point(
                                                     lbrace.range.end,
-                                                    self.uri(),
+                                                    self.file_id(),
                                                 ),
                                             })),
                                         ),
@@ -531,7 +531,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         )?
                         .split();
                     let (arguments, range) =
-                        res.unwrap_or((Vec::new(), Range::new_point(name.range.end, self.uri())));
+                        res.unwrap_or((Vec::new(), Range::new_point(name.range.end, self.file_id())));
 
                     let func = FunctionCall {
                         range: name.range.clone().merged(&range),
@@ -586,7 +586,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 None => prev,
             }),
             None => {
-                let range = Range::new_point(self.tokens.peek()?.range.start, self.uri());
+                let range = Range::new_point(self.tokens.peek()?.range.start, self.file_id());
                 Err((
                     ParseError::UnexpectedToken,
                     Some(LValue {

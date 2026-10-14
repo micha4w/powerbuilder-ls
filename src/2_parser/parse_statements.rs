@@ -18,7 +18,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: throw.range.start,
                 end: expression.range.end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::Throw(expression),
         }))
@@ -41,7 +41,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: ret.range.start,
                 end: value.as_ref().map_or(ret.range.end, |val| val.range.end),
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::Return(value),
         }))
@@ -59,7 +59,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: destroy.range.start,
                 end: expression.range.end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::Destroy(expression),
         }))
@@ -173,7 +173,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 range: Range {
                     start,
                     end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
                 data_type: data_type.clone(),
                 access: VariableAccess {
@@ -304,7 +304,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 range: Range {
                     start,
                     end,
-                    uri: self.uri(),
+                    file_id: self.file_id(),
                 },
             },
             err,
@@ -416,7 +416,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 (
                     Expression {
                         expression_type: ExpressionType::Error,
-                        range: Range::new_point(end, self.uri()),
+                        range: Range::new_point(end, self.file_id()),
                     },
                     err,
                 )
@@ -487,7 +487,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                                     }
                                     (None, _) => Expression {
                                         expression_type: ExpressionType::Error,
-                                        range: Range::new_point(end, self.uri()),
+                                        range: Range::new_point(end, self.file_id()),
                                     },
                                 };
 
@@ -676,7 +676,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
             None => Expression {
                 expression_type: ExpressionType::Error,
-                range: Range::new_point(end, self.uri()),
+                range: Range::new_point(end, self.file_id()),
             },
         };
 
@@ -858,7 +858,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: try_token.range.start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::TryCatch(TryCatchStatement {
                 statements: try_statements,
@@ -1069,7 +1069,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: choose_token.range.start,
                 end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::Choose(ChooseCaseStatement { choose, cases }),
         }))
@@ -1129,7 +1129,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             range: Range {
                 start: call_token.range.start,
                 end: function.range.end,
-                uri: self.uri(),
+                file_id: self.file_id(),
             },
             statement_type: StatementType::Call(CallStatement {
                 call_type,

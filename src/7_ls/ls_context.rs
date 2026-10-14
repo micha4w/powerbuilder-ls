@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tracing::{info, warn};
 
 use crate::{
@@ -12,7 +10,7 @@ use crate::{
 use super::ls::SolutionDependent;
 
 pub struct LSContext<'sol> {
-    pub uri: Arc<Url>,
+    pub file_id: FileID,
     pub position: &'sol Position,
 
     pub ctx: resolver::Context<'sol>,
@@ -26,20 +24,20 @@ impl<'sol> LSContext<'sol> {
     pub fn new(
         sol: &'sol Solution,
         dep: &'sol SolutionDependent<'sol>,
-        uri: &Url,
+        uri: Url,
         pos: &'sol Position,
     ) -> Option<LSContext<'sol>> {
-        // TODO(perf): use the arc pointer to index maps instead of hashing the url
-        let uri = Arc::new(uri.clone());
+        // TODO(perf): use the arc pointer to index maps instead of hashing the path
+        let file_id = FileID::new(uri)?;
 
-        let Some(file) = sol.files.get(&uri) else {
+        let Some(file) = sol.files.get(&file_id) else {
             // this happens when the user opens a file that is not part of the project
-            info!(%uri, "file not found");
+            info!(%file_id, "file not found");
             return None;
         };
-        let Some(annotations) = dep.annotations.get(&uri) else {
+        let Some(annotations) = dep.annotations.get(&file_id) else {
             // TODO(errors): return error here
-            warn!(%uri, "annotations not found");
+            warn!(%file_id, "annotations not found");
             return None;
         };
 
@@ -48,7 +46,7 @@ impl<'sol> LSContext<'sol> {
         let (top_level, nodes) = file.inner().get_nodes_at(pos)?;
 
         Some(LSContext {
-            uri,
+            file_id,
             position: pos,
 
             ctx,

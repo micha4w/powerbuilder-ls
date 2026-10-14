@@ -15,8 +15,8 @@ use crate::{
     types::*,
 };
 
-pub static BUILTIN_URL: LazyLock<Arc<Url>> =
-    LazyLock::new(|| Arc::new(Url::parse("powerbuilder-ls:///builtins.sru").unwrap()));
+pub static BUILTIN_FILE_ID: LazyLock<FileID> =
+    LazyLock::new(|| FileID::new_virtual(Url::parse("powerbuilder-ls:///builtins.sru").unwrap()));
 
 #[derive(Debug)]
 pub struct BuiltinsParsed {
@@ -55,13 +55,13 @@ impl BuiltinsParsed {
     }
 
     fn empty() -> Range {
-        Range::empty(BUILTIN_URL.clone())
+        Range::empty(BUILTIN_FILE_ID.clone())
     }
 
     fn parse_type(mut name: String, array_bounds: &Option<String>) -> parser::DataType {
         name += "\n\n";
 
-        let mut parser = Parser::new(name.chars(), BUILTIN_URL.clone());
+        let mut parser = Parser::new(name.chars(), BUILTIN_FILE_ID.clone());
         if let Some(Ok(mut dt) | Err((_, Some(mut dt)))) = parser.parse_type() {
             if let Some(bounds) = array_bounds {
                 if bounds != "[]" {

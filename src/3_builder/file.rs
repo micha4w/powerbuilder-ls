@@ -17,7 +17,7 @@ use self_cell::self_cell;
 
 #[derive(Debug)]
 pub struct FileMeta {
-    pub uri: Arc<Url>,
+    pub file_id: FileID,
     pub content: Rope,
 
     pub parse_diagnostics: Vec<Diagnostic>,
@@ -30,23 +30,27 @@ pub struct ParsedFile {
 }
 
 impl ParsedFile {
-    pub fn new(uri: Arc<Url>, content: Rope) -> ParsedFile {
+    pub fn new(file_id: FileID, content: Rope) -> ParsedFile {
         let (top_levels, parse_diagnostics);
         {
-            let _e = debug_span!("parse.file", %uri).entered();
+            let _e = debug_span!("parse.file", %file_id).entered();
 
-            let mut parser = Parser::new_file(content.chars(), uri.clone());
+            let mut parser = Parser::new_file(content.chars(), file_id.clone());
             top_levels = parser.parse_tokens();
             parse_diagnostics = parser.to_diagnostics();
 
             if !parse_diagnostics.is_empty() {
-                info!(%uri, diagnostics=parse_diagnostics.len(), "parsing resulted in errors");
+                info!(
+                    %file_id,
+                    diagnostics = parse_diagnostics.len(),
+                    "parsing resulted in errors"
+                );
             }
         }
 
         ParsedFile {
             meta: FileMeta {
-                uri,
+                file_id,
                 content,
                 parse_diagnostics,
             },
@@ -54,16 +58,14 @@ impl ParsedFile {
         }
     }
 
-    pub fn new_from_filesystem(uri: Arc<Url>) -> anyhow::Result<ParsedFile> {
-        let decoded_path = uri_to_path(&uri)?;
-
-        debug!(?decoded_path, "reading file from filesystem");
+    pub fn new_from_filesystem(file_id: FileID) -> anyhow::Result<ParsedFile> {
+        debug!(%file_id, "reading file from filesystem");
         let content = Rope::from_reader(DecodeReaderBytes::new(
-            fs::File::open(&decoded_path).context("Failed to open file")?,
+            fs::File::open(file_id.path()).context("Failed to open file")?,
         ))
         .context("Failed to read file")?;
 
-        Ok(ParsedFile::new(uri, content))
+        Ok(ParsedFile::new(file_id, content))
     }
 }
 
