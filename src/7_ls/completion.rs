@@ -7,10 +7,7 @@ use crate::{
     solution, tokenizer,
 };
 
-use super::{
-    ls::{PowerBuilderLS, SolutionCell},
-    ls_context::LSContext,
-};
+use super::{ls::PowerBuilderLS, ls_context::LSContext};
 
 impl PowerBuilderLS {
     pub(super) fn completion_capabilities(&self, caps: &mut lsp_types::ServerCapabilities) {
@@ -330,17 +327,17 @@ impl PowerBuilderLS {
         Ok(items)
     }
 
-    fn completion_resolve_impl(
-        &self,
-        sol: &SolutionCell,
-        mut params: lsp_types::CompletionItem,
-    ) -> jsonrpc::Result<lsp_types::CompletionItem> {
-        let Some(data) = &params.data else {
-            return Ok(params);
-        };
+    // fn completion_resolve_impl(
+    //     &self,
+    //     sol: &SolutionCell,
+    //     mut params: lsp_types::CompletionItem,
+    // ) -> jsonrpc::Result<lsp_types::CompletionItem> {
+    //     let Some(data) = &params.data else {
+    //         return Ok(params);
+    //     };
 
-        Ok(params)
-    }
+    //     Ok(params)
+    // }
 }
 
 // #[derive(serde::Serialize, serde::Deserialize)]

@@ -150,6 +150,7 @@ impl Project {
                 xml_range(&doc, file_id, libs.range()),
             ));
         };
+        let entry_lib = entry_lib.replace('\\', std::path::MAIN_SEPARATOR_STR);
 
         let Some(application) = doc
             .root_element()
@@ -169,7 +170,7 @@ impl Project {
         };
 
         let app_path = (folder
-            .join(entry_lib)
+            .join(&entry_lib)
             .join(&(app_name.to_string() + ".sra")))
         .into_id();
 
@@ -288,7 +289,7 @@ impl<'sol> Solution {
                 )));
             };
 
-            let default_path = default_path.replace('\\', "/");
+            let default_path = default_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
             let mut default_arc = None;
 
             info!(
@@ -319,7 +320,7 @@ impl<'sol> Solution {
                     )));
                 };
 
-                let proj_path = proj_path.replace('\\', "/");
+                let proj_path = proj_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
 
                 match Project::new(&folder, &proj_path) {
                     Ok(project) => {

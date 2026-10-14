@@ -4,7 +4,6 @@ use crate::{
     builder::BuiltFile,
     solution::{self, Solution},
     resolver::{self, FileAnnotations, ResolvedType},
-    tokenizer,
     types::*,
 };
 

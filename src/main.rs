@@ -1,5 +1,6 @@
 #![feature(try_trait_v2, try_trait_v2_residual)]
 #![feature(coroutines, stmt_expr_attributes, iter_from_coroutine)]
+#![allow(dead_code)]
 
 mod types;
 
