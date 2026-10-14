@@ -285,7 +285,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
             let range = expression.range.clone().merged(&right_side.range);
             expression = match right_side.expression_type {
                 ExpressionType::Operation(sub_left, sub_operator, sub_right)
-                    if operator.precedence() < sub_operator.precedence() =>
+                    if operator.precedence() <= sub_operator.precedence() =>
                 {
                     Expression {
                         range,

@@ -231,25 +231,30 @@ impl<'sol> Linter<'sol> {
                         }
                     }
 
-                    tokenizer::Operator::PLUS
-                    | tokenizer::Operator::GT
+                    tokenizer::Operator::PLUS => {
+                        if !((left_type.is_string() && right_type.is_string())
+                            || (left_type.is_numeric() && right_type.is_numeric())
+                            || (left_type.is_blob() && right_type.is_blob()))
+                        {
+                            self.diagnostic_error(
+                                "Invalid types for Operation, expected numeric, string or blob"
+                                    .into(),
+                                expression.range.clone(),
+                            );
+                        }
+                    }
+
+                    tokenizer::Operator::GT
                     | tokenizer::Operator::GTE
                     | tokenizer::Operator::LT
                     | tokenizer::Operator::LTE => {
-                        if !(self.sol.is_convertible(
-                            &left_type,
-                            &ResolvedType::Base(builder::BaseType::String),
-                        ) && self.sol.is_convertible(
-                            &right_type,
-                            &ResolvedType::Base(builder::BaseType::String),
-                        )) {
-                            if !(left_type.is_numeric() && right_type.is_numeric()) {
-                                self.diagnostic_error(
-                                    "Invalid types for Operation, expected numeric or string"
-                                        .into(),
-                                    expression.range.clone(),
-                                );
-                            }
+                        if !((left_type.is_string() && right_type.is_string())
+                            || (left_type.is_numeric() && right_type.is_numeric()))
+                        {
+                            self.diagnostic_error(
+                                "Invalid types for Operation, expected numeric or string".into(),
+                                expression.range.clone(),
+                            );
                         }
                     }
 
@@ -266,14 +271,17 @@ impl<'sol> Linter<'sol> {
                     }
                 }
             }
-            parser::ExpressionType::UnaryOperation(_operator, expression) => {
+            parser::ExpressionType::UnaryOperation(op, expression) => {
                 let data_type = self.lint_expression(expression, scope);
-
-                if !data_type.is_numeric() {
-                    self.diagnostic_error(
-                        "Invalid type, expected number".into(),
-                        expression.range.clone(),
-                    );
+                match op {
+                    tokenizer::Operator::PLUS if data_type.is_string() || data_type.is_blob() => {}
+                    _ if data_type.is_numeric() => {}
+                    _ => {
+                        self.diagnostic_error(
+                            "Invalid type, expected number".into(),
+                            expression.range.clone(),
+                        );
+                    }
                 }
             }
             parser::ExpressionType::BooleanNot(expression) => {
@@ -580,28 +588,26 @@ impl<'sol> Linter<'sol> {
                             );
                         }
                     }
-                    Some(tokenizer::SpecialAssignment::PLUSEQ)
-                        if self.sol.is_convertible(
-                            &lvalue_type,
-                            &ResolvedType::Base(builder::BaseType::String),
-                        ) =>
-                    {
-                        if !self.sol.is_convertible(
-                            &expression_type,
-                            &ResolvedType::Base(builder::BaseType::String),
-                        ) {
-                            if !expression_type.is_numeric() {
-                                self.diagnostic_error(
-                                    "Needs to be a String".into(),
-                                    expression.range.clone(),
-                                );
-                            }
+                    Some(tokenizer::SpecialAssignment::PLUSEQ) if lvalue_type.is_string() => {
+                        if !expression_type.is_string() {
+                            self.diagnostic_error(
+                                "Needs to be a String".into(),
+                                expression.range.clone(),
+                            );
+                        }
+                    }
+                    Some(tokenizer::SpecialAssignment::PLUSEQ) if lvalue_type.is_blob() => {
+                        if !expression_type.is_blob() {
+                            self.diagnostic_error(
+                                "Needs to be a Blob".into(),
+                                expression.range.clone(),
+                            );
                         }
                     }
                     Some(_) => {
                         if !lvalue_type.is_numeric() {
                             self.diagnostic_error(
-                                "Cannot do a Special Assignment on a Type that is neither Numeric or a String".into(),
+                                "Cannot do a Special Assignment on a Type that is neither Numeric, String or Blob".into(),
                                 lvalue.range.clone(),
                             );
                         } else if !expression_type.is_numeric() {

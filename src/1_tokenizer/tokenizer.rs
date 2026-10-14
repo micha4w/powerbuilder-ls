@@ -303,12 +303,15 @@ impl<I: Iterator<Item = char>> Tokenizer<I> {
                             break TokenType::Literal(Literal::STRING);
                         }
                     }
-                    Some('~') => match self.chars.peek() {
-                        Some('\n') => {}
-                        _ => {
-                            self.next();
+                    Some('~') => {
+                        self.next();
+                        match self.chars.peek() {
+                            Some('\n') => {}
+                            _ => {
+                                self.next();
+                            }
                         }
-                    },
+                    }
                     Some('&') => {
                         self.next();
                         loop {
@@ -324,7 +327,7 @@ impl<I: Iterator<Item = char>> Tokenizer<I> {
                             };
                         }
                     }
-                    Some('\n') => {
+                    None | Some('\n') => {
                         error = Some("String not closed");
                         break TokenType::Literal(Literal::STRING);
                     }
@@ -472,7 +475,7 @@ impl<I: Iterator<Item = char>> Iterator for Tokenizer<I> {
             // But if an '(' appears after the keyword, we know its a function, otherwise its a the keyword.
             macro_rules! non_reserved_sql_keyword {
                 () => {
-                    TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE | Keyword::UPDATE)
+                    TokenType::Keyword(Keyword::OPEN | Keyword::CLOSE | Keyword::UPDATE | Keyword::DESCRIBE)
                 };
             }
 

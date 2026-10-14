@@ -583,9 +583,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
         }
     }
 
-    pub fn parse_sql_statement(&mut self) -> EOFOr<Option<Statement>> {
-        self.tokens.ignore_literal_newlines = true;
-
+    fn _parse_sql_statement(&mut self) -> EOFOr<Option<Statement>> {
         let ret = match self.tokens.peek()?.token_type {
             TokenType::Keyword(tokenizer::Keyword::OPEN) => self.parse_sql_open(),
             TokenType::Keyword(tokenizer::Keyword::CLOSE) => self.parse_sql_close(),
@@ -618,7 +616,13 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
         }
 
-        self.tokens.ignore_literal_newlines = false;
         Some(Some(token))
+    }
+
+    pub fn parse_sql_statement(&mut self) -> EOFOr<Option<Statement>> {
+        self.tokens.ignore_literal_newlines = true;
+        let ret = self._parse_sql_statement();
+        self.tokens.ignore_literal_newlines = false;
+        ret
     }
 }

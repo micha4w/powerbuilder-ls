@@ -42,6 +42,17 @@ impl<'sol> ResolvedType<'sol> {
         self.numeric_precedence().is_some()
     }
 
+    pub fn is_string(&self) -> bool {
+        match self {
+            Self::Base(builder::BaseType::String | builder::BaseType::Char) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_blob(&self) -> bool {
+        matches!(self, Self::Base(builder::BaseType::Blob(_)))
+    }
+
     pub fn numeric_precedence(&self) -> Option<u8> {
         match self {
             Self::Base(builder::BaseType::Int) => Some(0),

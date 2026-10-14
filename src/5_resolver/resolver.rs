@@ -355,15 +355,10 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                     | tokenizer::Operator::LTE => ResolvedType::Base(builder::BaseType::Boolean),
 
                     tokenizer::Operator::PLUS
-                        if matches!(
-                            left_type,
-                            ResolvedType::Base(builder::BaseType::String | builder::BaseType::Char)
-                        ) && matches!(
-                            right_type,
-                            ResolvedType::Base(builder::BaseType::String | builder::BaseType::Char)
-                        ) =>
+                        if (left_type.is_string() && right_type.is_string())
+                            || (left_type.is_blob() && right_type.is_blob()) =>
                     {
-                        ResolvedType::Base(builder::BaseType::String)
+                        left_type.clone()
                     }
                     _ => {
                         match (
@@ -382,13 +377,15 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                     }
                 }
             }
-            parser::ExpressionType::UnaryOperation(_op, expression) => {
+            parser::ExpressionType::UnaryOperation(op, expression) => {
                 let data_type = &self.resolve_expression(expression, annot).resolved_type;
 
-                if data_type.is_numeric() {
-                    data_type.clone()
-                } else {
-                    ResolvedType::Base(builder::BaseType::Int)
+                match op {
+                    tokenizer::Operator::PLUS if data_type.is_string() || data_type.is_blob() => {
+                        data_type.clone()
+                    }
+                    _ if data_type.is_numeric() => data_type.clone(),
+                    _ => ResolvedType::Base(builder::BaseType::Int),
                 }
             }
             parser::ExpressionType::IncrementDecrement(expression, _op) => {

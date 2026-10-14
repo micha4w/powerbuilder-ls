@@ -377,8 +377,8 @@ impl NodeSearcher for parser::Event {
                     arg.variable.search(pos, nodes)?;
                 }
             }
-            parser::EventType::DeclaredElseWhere => todo!(),
-            parser::EventType::System(_) => todo!(),
+            parser::EventType::DeclaredElseWhere => {} // TODO(events): ...
+            parser::EventType::System(_) => {}
         }
 
         Found::Yes(())
