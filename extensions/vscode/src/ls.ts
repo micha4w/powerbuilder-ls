@@ -23,7 +23,7 @@ function parseVersion(tag: string): SemVer {
 }
 
 export class PBLanguageClient {
-    client: ls.LanguageClient | null = null;
+    client: Promise<ls.LanguageClient> | null = null;
     channels: [vsc.LogOutputChannel, vsc.LogOutputChannel] | null = null;
 
     storagePath: string;
@@ -271,24 +271,38 @@ export class PBLanguageClient {
             }
         };
 
-        this.client = new ls.LanguageClient("powerbuilder-ls", "PowerBuilder Language Server", serverOptions, clientOptions);
-        await this.client.start();
+        this.client = (async () => {
+            const client = new ls.LanguageClient("powerbuilder-ls", "PowerBuilder Language Server", serverOptions, clientOptions);
+            await client.start();
+
+            console.info("Started PowerBuilder-LS");
+
+            return client;
+        })();
+
         return true;
     }
 
     async destroy() {
+        if (!this.client) return;
+
+        const client = await this.client;
+        this.client = null;
+
         console.info("Destroying PowerBuilder-LS");
         try {
-            await this.client?.stop();
+            await client.stop();
         } catch (error) {
             console.warn("Failed to stop old PowerBuilder-LS client", error);
         }
-        await this.client?.dispose()
-        this.client = null;
+        await client.dispose();
+
+        console.info("Diposed PowerBuilder-LS");
     }
 
-    dispose() {
+    async dispose() {
         console.info("Disposing PowerBuilder-LS");
         this.channels?.map(ch => ch.dispose());
+        (await this.client)?.dispose();
     }
 }
