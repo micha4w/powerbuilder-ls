@@ -1,3 +1,5 @@
+use std::iter;
+
 use tower_lsp::lsp_types::OneOf;
 use tracing::info_span;
 
@@ -45,8 +47,15 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
             );
 
             if let Found::Yes(((fc, event), _err)) = Context::first(events) {
+                let ret = self
+                    .ctx
+                    .event_types(&event.header())
+                    .map_or(ResolvedType::Unknown, |(ret, _)| {
+                        resolve_return_value(self, Some(fc), ret)
+                    });
+
                 return (
-                    resolve_return_value(self, Some(fc), &event.header().returns),
+                    ret,
                     Some(ResolvedLValue::Method(class, OneOf::Right(event))),
                 );
             }
@@ -752,7 +761,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
 
                 builder::TopLevelType::FunctionBody(func) => {
                     annotator.resolve_function_header(&func.header, false, &mut annot);
-                    annotator.ctx.load_body(&func.body, &func.header.arguments);
+                    annotator.ctx.load_body(&func.body, func.header.arguments.iter());
                     annotator.resolve_statements(&func.parsed.statements, &mut annot);
                 }
                 builder::TopLevelType::EventBody(event) => {
@@ -770,7 +779,10 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
 
                     annotator.resolve_event_header(&event.header, &mut annot);
 
-                    annotator.ctx.load_body(&event.body, &header.arguments);
+                    match annotator.ctx.event_types(&event.header) {
+                        Found::Yes((_, args)) => annotator.ctx.load_body(&event.body, args.iter()),
+                        Found::No => annotator.ctx.load_body(&event.body, iter::empty()),
+                    }
                     annotator.resolve_statements(&event.parsed.statements, &mut annot);
                 }
                 builder::TopLevelType::OnBody(on) => {
@@ -781,9 +793,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                         .classes
                         .get(&(&on.header.class.name.content).into())
                         .map_or(ResolvedType::Unknown, |class| {
-                            ResolvedType::Class(solution::ClassRef::new(
-                                file, class,
-                            ))
+                            ResolvedType::Class(solution::ClassRef::new(file, class))
                         });
                     annot.add_child(
                         &on.header.class.range,

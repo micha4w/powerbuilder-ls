@@ -83,12 +83,15 @@ impl<'sol> Context<'sol> {
                 match &top_level.top_level_type {
                     builder::TopLevelType::FunctionBody(func) => {
                         if func.parsed.body_range.contains(pos) {
-                            ctx.load_body(&func.body, &func.header.arguments)
+                            ctx.load_body(&func.body, func.header.arguments.iter())
                         }
                     }
                     builder::TopLevelType::EventBody(event) => {
                         if event.parsed.body_range.contains(pos) {
-                            ctx.load_body(&event.body, &event.header.arguments);
+                            match ctx.event_types(&event.header) {
+                                Found::Yes((_, args)) => ctx.load_body(&event.body, args.iter()),
+                                Found::No => ctx.load_body(&event.body, iter::empty()),
+                            }
                         }
                     }
                     builder::TopLevelType::OnBody(_on) => {} // TODO(on): ...
@@ -129,12 +132,11 @@ impl<'sol> Context<'sol> {
     pub(super) fn load_body(
         &mut self,
         body: &'sol builder::Body<'sol>,
-        arguments: &'sol Vec<Arc<builder::Variable<'sol>>>,
+        arguments: impl Iterator<Item = &'sol Arc<builder::Variable<'sol>>>,
     ) {
         self.body = Some(body);
         self.arguments = Some(
             arguments
-                .iter()
                 .map(|arg| ((&arg.parsed().access.name.content).into(), arg))
                 .collect(),
         );
@@ -296,6 +298,16 @@ impl<'sol> Context<'sol> {
                 }
             },
         )
+    }
+
+    pub fn event_types(
+        &self,
+        event: &'sol builder::EventHeader<'sol>,
+    ) -> Found<(
+        &'sol Option<builder::DataType<'sol>>,
+        &'sol Vec<Arc<builder::Variable<'sol>>>,
+    )> {
+        self.sol.event_types(self.class, &event)
     }
 
     // pub fn some_class<T>(

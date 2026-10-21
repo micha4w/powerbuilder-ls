@@ -309,22 +309,22 @@ impl<'pars> Body<'pars> {
 pub struct EventHeader<'pars> {
     pub parsed: &'pars parser::Event,
 
-    pub returns: Option<DataType<'pars>>,
-    pub arguments: Vec<Arc<Variable<'pars>>>,
+    pub user_types: Option<(Option<DataType<'pars>>, Vec<Arc<Variable<'pars>>>)>,
 }
 
 impl<'pars> EventHeader<'pars> {
     pub fn new(parsed: &'pars parser::Event) -> EventHeader<'pars> {
-        let (ret, args) = parsed.get_types();
-        EventHeader {
-            returns: ret.as_ref().map(DataType::new),
-            arguments: args
-                .iter()
-                .map(|arg| Arc::new(Variable::new_argument(arg)))
-                .collect(),
+        let mut user_types = None;
+        if let parser::EventType::User(ret, args) = &parsed.event_type {
+            user_types = Some((
+                ret.as_ref().map(DataType::new),
+                args.iter()
+                    .map(|arg| Arc::new(Variable::new_argument(arg)))
+                    .collect(),
+            ))
+        };
 
-            parsed,
-        }
+        EventHeader { user_types, parsed }
     }
 
     pub fn iname(&self) -> IString {

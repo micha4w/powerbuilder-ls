@@ -1,5 +1,6 @@
-use std::{ptr, sync::Arc};
+use std::{collections::HashMap, iter, ptr, sync::Arc};
 
+use serde_json::error::Category::Data;
 use tracing::info_span;
 
 use super::linter::{Linter, Scope};
@@ -325,10 +326,14 @@ impl<'sol> Linter<'sol> {
             builder::TopLevelType::FunctionBody(function) => {
                 self.require_class("Function Body".into(), top_level.range.clone());
 
-                self.lint_statements_in_block(
-                    function.parsed.statements.iter(),
+                let (res_ret, res_args) = self.lint_arguments_and_returns(
                     &function.header.returns,
                     function.header.arguments.iter(),
+                );
+                self.lint_statements_in_block(
+                    function.parsed.statements.iter(),
+                    res_ret,
+                    res_args,
                     &function.body,
                 );
 
@@ -367,10 +372,15 @@ impl<'sol> Linter<'sol> {
             builder::TopLevelType::EventBody(event) => {
                 self.require_class("Event Body".into(), top_level.range.clone());
 
+                let (res_ret, res_args) = match self.sol.event_types(self.class, &event.header) {
+                    Found::Yes((ret, args)) => self.lint_arguments_and_returns(&ret, args.iter()),
+                    Found::No => (Some(&ResolvedType::Unknown), HashMap::new()),
+                };
+
                 self.lint_statements_in_block(
                     event.parsed.statements.iter(),
-                    &event.header.returns,
-                    event.header.arguments.iter(),
+                    res_ret,
+                    res_args,
                     &event.body,
                 );
 

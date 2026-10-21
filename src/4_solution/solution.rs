@@ -15,7 +15,7 @@ use tracing::{debug, error, info, info_span, warn};
 
 use crate::{
     builder::{self, Builder, BuiltFile, FileMeta, ParsedFile},
-    tokenizer,
+    parser, tokenizer,
     types::*,
 };
 
@@ -217,6 +217,7 @@ impl<'sol> Solution {
             inner.load_enums();
             inner.load_classes(parsed);
             inner.load_functions(parsed);
+            inner.load_events(parsed);
             inner
         });
 
@@ -622,5 +623,47 @@ impl<'sol> Solution {
         }
 
         Found::No
+    }
+
+    pub fn event_types(
+        &'sol self,
+        class_ref: Option<ClassRef<'sol>>,
+        event: &'sol builder::EventHeader<'sol>,
+    ) -> Found<(
+        &'sol Option<builder::DataType<'sol>>,
+        &'sol Vec<Arc<builder::Variable<'sol>>>,
+    )> {
+        if let Some((ret, args)) = &event.user_types {
+            return Found::Yes((&ret, &args));
+        }
+
+        match &event.parsed.event_type {
+            parser::EventType::User(..) => unreachable!(),
+            parser::EventType::System(pbm) => self
+                .builtins()
+                .events
+                .get(&pbm.into())
+                .map_or(Found::No, |sys| Found::Yes((&sys.returns, &sys.arguments))),
+            parser::EventType::DeclaredElseWhere => {
+                let Some(fc) = class_ref else {
+                    return Found::No;
+                };
+
+                let Some(base) = fc.class.base() else {
+                    return Found::No;
+                };
+
+                match self.find_class(fc.file, &(&base).into()) {
+                    Found::Yes(parent) => {
+                        if let Some(ev) = fc.class.events.get(&event.iname()) {
+                            return self.event_types(Some(parent), ev.header());
+                        }
+
+                        self.event_types(Some(parent), &event)
+                    }
+                    Found::No => Found::No,
+                }
+            }
+        }
     }
 }

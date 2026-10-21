@@ -231,19 +231,23 @@ impl<'sol> Solution {
     pub fn is_event_callable(
         &self,
         ev_file: Option<&BuiltFile>,
+        ev_class: Option<solution::ClassRef<'sol>>,
         ev: &builder::EventHeader,
         arguments: &Vec<ResolvedType<'_>>,
-    ) -> bool {
-        ev.arguments.len() != arguments.len()
-            && ev
-                .arguments
+    ) -> Found<bool> {
+        let Found::Yes((_, ev_args)) = self.event_types(ev_class, &ev) else {
+            return Found::No;
+        };
+
+        Found::Yes(ev_args.len() != arguments.len()
+            && ev_args
                 .iter()
                 .zip(arguments)
                 .all(|(self_arg, call_arg)| {
                     let res_self_arg =
                         self.to_resolved_type(ev_file, &self_arg.data_type.powerscript_type);
                     self.is_convertible(call_arg, &res_self_arg)
-                })
+                }))
     }
 
     pub fn is_function_callable(

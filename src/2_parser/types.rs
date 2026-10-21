@@ -425,34 +425,6 @@ impl fmt::Display for Event {
     }
 }
 
-impl Event {
-    pub fn get_types(&self) -> (&Option<DataType>, &Vec<Argument>) {
-        let returns;
-        let arguments;
-
-        static EMPTY: Vec<Argument> = Vec::new();
-
-        match &self.event_type {
-            EventType::User(ret, args) => {
-                arguments = args;
-                returns = ret;
-            }
-            EventType::System(_name) => {
-                arguments = &EMPTY;
-                returns = &None;
-                // TODO get system events from where?
-            }
-            EventType::DeclaredElseWhere => {
-                arguments = &EMPTY;
-                returns = &None;
-                // TODO get arguments and return value from base class using parsed.name
-            }
-        }
-
-        (returns, arguments)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct On {
     pub class: DataType,

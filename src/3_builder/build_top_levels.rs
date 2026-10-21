@@ -95,11 +95,9 @@ impl<'pars> Builder {
                                     let event = Arc::new(EventDeclaration {
                                         header: EventHeader::new(e),
                                     });
-                                    self.build_callable(
-                                        &event.header.returns,
-                                        &event.header.arguments,
-                                        &Vec::new(),
-                                    );
+                                    if let Some((ret, args)) = &event.header.user_types {
+                                        self.build_callable(ret, args, &Vec::new());
+                                    }
                                     event
                                 })
                                 .collect();
@@ -181,11 +179,9 @@ impl<'pars> Builder {
                                 parsed,
                             });
 
-                            self.build_callable(
-                                &event.header.returns,
-                                &event.header.arguments,
-                                &Vec::new(),
-                            );
+                            if let Some((ret, args)) = &event.header.user_types {
+                                self.build_callable(ret, args, &Vec::new());
+                            }
 
                             TopLevelType::EventBody(event)
                         }

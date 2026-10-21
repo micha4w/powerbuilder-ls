@@ -21,6 +21,7 @@ pub static BUILTIN_FILE_ID: LazyLock<FileID> =
 #[derive(Debug)]
 pub struct BuiltinsParsed {
     pub functions: Vec<parser::Function>,
+    pub events: Vec<parser::Function>,
     pub classes: Vec<parser::DatatypeDecl>,
 }
 
@@ -30,6 +31,11 @@ impl BuiltinsParsed {
 
         let functions = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
             concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/functions.pb")
+        )))
+        .expect("Failed to load builtins");
+
+        let events = powerbuilder_proto::Functions::decode(Bytes::from_static(include_bytes!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/builtins/events.pb")
         )))
         .expect("Failed to load builtins");
 
@@ -48,10 +54,19 @@ impl BuiltinsParsed {
             .into_iter()
             .map(|class| Self::parse_proto_class(class))
             .collect();
+        let events: Vec<_> = events
+            .function
+            .into_iter()
+            .map(|event| Self::parse_proto_function(event))
+            .collect();
 
-        info!(functions = %functions.len(), classes = %classes.len(), "loaded builtins");
+        info!(functions = %functions.len(), classes = %classes.len(), events = %events.len(), "loaded builtins");
 
-        BuiltinsParsed { functions, classes }
+        BuiltinsParsed {
+            functions,
+            classes,
+            events,
+        }
     }
 
     fn empty() -> Range {
@@ -241,6 +256,13 @@ impl BuiltinsParsed {
 }
 
 #[derive(Debug)]
+pub struct SystemEvent<'pars> {
+    pub name: &'pars tokenizer::Token,
+    pub returns: Option<builder::DataType<'pars>>,
+    pub arguments: Vec<Arc<builder::Variable<'pars>>>,
+}
+
+#[derive(Debug)]
 pub struct BuiltinsInner<'pars> {
     pub enums: HashMap<IString, builder::Enum>,
     pub enums_value_cache: HashMap<IString, IString>,
@@ -254,6 +276,7 @@ pub struct BuiltinsInner<'pars> {
             >,
         >,
     >,
+    pub events: HashMap<IString, SystemEvent<'pars>>,
     pub classes: HashMap<IString, Arc<builder::Class<'pars>>>,
 }
 
@@ -263,6 +286,7 @@ impl<'pars> BuiltinsInner<'pars> {
             enums: HashMap::new(),
             enums_value_cache: HashMap::new(),
             functions: HashMap::new(),
+            events: HashMap::new(),
             classes: HashMap::new(),
         }
     }
@@ -346,6 +370,23 @@ impl<'pars> BuiltinsInner<'pars> {
                     new_func.header.signature(),
                     DefinitionDeclaration::declaration(Arc::new(new_func)),
                 );
+        }
+    }
+
+    pub(super) fn load_events(&mut self, parsed: &'pars BuiltinsParsed) {
+        for event in &parsed.events {
+            self.events.insert(
+                (&event.name.content).into(),
+                SystemEvent {
+                    name: &event.name,
+                    returns: event.returns.as_ref().map(builder::DataType::new),
+                    arguments: event
+                        .arguments
+                        .iter()
+                        .map(|arg| Arc::new(builder::Variable::new_argument(arg)))
+                        .collect(),
+                },
+            );
         }
     }
 }

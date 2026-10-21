@@ -867,8 +867,8 @@ impl<'sol> Linter<'sol> {
         returns: &Option<builder::DataType>,
         arguments: impl Iterator<Item = &'sol Arc<builder::Variable<'sol>>>,
     ) -> (
-        HashMap<IString, &'sol Arc<builder::Variable<'sol>>>,
         Option<&'sol ResolvedType<'sol>>,
+        HashMap<IString, &'sol Arc<builder::Variable<'sol>>>,
     ) {
         let mut args = HashMap::new();
         for arg in arguments {
@@ -886,24 +886,22 @@ impl<'sol> Linter<'sol> {
 
         let return_type = returns.as_ref().map(|r| self.lint_datatype(&r.parsed));
 
-        (args, return_type)
+        (return_type, args)
     }
 
     pub(super) fn lint_statements_in_block(
         &self,
         statements: impl Iterator<Item = &'sol parser::Statement>,
-        returns: &Option<builder::DataType>,
-        arguments: impl Iterator<Item = &'sol Arc<builder::Variable<'sol>>>,
+        return_type: Option<&'sol ResolvedType<'sol>>,
+        arguments: HashMap<IString, &'sol Arc<builder::Variable<'sol>>>,
         body: &builder::Body,
     ) {
-        let (args_map, return_type) = self.lint_arguments_and_returns(returns, arguments);
-
         let mut scope = Scope {
             return_type,
             context: resolver::Context::new_for_body(self.sol, self.file, self.class),
         };
         scope.context.body = Some(body);
-        scope.context.arguments = Some(args_map);
+        scope.context.arguments = Some(arguments);
 
         statements.for_each(|s| self.lint_statement(s, &scope));
     }
