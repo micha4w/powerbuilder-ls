@@ -610,12 +610,6 @@ impl<I: Iterator<Item = char>> Parser<I> {
             }
             Err(err) => (None, Some(err)),
         };
-        let base = base.unwrap_or_else(|| {
-            DataType::simple(Token::fake_identifier(
-                "powerobject".into(),
-                Range::new_point(base_pos, self.file_id()),
-            ))
-        });
 
         let within = if err.is_none()
             && self
@@ -1170,9 +1164,7 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 TokenType::Keyword(tokenizer::Keyword::VARIABLES) => {
                     self.parse_scoped_variables_decl()
                 }
-                TokenType::Keyword(tokenizer::Keyword::FUNCTION) => {
-                    self.parse_function()
-                }
+                TokenType::Keyword(tokenizer::Keyword::FUNCTION) => self.parse_function(),
                 _ => self.parse_scoped_variable_decl(),
             },
             TokenType::ID => self.parse_scoped_variable_decl(),

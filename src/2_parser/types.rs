@@ -497,7 +497,7 @@ pub struct FunctionCall {
 pub struct Class {
     pub scope: Option<tokenizer::ScopeModif>,
     pub name: DataType,
-    pub base: DataType,
+    pub base: Option<DataType>,
     pub within: Option<DataType>,
     pub autoinstantiate: Option<Token>,
     pub native: Option<Token>,

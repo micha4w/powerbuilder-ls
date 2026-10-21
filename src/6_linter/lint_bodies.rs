@@ -79,7 +79,7 @@ impl<'sol> Linter<'sol> {
                 self.lint_expressions(&call.arguments, scope);
 
                 match data_type {
-                    ResolvedType::Complex(solution::Complex::Class(_)) => {
+                    ResolvedType::Class(_) => {
                         if !resolved.found() {
                             // TODO(diagnostic): show args
                             // TODO(events): ...?
@@ -108,7 +108,7 @@ impl<'sol> Linter<'sol> {
             parser::LValueType::Member(lvalue, member) => {
                 let data_type = self.lint_lvalue(lvalue, scope);
                 match data_type {
-                    ResolvedType::Complex(solution::Complex::Class(_)) => {
+                    ResolvedType::Class(_) => {
                         if !resolved.found() {
                             // TODO(diagnostic): ...
                             self.diagnostic_error(
@@ -302,7 +302,7 @@ impl<'sol> Linter<'sol> {
             }
             parser::ExpressionType::Create(data_type) => match self.lint_datatype(data_type) {
                 ResolvedType::Unknown => {}
-                ResolvedType::Complex(solution::Complex::Class(fc)) => {
+                ResolvedType::Class(fc) => {
                     if fc.class.parsed.class.autoinstantiate.is_some() {
                         self.diagnostic_error(
                             "Cannot create an Autoinstantiated Class".into(),
@@ -522,7 +522,7 @@ impl<'sol> Linter<'sol> {
             parser::StatementType::Destroy(object) => {
                 let data_type = self.lint_expression(object, scope);
                 match data_type {
-                    ResolvedType::Complex(solution::Complex::Class(_)) => {}
+                    ResolvedType::Class(_) => {}
                     ResolvedType::Base(builder::BaseType::Any) | ResolvedType::Unknown => {}
                     _ => {
                         self.diagnostic_error(

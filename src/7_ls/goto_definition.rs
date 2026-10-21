@@ -1,8 +1,9 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, solution,
+    builder,
     resolver::{ResolvedLValue, ResolvedType},
+    solution,
     types::*,
 };
 
@@ -47,10 +48,8 @@ impl PowerBuilderLS {
                         ResolvedLValue::This(fc) => {
                             range = Some(fc.class.parsed.class.name.range.clone());
                         }
-                        ResolvedLValue::Super(complex) | ResolvedLValue::Parent(complex) => {
-                            if let solution::Complex::Class(fc) = complex {
-                                range = Some(fc.class.parsed.class.name.range.clone());
-                            }
+                        ResolvedLValue::Super(fc) | ResolvedLValue::Parent(fc) => {
+                            range = Some(fc.class.parsed.class.name.range.clone());
                         }
                         ResolvedLValue::Variable(_, var) => {
                             range = Some(var.parsed().access.name.range.clone());
@@ -76,8 +75,7 @@ impl PowerBuilderLS {
             builder::Node::Statement(_) => {}
             builder::Node::DataType(dt) => {
                 if let Some(resolved) = ctx.annotations.datatype(&dt.range) {
-                    if let ResolvedType::Complex(solution::Complex::Class(fc)) = resolved.unnested()
-                    {
+                    if let ResolvedType::Class(fc) = resolved.unnested() {
                         range = Some(fc.class.parsed.class.name.range.clone());
                     };
                 };

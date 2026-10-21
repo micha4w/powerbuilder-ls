@@ -1,10 +1,6 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
-use crate::{
-    resolver::ResolvedType,
-    solution,
-    types::*,
-};
+use crate::{resolver::ResolvedType, solution, types::*};
 
 use super::{ls::PowerBuilderLS, ls_context::LSContext};
 
@@ -22,17 +18,9 @@ impl PowerBuilderLS {
         let range = ctx
             .annotations
             .datatype(lowest_node.get_range())
-            .map(|mut dt| loop {
-                match dt {
-                    ResolvedType::Complex(solution::Complex::Class(class)) => {
-                        break Some(class.class.parsed.class.name.range.clone());
-                    }
-                    ResolvedType::Array(resolved_type) => {
-                        dt = &**resolved_type;
-                        continue;
-                    }
-                    _ => break None,
-                }
+            .map(|dt| match dt.unnested() {
+                ResolvedType::Class(class) => Some(class.class.parsed.class.name.range.clone()),
+                _ => None,
             })
             .flatten();
 

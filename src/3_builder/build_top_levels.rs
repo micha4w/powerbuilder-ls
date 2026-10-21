@@ -110,7 +110,11 @@ impl<'pars> Builder {
                                 .map(|f| self.build_function_declaration(f))
                                 .collect();
 
-                            self.request_class_load(&PowerScriptType::new(&datatype.class.base));
+                            datatype
+                                .class
+                                .base
+                                .as_ref()
+                                .map(|w| self.request_class_load(&PowerScriptType::new(w)));
                             datatype
                                 .class
                                 .within

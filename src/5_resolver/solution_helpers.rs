@@ -19,7 +19,7 @@ impl<'sol> Solution {
             builder::PowerScriptType::Complex(name) => {
                 match self.find_class(current_file, &Grouped::simple(name.clone())) {
                     // TODO(perf): unnecessary clone
-                    Found::Yes(class) => ResolvedType::Complex(class),
+                    Found::Yes(class) => ResolvedType::Class(class),
                     Found::No => ResolvedType::Unknown,
                 }
             }
@@ -33,7 +33,7 @@ impl<'sol> Solution {
         &'sol self,
         current_file: Option<&'sol BuiltFile>,
         filter: ClassFilter<'a>,
-    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'a
+    ) -> impl Iterator<Item = ListResult<solution::ClassRef<'sol>>> + 'a
     where
         'sol: 'a,
     {
@@ -47,10 +47,7 @@ impl<'sol> Solution {
                         .name
                         .filter_hash_map(&file.inner().classes, ListError::WrongName)
                     {
-                        yield (
-                            solution::Complex::Class(solution::ClassRef::new(file, class)),
-                            err,
-                        );
+                        yield (solution::ClassRef::new(file, class), err);
                     }
                 }
 
@@ -63,28 +60,23 @@ impl<'sol> Solution {
                         .name
                         .filter_hash_map(&file.inner().classes, ListError::WrongName)
                     {
-                        yield (
-                            solution::Complex::Class(solution::ClassRef::new(file, class)),
-                            err,
-                        );
+                        yield (solution::ClassRef::new(file, class), err);
                     }
                 }
 
-                for (en, err) in filter.name.filter_hash_map(
-                    &self.builtins.borrow_dependent().enums,
-                    ListError::WrongName,
-                ) {
-                    yield (solution::Complex::Enum(en), err);
-                }
+                // TODO(enums): ...
+                // for (en, err) in filter.name.filter_hash_map(
+                //     &self.builtins.borrow_dependent().enums,
+                //     ListError::WrongName,
+                // ) {
+                //     yield (solution::ClassRef::Enum(en), err);
+                // }
 
                 for (class, err) in filter.name.filter_hash_map(
                     &self.builtins.borrow_dependent().classes,
                     ListError::WrongName,
                 ) {
-                    yield (
-                        solution::Complex::Class(solution::ClassRef::builtin(class)),
-                        err,
-                    );
+                    yield (solution::ClassRef::builtin(class), err);
                 }
             },
         ))
@@ -157,11 +149,7 @@ impl<'sol> Solution {
                         name: filter.name.clone(),
                     },
                 );
-                for (complex, class_err) in classes {
-                    let solution::Complex::Class(class) = complex else {
-                        break;
-                    };
-
+                for (class, class_err) in classes {
                     let funcs = self.functions_in_class(
                         class,
                         FunctionFilter {
@@ -220,7 +208,7 @@ impl<'sol> Solution {
             (ResolvedType::Array(nested_from), ResolvedType::Array(nested_to)) => {
                 self.is_convertible(&nested_from, &nested_to)
             }
-            (ResolvedType::Complex(from), ResolvedType::Complex(to)) => {
+            (ResolvedType::Class(from), ResolvedType::Class(to)) => {
                 self.inherits_from(&from, &to).unwrap_or(false)
                     || self.inherits_from(&to, &from).unwrap_or(false)
             }
@@ -339,20 +327,18 @@ impl<'sol> Solution {
                 // TODO(groups): correct order?
                 // TODO(errors): can this lead to infinite recursion
                 if let Some(within) = class_ref.class.within() {
-                    if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &(&within).into())
-                    {
+                    if let Found::Yes(parent) = self.find_class(class_ref.file, &(&within).into()) {
                         for var in Box::new(self.variables_in_class(parent, filter.clone())) {
                             yield var;
                         }
                     }
                 }
 
-                if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
-                {
-                    for var in Box::new(self.variables_in_class(base, filter)) {
-                        yield var
+                if let Some(base) = class_ref.class.base() {
+                    if let Found::Yes(base) = self.find_class(class_ref.file, &(&base).into()) {
+                        for var in Box::new(self.variables_in_class(base, filter)) {
+                            yield var
+                        }
                     }
                 }
             },
@@ -379,20 +365,18 @@ impl<'sol> Solution {
 
                 // TODO(groups): correct order?
                 if let Some(within) = class_ref.class.within() {
-                    if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &(&within).into())
-                    {
+                    if let Found::Yes(parent) = self.find_class(class_ref.file, &(&within).into()) {
                         for ev in Box::new(self.events_in_class(parent, filter.clone())) {
                             yield ev;
                         }
                     }
                 }
 
-                if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
-                {
-                    for ev in self.events_in_class(base, filter) {
-                        yield ev;
+                if let Some(base) = class_ref.class.base() {
+                    if let Found::Yes(base) = self.find_class(class_ref.file, &(&base).into()) {
+                        for ev in self.events_in_class(base, filter) {
+                            yield ev;
+                        }
                     }
                 }
             },
@@ -461,20 +445,18 @@ impl<'sol> Solution {
 
                 // TODO(groups): correct order? (parent before base?)
                 if let Some(within) = class_ref.class.within() {
-                    if let Found::Yes(solution::Complex::Class(parent)) =
-                        self.find_class(class_ref.file, &(&within).into())
-                    {
+                    if let Found::Yes(parent) = self.find_class(class_ref.file, &(&within).into()) {
                         for func in Box::new(self.functions_in_class(parent, filter.clone())) {
                             yield func;
                         }
                     }
                 }
 
-                if let Found::Yes(solution::Complex::Class(base)) =
-                    self.find_class(class_ref.file, &(&class_ref.class.base()).into())
-                {
-                    for func in self.functions_in_class(base, filter) {
-                        yield func;
+                if let Some(base) = class_ref.class.base() {
+                    if let Found::Yes(base) = self.find_class(class_ref.file, &(&base).into()) {
+                        for func in self.functions_in_class(base, filter) {
+                            yield func;
+                        }
                     }
                 }
             },

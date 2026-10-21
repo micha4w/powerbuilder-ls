@@ -28,7 +28,7 @@ message Functions { repeated Function function = 1; }
 
 message Class {
   required string name = 1;
-  required string base = 2;
+  optional string base = 2;
   optional string help = 3;
   repeated Variable variable = 4;
   repeated Function function = 5;

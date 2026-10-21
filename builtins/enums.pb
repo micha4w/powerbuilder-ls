@@ -299,7 +299,7 @@ alignattopfloating
 toolbarstylecontemporarytoolbartraditionaltoolbar
 É
 treenavigationchildtreeitemcurrenttreeitemdrophighlighttreeitemfirstvisibletreeitemnexttreeitemnextvisibletreeitemparenttreeitemprevioustreeitempreviousvisibletreeitemroottreeitem
-Ÿ
+«
 
 	trigeventactivate	begindragbeginlabeleditbeginrightdragclickedclose
 closequery	collapsed
@@ -307,7 +307,8 @@ collapsingcolumnclickconstructor
 datachangedatechangeddberror
 deactivatedeleteallitems
 deleteitem
-destructordoubleclickeddragdrop	dragenter	dragleave
+destructordoubleclicked
+dpichangeddragdrop	dragenter	dragleave
 dragwithineditchangedendlabeleditexpanded	expanding
 fileexistsgesturegetfocushidehotlinkalarmidleinputfieldselected
 insertitemitemchangeditemchangingitemcollapseditemcollapsing	itemerroritemexpandeditemexpandingitemfocuschangeditempopulatekeylinedownlineleft	linerightlineup	losefocusmenuchangedmodified	mousedown	mousemovemouseupmovednotifyopenotherpagedownpageleft	pagerightpageuppictureselectedpipeend	pipemeter	pipestartprintendprintfooterprintheader	printpage
@@ -359,6 +360,10 @@ z
 windowdocktabclosebuttonwindowdocktabclosebuttonnone windowdocktabclosebuttononactivewindowdocktabclosebuttonshared
 }
 windowdockstatewindowdockstatedockedwindowdockstatefloatingwindowdockstatetabbeddocumentwindowdockstatetabbedwindow
+ë
+browsingdatakindsbrowsingdatakindsallbrowsingdatakindsalldomstoragebrowsingdatakindsallprofilebrowsingdatakindsallsite browsingdatakindsbrowsinghistorybrowsingdatakindscachestoragebrowsingdatakindscookiesbrowsingdatakindsdiskcache browsingdatakindsdownloadhistorybrowsingdatakindsfilesystems browsingdatakindsgeneralautofillbrowsingdatakindsindexeddbbrowsingdatakindslocalstorage!browsingdatakindspasswordautosavebrowsingdatakindssettingsbrowsingdatakindswebsql
+ˆ
+languagetypechinesecustomdanishdutchenglishfrenchgermanitalianjapanese	norwegianspanishswedishwindowslanguage
 .
 	timerkindclockprocessthread	timernone
 –
@@ -400,8 +405,8 @@ l
 Q
 jsonnumbertypejsonnanjsonnegativeinfinity
 jsonnumberjsonpositiveinfinity
-4
-symmetricalgorithmaesblowfishdesdesxtdes
+=
+symmetricalgorithmaesaes_gcmblowfishdesdesxtdes
 i
 operationmodeoperationmodecbcoperationmodecfboperationmodectroperationmodeecboperationmodeofb
 Y
@@ -416,6 +421,8 @@ hmacsha224
 hmacsha256
 hmacsha384
 hmacsha512
+"
+signaturestandardpkcs1v15pss
 “
 archiveformatarchiveformat7ziparchiveformatgziparchiveformatlzmaarchiveformatlzma86archiveformatrararchiveformattararchiveformatzip
 Ÿ

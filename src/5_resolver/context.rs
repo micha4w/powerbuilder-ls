@@ -140,14 +140,14 @@ impl<'sol> Context<'sol> {
         );
     }
 
-    pub fn find_class(&self, name: &Grouped<IString>) -> Found<solution::Complex<'sol>> {
+    pub fn find_class(&self, name: &Grouped<IString>) -> Found<solution::ClassRef<'sol>> {
         self.sol.find_class(Some(self.file), name)
     }
 
     pub fn classes<'a>(
         &'a self,
         filter: ClassFilter<'sol>,
-    ) -> impl Iterator<Item = ListResult<solution::Complex<'sol>>> + 'a
+    ) -> impl Iterator<Item = ListResult<solution::ClassRef<'sol>>> + 'a
     where
         'sol: 'a,
     {

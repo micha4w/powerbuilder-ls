@@ -123,18 +123,20 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
             parser::LValueType::This => {
                 resolved_lvalue = self.ctx.class.map(ResolvedLValue::This);
 
-                resolved_type = self.ctx.class.map_or(ResolvedType::Unknown, |fc| {
-                    ResolvedType::Complex(solution::Complex::Class(fc))
-                });
+                resolved_type = self
+                    .ctx
+                    .class
+                    .map_or(ResolvedType::Unknown, ResolvedType::Class);
             }
             parser::LValueType::Super => {
                 let base = self
                     .ctx
                     .class
-                    .and_then(|fc| self.ctx.find_class(&(&fc.class.base()).into()).as_option());
+                    .and_then(|fc| fc.class.base())
+                    .and_then(|base| self.ctx.find_class(&(&base).into()).as_option());
 
                 resolved_lvalue = base.map(ResolvedLValue::Super);
-                resolved_type = base.map_or(ResolvedType::Unknown, ResolvedType::Complex);
+                resolved_type = base.map_or(ResolvedType::Unknown, ResolvedType::Class);
             }
             parser::LValueType::Parent => {
                 let parent = self.ctx.class.and_then(|fc| {
@@ -142,14 +144,8 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                         Some(within) => self.ctx.find_class(&(&within).into()).as_option(),
                         None => {
                             // TODO(groups): is this correct?
-                            let window_object = solution::Complex::Class(
-                                self.ctx.sol.builtin_class("windowobject"),
-                            );
-                            match self
-                                .ctx
-                                .sol
-                                .inherits_from(&solution::Complex::Class(fc), &window_object)
-                            {
+                            let window_object = self.ctx.sol.builtin_class("windowobject");
+                            match self.ctx.sol.inherits_from(&fc, &window_object) {
                                 Found::Yes(true) => Some(window_object),
                                 _ => None,
                             }
@@ -158,7 +154,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 });
 
                 resolved_lvalue = parent.map(ResolvedLValue::Parent);
-                resolved_type = parent.map_or(ResolvedType::Unknown, ResolvedType::Complex);
+                resolved_type = parent.map_or(ResolvedType::Unknown, ResolvedType::Class);
             }
             parser::LValueType::Variable(access) => {
                 let iname = (&access.name.content).into();
@@ -186,7 +182,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 let lval_type = self.resolve_lvalue(lvalue, annot).resolved_type.clone();
 
                 match lval_type {
-                    ResolvedType::Complex(solution::Complex::Class(class))
+                    ResolvedType::Class(class)
                         if member.name.token_type != tokenizer::TokenType::INVALID =>
                     {
                         let iname = (&member.name.content).into();
@@ -224,7 +220,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 let args = self.resolve_expressions(&call.arguments, annot);
 
                 match lval_type {
-                    ResolvedType::Complex(solution::Complex::Class(class)) => {
+                    ResolvedType::Class(class) => {
                         (resolved_type, resolved_lvalue) =
                             self.resolve_function_call(Some(class), call, &args);
                     }
@@ -295,7 +291,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                         .enums_value_cache
                         .get(&(&literal.content).into())
                     {
-                        ResolvedType::Complex(solution::Complex::Enum(
+                        ResolvedType::Enum(
                             self.ctx
                                 .sol
                                 .builtins
@@ -303,7 +299,7 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                                 .enums
                                 .get(name)
                                 .unwrap(),
-                        ))
+                        )
                     } else {
                         ResolvedType::Unknown
                     }
@@ -687,7 +683,9 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                 builder::TopLevelType::ForwardDecl(decls, vars) => {
                     for decl in &decls.classes {
                         annotator.resolve_datatype(&decl.class.name, &mut annot);
-                        annotator.resolve_datatype(&decl.class.base, &mut annot);
+                        if let Some(base) = &decl.class.base {
+                            annotator.resolve_datatype(&base, &mut annot);
+                        }
                         if let Some(within) = &decl.class.within {
                             annotator.resolve_datatype(&within, &mut annot);
                         }
@@ -707,13 +705,14 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                     annot.add_child(
                         &decl.class.parsed.class.name.range,
                         Annotation {
-                            resolved_type: ResolvedType::Complex(solution::Complex::Class(fc)),
+                            resolved_type: ResolvedType::Class(fc),
                             lvalue: None,
                         },
                     );
 
-                    annotator.resolve_datatype(&decl.class.parsed.class.base, &mut annot);
-
+                    if let Some(base) = &decl.class.parsed.class.base {
+                        annotator.resolve_datatype(&base, &mut annot);
+                    }
                     if let Some(within) = &decl.class.parsed.class.within {
                         annotator.resolve_datatype(&within, &mut annot);
                     }
@@ -782,8 +781,8 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
                         .classes
                         .get(&(&on.header.class.name.content).into())
                         .map_or(ResolvedType::Unknown, |class| {
-                            ResolvedType::Complex(solution::Complex::Class(
-                                solution::ClassRef::new(file, class),
+                            ResolvedType::Class(solution::ClassRef::new(
+                                file, class,
                             ))
                         });
                     annot.add_child(

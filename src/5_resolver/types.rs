@@ -10,7 +10,8 @@ pub type BoxIter<'a, T> = Box<dyn Iterator<Item = T> + 'a>;
 pub enum ResolvedType<'sol> {
     Base(builder::BaseType),
 
-    Complex(solution::Complex<'sol>),
+    Class(solution::ClassRef<'sol>),
+    Enum(&'sol builder::Enum),
     Array(Box<Self>), // TODO(arrays): fixed size arrays
     Unknown,
     Void,
@@ -76,7 +77,8 @@ impl<'sol> ResolvedType<'sol> {
             | Self::Base(builder::BaseType::String)
             | Self::Base(builder::BaseType::Time)
             | Self::Void
-            | Self::Complex(_)
+            | Self::Class(_)
+            | Self::Enum(_)
             | Self::Array(_) => None,
         }
     }
@@ -93,7 +95,8 @@ impl std::fmt::Display for ResolvedType<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Base(base) => write!(f, "{}", base),
-            Self::Complex(class) => write!(f, "{}", class.name()),
+            Self::Class(fc) => write!(f, "{}", fc.class.name()),
+            Self::Enum(en) => write!(f, "{}", en.name),
             Self::Array(inner) => write!(f, "{}[]", inner),
             Self::Unknown => write!(f, "<unknown>"),
             Self::Void => write!(f, "<void>"),
@@ -104,8 +107,8 @@ impl std::fmt::Display for ResolvedType<'_> {
 #[derive(Clone)]
 pub enum ResolvedLValue<'sol> {
     This(solution::ClassRef<'sol>),
-    Super(solution::Complex<'sol>),
-    Parent(solution::Complex<'sol>),
+    Super(solution::ClassRef<'sol>),
+    Parent(solution::ClassRef<'sol>),
 
     /// `ClassRef` is `None` for scoped / local variables, `Some` for instance variables
     Variable(

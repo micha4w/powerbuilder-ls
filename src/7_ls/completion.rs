@@ -64,6 +64,7 @@ impl PowerBuilderLS {
         class: &Option<solution::ClassRef>,
         func: &builder::Function,
         err: Option<String>,
+        with_bracket: bool,
     ) {
         let mut name = func.header().parsed.name.content.clone() + "(";
         let has_args = func.header().arguments.len() > 0 || func.header().parsed.vararg.is_some();
@@ -85,7 +86,9 @@ impl PowerBuilderLS {
         }
 
         items.push(lsp_types::CompletionItem {
-            label: name,
+            label: name.clone(),
+            insert_text: Some(if with_bracket { name + "($0)" } else { name }),
+            insert_text_format: with_bracket.then(|| lsp_types::InsertTextFormat::SNIPPET),
             deprecated: Some(err.is_some()),
             documentation: Some(lsp_types::Documentation::MarkupContent(
                 lsp_types::MarkupContent {
@@ -94,25 +97,41 @@ impl PowerBuilderLS {
                 },
             )),
             kind: Some(lsp_types::CompletionItemKind::FUNCTION),
-            // insert_text: Some(insert),
             ..Default::default()
         });
     }
 
-    fn add_complex(
+    fn add_enum(items: &mut Vec<lsp_types::CompletionItem>, en: &builder::Enum) {
+        let name = en.name.clone();
+        let mut documentation = format!("```powerbuilder\n{}\n```", en.to_string());
+        if let Some(help) = &en.help {
+            if !help.trim().is_empty() {
+                documentation += "\n---\n";
+                documentation += help;
+            }
+        }
+
+        items.push(lsp_types::CompletionItem {
+            label: name,
+            documentation: Some(lsp_types::Documentation::MarkupContent(
+                lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value: documentation,
+                },
+            )),
+            kind: Some(lsp_types::CompletionItemKind::ENUM),
+            ..Default::default()
+        });
+    }
+
+    fn add_class(
         items: &mut Vec<lsp_types::CompletionItem>,
-        complex: &solution::Complex,
+        class: &builder::Class<'_>,
         err: Option<String>,
     ) {
-        let name = complex.name().to_string();
-        let mut documentation = format!(
-            "```powerbuilder\n{}\n```",
-            match complex {
-                solution::Complex::Class(fc) => fc.class.to_string(),
-                solution::Complex::Enum(en) => en.to_string(),
-            }
-        );
-        if let Some(help) = &complex.help() {
+        let name = class.name().to_string();
+        let mut documentation = format!("```powerbuilder\n{}\n```", class.to_string());
+        if let Some(help) = &class.help {
             if !help.trim().is_empty() {
                 documentation += "\n---\n";
                 documentation += help;
@@ -128,10 +147,7 @@ impl PowerBuilderLS {
                     value: documentation,
                 },
             )),
-            kind: Some(match complex {
-                solution::Complex::Class(_) => lsp_types::CompletionItemKind::CLASS,
-                solution::Complex::Enum(_) => lsp_types::CompletionItemKind::ENUM,
-            }),
+            kind: Some(lsp_types::CompletionItemKind::CLASS),
             ..Default::default()
         });
     }
@@ -165,7 +181,7 @@ impl PowerBuilderLS {
 
         items.push(lsp_types::CompletionItem {
             label: "super".to_string(),
-            detail: Some(fc.class.base().to_string()),
+            detail: Some(fc.class.base().map_or("<none>".into(), |b| b.to_string())),
             kind: Some(lsp_types::CompletionItemKind::KEYWORD),
             ..Default::default()
         });
@@ -232,14 +248,16 @@ impl PowerBuilderLS {
                         access: SearchFilter::error(tokenizer::AccessType::PRIVATE),
                         ..Default::default()
                     }) {
-                        Self::add_function(&mut items, &class, func, err.try_into().ok());
+                        Self::add_function(&mut items, &class, func, err.try_into().ok(), true);
                     }
 
-                    for (class, err) in ctx.classes(Default::default()) {
-                        Self::add_complex(&mut items, &class, err.try_into().ok());
+                    for (fc, err) in ctx.classes(Default::default()) {
+                        Self::add_class(&mut items, &fc.class, err.try_into().ok());
                     }
 
                     for en in ctx.sol.builtins().enums.values() {
+                        Self::add_enum(&mut items, &en);
+
                         for val in &en.values {
                             items.push(lsp_types::CompletionItem {
                                 label: val.clone(),
@@ -262,9 +280,7 @@ impl PowerBuilderLS {
                     Self::add_builtin_variables(&mut items, ctx);
                 }
                 Some(parser::LValueType::Member(lvalue, access)) => {
-                    if let ResolvedType::Complex(solution::Complex::Class(fc)) =
-                        ctx.annotations.must_type(&lvalue.range)
-                    {
+                    if let ResolvedType::Class(fc) = ctx.annotations.must_type(&lvalue.range) {
                         for ((class, var), err) in ctx.variables_in_class(
                             *fc,
                             VariableFilter {
@@ -285,7 +301,13 @@ impl PowerBuilderLS {
                                 ..Default::default()
                             },
                         ) {
-                            Self::add_function(&mut items, &Some(class), func, err.try_into().ok());
+                            Self::add_function(
+                                &mut items,
+                                &Some(class),
+                                func,
+                                err.try_into().ok(),
+                                true,
+                            );
                         }
                     }
                 }
@@ -295,13 +317,11 @@ impl PowerBuilderLS {
                         access: SearchFilter::error(tokenizer::AccessType::PRIVATE),
                         ..Default::default()
                     }) {
-                        Self::add_function(&mut items, &class, func, err.try_into().ok());
+                        Self::add_function(&mut items, &class, func, err.try_into().ok(), false);
                     }
                 }
                 Some(parser::LValueType::Method(lvalue, call)) => {
-                    if let ResolvedType::Complex(solution::Complex::Class(fc)) =
-                        ctx.annotations.must_type(&lvalue.range)
-                    {
+                    if let ResolvedType::Class(fc) = ctx.annotations.must_type(&lvalue.range) {
                         for ((class, func), err) in ctx.functions_in_class(
                             *fc,
                             FunctionFilter {
@@ -313,7 +333,13 @@ impl PowerBuilderLS {
                                 ..Default::default()
                             },
                         ) {
-                            Self::add_function(&mut items, &Some(class), func, err.try_into().ok());
+                            Self::add_function(
+                                &mut items,
+                                &Some(class),
+                                func,
+                                err.try_into().ok(),
+                                false,
+                            );
                         }
                     }
                 }

@@ -550,33 +550,29 @@ impl<'sol> Solution {
     }
 
     /// Returns Found::No if one of classes in the chain could not be found
-    pub fn inherits_from(&self, child: &Complex<'_>, base: &Complex<'_>) -> Found<bool> {
-        if child == base {
+    pub fn inherits_from(&self, child: &ClassRef<'_>, ancestor: &ClassRef<'_>) -> Found<bool> {
+        if Arc::ptr_eq(child.class, ancestor.class) {
             return Found::Yes(true);
         }
 
-        let Complex::Class(r#ref) = child else {
+        let Some(base) = child.class.base() else {
             return Found::Yes(false);
         };
 
-        match self.find_class(r#ref.file, &(&r#ref.class.base()).into()) {
-            Found::Yes(parent) => self.inherits_from(&parent, base),
+        match self.find_class(child.file, &(&base).into()) {
+            Found::Yes(parent) => self.inherits_from(&parent, &ancestor),
             Found::No => Found::No,
         }
     }
 
     pub fn get_parent(&'sol self, class_ref: ClassRef<'sol>) -> Option<ClassRef<'sol>> {
         if let Some(within) = class_ref.class.within() {
-            if let Found::Yes(Complex::Class(class)) =
-                self.find_class(class_ref.file, &(&within).into())
-            {
+            if let Found::Yes(class) = self.find_class(class_ref.file, &(&within).into()) {
                 return Some(class);
             }
         } else {
             let window = self.builtin_class("windowobject");
-            if let Found::Yes(true) =
-                self.inherits_from(&Complex::Class(class_ref), &Complex::Class(window))
-            {
+            if let Found::Yes(true) = self.inherits_from(&class_ref, &window) {
                 return Some(window);
             }
         }
@@ -591,10 +587,7 @@ impl<'sol> Solution {
     ) -> tokenizer::AccessType {
         if Arc::ptr_eq(accessor.class, accessed.class) {
             tokenizer::AccessType::PRIVATE
-        } else if self
-            .inherits_from(&Complex::Class(accessor), &Complex::Class(accessed))
-            .unwrap_or(false)
-        {
+        } else if self.inherits_from(&accessor, &accessed).unwrap_or(false) {
             tokenizer::AccessType::PROTECTED
         } else {
             tokenizer::AccessType::PUBLIC
@@ -605,26 +598,27 @@ impl<'sol> Solution {
         &'sol self,
         current_file: Option<&'sol BuiltFile>,
         id: &Grouped<IString>,
-    ) -> Found<Complex<'sol>> {
+    ) -> Found<ClassRef<'sol>> {
         if let Some(file) = current_file {
             if let Some(class) = file.inner().classes.get(&id.name) {
                 if class.within().map(|w| w.name.into()) == id.group {
-                    return Found::Yes(Complex::Class(ClassRef::new(file, class)));
+                    return Found::Yes(ClassRef::new(file, class));
                 }
             }
         }
 
         if let Some((file, class)) = self.get_file_for_class(id.group.as_ref().unwrap_or(&id.name))
         {
-            return Found::Yes(Complex::Class(ClassRef::new(file, class)));
+            return Found::Yes(ClassRef::new(file, class));
         }
 
-        if let Some(en) = self.builtins.borrow_dependent().enums.get(&id.name) {
-            return Found::Yes(Complex::Enum(en));
-        }
+        // TODO(enums): ...
+        // if let Some(en) = self.builtins.borrow_dependent().enums.get(&id.name) {
+        //     return Found::Yes(ClassRef::Enum(en));
+        // }
 
         if let Some(class) = self.builtins.borrow_dependent().classes.get(&id.name) {
-            return Found::Yes(Complex::Class(ClassRef::builtin(class)));
+            return Found::Yes(ClassRef::builtin(class));
         }
 
         Found::No

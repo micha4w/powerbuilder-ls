@@ -497,11 +497,11 @@ impl<'pars> Class<'pars> {
         self.name().into()
     }
 
-    pub fn base(&self) -> Grouped<&String> {
-        Grouped {
-            group: self.parsed.class.base.group.as_ref().map(|b| &b.content),
-            name: &self.parsed.class.base.name.content,
-        }
+    pub fn base(&self) -> Option<Grouped<&String>> {
+        self.parsed.class.base.as_ref().map(|g| Grouped {
+            group: g.group.as_ref().map(|b| &b.content),
+            name: &g.name.content,
+        })
     }
 
     pub fn within(&self) -> Option<Grouped<&String>> {
@@ -531,7 +531,12 @@ impl fmt::Display for Class<'_> {
         if self.is_global {
             write!(f, "global ")?;
         }
-        write!(f, "type {} from {}", &self.name(), &self.base())?;
+        write!(
+            f,
+            "type {} from {}",
+            &self.name(),
+            &self.base().map_or("<none>".into(), |b| b.to_string())
+        )?;
         if let Some(within) = &self.within() {
             write!(f, " within {}", within)?;
         };

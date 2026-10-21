@@ -1,8 +1,10 @@
 use tower_lsp::{jsonrpc, lsp_types};
 
 use crate::{
-    builder, resolver::{ResolvedLValue, ResolvedType},
-    solution, types::*,
+    builder,
+    resolver::{ResolvedLValue, ResolvedType},
+    solution,
+    types::*,
 };
 
 use super::{ls::PowerBuilderLS, ls_context::LSContext};
@@ -62,11 +64,8 @@ impl PowerBuilderLS {
                         ResolvedLValue::This(fc) => {
                             title = Some(fc.class.name().clone() + " this = <reserved>");
                         }
-                        ResolvedLValue::Super(complex) | ResolvedLValue::Parent(complex) => {
-                            let class_name = match complex {
-                                solution::Complex::Class(fc) => fc.class.name(),
-                                _ => "<error>",
-                            };
+                        ResolvedLValue::Super(fc) | ResolvedLValue::Parent(fc) => {
+                            let class_name = fc.class.name();
                             let var_name = match resolved {
                                 ResolvedLValue::Super(_) => "super",
                                 ResolvedLValue::Parent(_) => "parent",
@@ -131,11 +130,11 @@ impl PowerBuilderLS {
         let title;
         let mut description = None;
         match resolved {
-            ResolvedType::Complex(solution::Complex::Class(fc)) => {
+            ResolvedType::Class(fc) => {
                 title = fc.class.to_string();
                 description = fc.class.help.cloned();
             }
-            ResolvedType::Complex(solution::Complex::Enum(en)) => {
+            ResolvedType::Enum(en) => {
                 title = en.name.to_string();
                 description = en.help.clone();
             }

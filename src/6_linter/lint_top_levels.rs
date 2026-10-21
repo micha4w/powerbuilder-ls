@@ -77,9 +77,21 @@ impl<'sol> Linter<'sol> {
     fn lint_datatype_decl(&self, decl: &builder::DatatypeDecl, is_def: bool) {
         let parsed = &decl.class.parsed;
 
+        if let Some(base) = &parsed.class.base {
+            match self.lint_datatype(base) {
+                ResolvedType::Class(_) | ResolvedType::Unknown => {}
+                _ => {
+                    self.diagnostic_error(
+                        "Base Class has to be a Class".into(),
+                        base.range.clone(),
+                    );
+                }
+            }
+        }
+
         if let Some(within) = &parsed.class.within {
             match self.lint_datatype(within) {
-                ResolvedType::Complex(solution::Complex::Class(fc)) => {
+                ResolvedType::Class(fc) => {
                     if fc.file.is_none_or(|f| !ptr::eq(f, self.file)) {
                         self.diagnostic_error(
                             "Parent Class has to be in this file".into(),
@@ -87,31 +99,15 @@ impl<'sol> Linter<'sol> {
                         );
                     }
                 }
-                ResolvedType::Complex(solution::Complex::Enum(_)) => {
-                    self.diagnostic_error(
-                        "Parent Class cannot be an Enum".into(),
-                        within.range.clone(),
-                    );
-                }
                 ResolvedType::Unknown => {}
                 _ => {
                     self.diagnostic_error(
-                        "Parent Class has to be a Complex Type".into(),
+                        "Parent Class has to be a Class".into(),
                         within.range.clone(),
                     );
                 }
             }
         };
-
-        match self.lint_datatype(&parsed.class.base) {
-            ResolvedType::Complex(_) | ResolvedType::Unknown => {}
-            _ => {
-                self.diagnostic_error(
-                    "Base Class has to be a Complex Type".into(),
-                    parsed.class.base.range.clone(),
-                );
-            }
-        }
 
         let existing = self
             .file

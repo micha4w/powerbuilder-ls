@@ -205,7 +205,9 @@ impl BuiltinsParsed {
         parser::DatatypeDecl {
             class: parser::Class {
                 name: parser::DataType::simple(Token::fake_identifier(class.name, Self::empty())),
-                base: parser::DataType::simple(Token::fake_identifier(class.base, Self::empty())),
+                base: class
+                    .base
+                    .map(|b| parser::DataType::simple(Token::fake_identifier(b, Self::empty()))),
                 scope: Some(tokenizer::ScopeModif::GLOBAL),
 
                 within: None,

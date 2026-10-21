@@ -106,6 +106,12 @@ impl FilePath {
             return None;
         };
 
+        let Ok(path) = path.canonicalize() else {
+            let path = path.to_string_lossy();
+            error!(%uri, %path, "failed to canonicalize PathBuf");
+            return None;
+        };
+
         Some(FilePath { uri, path })
     }
 
