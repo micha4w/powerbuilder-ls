@@ -61,18 +61,6 @@ impl PowerBuilderLS {
             builder::Node::LValue(lvalue) => {
                 if let Found::Yes(resolved) = ctx.annotations.lvalue(lvalue) {
                     match resolved {
-                        ResolvedLValue::This(fc) => {
-                            title = Some(fc.class.name().clone() + " this = <reserved>");
-                        }
-                        ResolvedLValue::Super(fc) | ResolvedLValue::Parent(fc) => {
-                            let class_name = fc.class.name();
-                            let var_name = match resolved {
-                                ResolvedLValue::Super(_) => "super",
-                                ResolvedLValue::Parent(_) => "parent",
-                                _ => unreachable!(),
-                            };
-                            title = Some(format!("{class_name} {var_name} = <reserved>"));
-                        }
                         ResolvedLValue::Variable(fc, var) => {
                             title = Some(
                                 fc.map_or_default(|fc| format!("{}\n", fc.class))

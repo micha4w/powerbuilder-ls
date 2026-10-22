@@ -135,8 +135,6 @@ impl NodeSearcher for parser::LValue {
         nodes.push(Node::LValue(self));
 
         match &self.lvalue_type {
-            // TODO make these be variable accesses?
-            parser::LValueType::This | parser::LValueType::Super | parser::LValueType::Parent => {}
             parser::LValueType::Variable(_) => {}
             parser::LValueType::Function(call) => {
                 call.arguments.search(pos, nodes)?;

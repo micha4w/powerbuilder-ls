@@ -478,9 +478,6 @@ pub struct Class {
 
 #[derive(Debug, Clone)]
 pub enum LValueType {
-    This,
-    Super,
-    Parent,
     Variable(VariableAccess),
     Function(FunctionCall),
 
@@ -500,9 +497,6 @@ fn join_expressions(vec: &Vec<Expression>) -> String {
 impl fmt::Display for LValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LValueType::This => write!(f, "this"),
-            LValueType::Super => write!(f, "super"),
-            LValueType::Parent => write!(f, "parent"),
             LValueType::Variable(variable_access) => write!(f, "{}", variable_access.name.content),
             LValueType::Function(function_call) => write!(
                 f,

@@ -45,12 +45,6 @@ impl PowerBuilderLS {
             builder::Node::LValue(lvalue) => {
                 if let Found::Yes(resolved) = ctx.annotations.lvalue(lvalue) {
                     match resolved {
-                        ResolvedLValue::This(fc) => {
-                            range = Some(fc.class.parsed.class.name.range.clone());
-                        }
-                        ResolvedLValue::Super(fc) | ResolvedLValue::Parent(fc) => {
-                            range = Some(fc.class.parsed.class.name.range.clone());
-                        }
                         ResolvedLValue::Variable(_, var) => {
                             range = Some(var.parsed().access.name.range.clone());
                         }

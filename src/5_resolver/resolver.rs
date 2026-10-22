@@ -129,42 +129,6 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
         }
 
         match &lvalue.lvalue_type {
-            parser::LValueType::This => {
-                resolved_lvalue = self.ctx.class.map(ResolvedLValue::This);
-
-                resolved_type = self
-                    .ctx
-                    .class
-                    .map_or(ResolvedType::Unknown, ResolvedType::Class);
-            }
-            parser::LValueType::Super => {
-                let base = self
-                    .ctx
-                    .class
-                    .and_then(|fc| fc.class.base())
-                    .and_then(|base| self.ctx.find_class(&(&base).into()).as_option());
-
-                resolved_lvalue = base.map(ResolvedLValue::Super);
-                resolved_type = base.map_or(ResolvedType::Unknown, ResolvedType::Class);
-            }
-            parser::LValueType::Parent => {
-                let parent = self.ctx.class.and_then(|fc| {
-                    match fc.class.within() {
-                        Some(within) => self.ctx.find_class(&(&within).into()).as_option(),
-                        None => {
-                            // TODO(groups): is this correct?
-                            let window_object = self.ctx.sol.builtin_class("windowobject");
-                            match self.ctx.sol.inherits_from(&fc, &window_object) {
-                                Found::Yes(true) => Some(window_object),
-                                _ => None,
-                            }
-                        }
-                    }
-                });
-
-                resolved_lvalue = parent.map(ResolvedLValue::Parent);
-                resolved_type = parent.map_or(ResolvedType::Unknown, ResolvedType::Class);
-            }
             parser::LValueType::Variable(access) => {
                 let iname = (&access.name.content).into();
                 let vars = self.ctx.variables(VariableFilter {
@@ -761,7 +725,9 @@ impl<'a, 'sol: 'a> Resolver<'sol> {
 
                 builder::TopLevelType::FunctionBody(func) => {
                     annotator.resolve_function_header(&func.header, false, &mut annot);
-                    annotator.ctx.load_body(&func.body, func.header.arguments.iter());
+                    annotator
+                        .ctx
+                        .load_body(&func.body, func.header.arguments.iter());
                     annotator.resolve_statements(&func.parsed.statements, &mut annot);
                 }
                 builder::TopLevelType::EventBody(event) => {

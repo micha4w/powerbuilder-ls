@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use self_cell::self_cell;
 use strum::EnumIter;
 
 use crate::{
@@ -459,7 +460,19 @@ impl fmt::Display for Enum {
     }
 }
 
-#[derive(Debug, Clone)]
+pub type ClassVariablesInner<'pars> = HashMap<IString, Arc<Variable<'pars>>>;
+self_cell!(
+    pub struct ClassVariables {
+        owner: Vec<parser::InstanceVariable>,
+
+        #[covariant]
+        dependent: ClassVariablesInner,
+    }
+
+    impl {Debug}
+);
+
+#[derive(Debug)]
 pub struct Class<'pars> {
     pub parsed: &'pars parser::DatatypeDecl,
 
@@ -467,6 +480,8 @@ pub struct Class<'pars> {
     pub is_global: bool,
 
     pub instance_variables: HashMap<IString, Arc<Variable<'pars>>>,
+    pub class_variables: ClassVariables,
+
     pub events: HashMap<IString, Event<'pars>>,
     pub functions: HashMap<IString, HashMap<IString, Function<'pars>>>,
     pub external_functions: HashMap<IString, HashMap<IString, Function<'pars>>>,
@@ -475,6 +490,50 @@ pub struct Class<'pars> {
 
 impl<'pars> Class<'pars> {
     pub fn new(parsed: &'pars parser::DatatypeDecl) -> Class<'pars> {
+        let parsed_var = |name: &'static str, dt: &parser::DataType| parser::InstanceVariable {
+            access: parser::Access {
+                read: None,
+                write: Some(tokenizer::AccessType::SYSTEMWRITE),
+            },
+            variable: parser::Variable {
+                help: None,
+                constant: true,
+                data_type: dt.clone(),
+                access: parser::VariableAccess {
+                    name: tokenizer::Token::fake_identifier(name.into(), dt.range.clone()),
+                    is_write: true,
+                },
+                initial_value: None,
+                descriptors: Vec::new(),
+                range: dt.range.clone(),
+            },
+        };
+
+        let mut parsed_vars = vec![parsed_var("this", &parsed.class.name)];
+        if let Some(dt) = &parsed.class.base {
+            parsed_vars.push(parsed_var("super", &dt));
+        }
+        if let Some(dt) = &parsed.class.within {
+            parsed_vars.push(parsed_var("parent", &dt));
+        } else {
+            parsed_vars.push(parsed_var(
+                "parent",
+                &parser::DataType::simple(Token::fake_identifier(
+                    "powerobject".into(),
+                    parsed.class.name.range.clone(),
+                )),
+            ));
+        }
+
+        let class_variables = ClassVariables::new(parsed_vars, |ps| {
+            ps.iter()
+                .map(|p| {
+                    let var = Arc::new(Variable::new_instance(p));
+                    (var.iname(), var)
+                })
+                .collect()
+        });
+
         Class {
             is_global: matches!(parsed.class.scope, Some(tokenizer::ScopeModif::GLOBAL)),
 
@@ -482,6 +541,8 @@ impl<'pars> Class<'pars> {
             help: parsed.help.as_ref(),
 
             instance_variables: HashMap::new(),
+            class_variables,
+
             events: HashMap::new(),
             functions: HashMap::new(),
             external_functions: HashMap::new(),
@@ -509,6 +570,10 @@ impl<'pars> Class<'pars> {
             group: g.group.as_ref().map(|b| &b.content),
             name: &g.name.content,
         })
+    }
+
+    pub fn class_variables(&self) -> &ClassVariablesInner<'_> {
+        self.class_variables.borrow_dependent()
     }
 
     pub fn function_entry<'a>(

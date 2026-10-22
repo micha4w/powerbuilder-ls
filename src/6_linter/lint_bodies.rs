@@ -22,41 +22,6 @@ impl<'sol> Linter<'sol> {
         let typ = self.annotations.must_type(&lvalue.range);
 
         match &lvalue.lvalue_type {
-            // TODO is unwrap stupid?
-            parser::LValueType::This => {
-                if self.class.is_none() {
-                    self.diagnostic_error(
-                        "Cannot use `this` outside of a class".into(),
-                        lvalue.range.clone(),
-                    );
-                }
-            }
-            parser::LValueType::Super => {
-                if self.class.is_none() {
-                    self.diagnostic_error(
-                        "Cannot use `super` outside of a class".into(),
-                        lvalue.range.clone(),
-                    );
-                }
-            }
-            parser::LValueType::Parent => {
-                if let Some(fc) = self.class {
-                    if let ResolvedType::Unknown = typ {
-                        if fc.class.within().is_some() {
-                            // The None case should be handled in the class definition
-                            self.diagnostic_error(
-                                "Class does not have a within class and does not inherit from windowobject".into(),
-                                lvalue.range.clone(),
-                            );
-                        }
-                    }
-                } else {
-                    self.diagnostic_error(
-                        "Cannot use `parent` outside of a class".into(),
-                        lvalue.range.clone(),
-                    );
-                }
-            }
             parser::LValueType::Variable(variable) => {
                 if !resolved.found() {
                     // TODO(diagnostic): put the possibilities into the error message

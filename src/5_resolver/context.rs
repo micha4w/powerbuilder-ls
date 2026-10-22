@@ -189,6 +189,15 @@ impl<'sol> Context<'sol> {
         iter::from_coroutine(Box::pin(
             #[coroutine]
             static move || {
+                if let Some(fc) = self.class {
+                    for (var, err) in filter
+                        .name
+                        .filter_hash_map(&fc.class.class_variables(), ListError::WrongName)
+                    {
+                        yield (FoundVariable::new_instance(fc, var), err);
+                    }
+                }
+
                 if let Some(body) = self.body {
                     for (var, err) in filter
                         .name

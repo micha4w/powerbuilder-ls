@@ -223,13 +223,7 @@ impl PowerBuilderLS {
                 .and_then(|n| check_enum!(n, builder::Node::LValue))
                 .map(|lvalue| &lvalue.lvalue_type)
             {
-                None
-                | Some(
-                    parser::LValueType::This
-                    | parser::LValueType::Super
-                    | parser::LValueType::Parent
-                    | parser::LValueType::Variable(_),
-                ) => {
+                None | Some(parser::LValueType::Variable(_)) => {
                     // TODO(completion): correct behaviour for this, super, parent?
 
                     for (found, err) in ctx.variables(VariableFilter {

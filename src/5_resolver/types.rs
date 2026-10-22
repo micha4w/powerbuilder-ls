@@ -106,10 +106,6 @@ impl std::fmt::Display for ResolvedType<'_> {
 
 #[derive(Clone)]
 pub enum ResolvedLValue<'sol> {
-    This(solution::ClassRef<'sol>),
-    Super(solution::ClassRef<'sol>),
-    Parent(solution::ClassRef<'sol>),
-
     /// `ClassRef` is `None` for scoped / local variables, `Some` for instance variables
     Variable(
         Option<solution::ClassRef<'sol>>,
@@ -265,6 +261,20 @@ impl<T> SearchFilter<T> {
             ),
         }
     }
+    pub fn once<'a>(&'a self, check: impl Fn(&T) -> bool, err: ListError) -> Option<ListError> {
+        match self {
+            SearchFilter::Filter { want, do_error } => {
+                if check(&want) {
+                    Some(ListError::None)
+                } else if *do_error {
+                    Some(err)
+                } else {
+                    None
+                }
+            }
+            SearchFilter::All => Some(ListError::None),
+        }
+    }
 
     pub fn filter<'a, U>(
         &'a self,
@@ -272,17 +282,9 @@ impl<T> SearchFilter<T> {
         f: impl Fn(&U, &T) -> bool + 'a,
         err: ListError,
     ) -> impl Iterator<Item = ListResult<U>> + 'a {
-        iter.filter_map(move |value| match self {
-            SearchFilter::Filter { want, do_error } => {
-                if f(&value, want) {
-                    Some((value, ListError::None))
-                } else if *do_error {
-                    Some((value, err))
-                } else {
-                    None
-                }
-            }
-            SearchFilter::All => Some((value, ListError::None)),
+        iter.filter_map(move |value| {
+            self.once(|want| f(&value, want), err)
+                .map(|err| (value, err))
         })
     }
 
@@ -292,17 +294,9 @@ impl<T> SearchFilter<T> {
         f: impl Fn(&U, &T) -> bool + 'a,
         err: ListError,
     ) -> impl Iterator<Item = ListResult<U>> + 'a {
-        iter.filter_map(move |(value, old_err)| match self {
-            SearchFilter::Filter { want, do_error } => {
-                if f(&value, want) {
-                    Some((value, old_err))
-                } else if *do_error {
-                    Some((value, old_err | err))
-                } else {
-                    None
-                }
-            }
-            SearchFilter::All => Some((value, ListError::None)),
+        iter.filter_map(move |(value, old_err)| {
+            self.once(|want| f(&value, want), err)
+                .map(|err| (value, old_err | err))
         })
     }
 }

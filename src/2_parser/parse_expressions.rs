@@ -340,19 +340,10 @@ impl<I: Iterator<Item = char>> Parser<I> {
                 let token = self.tokens.next()?;
                 LValue {
                     range: token.range.clone(),
-                    lvalue_type: if is_sql && colon.is_none() {
-                        LValueType::Variable(VariableAccess {
-                            name: token,
-                            is_write: false,
-                        })
-                    } else {
-                        match kw {
-                            tokenizer::Keyword::SUPER => LValueType::Super,
-                            tokenizer::Keyword::THIS => LValueType::This,
-                            tokenizer::Keyword::PARENT => LValueType::Parent,
-                            _ => unreachable!(),
-                        }
-                    },
+                    lvalue_type: LValueType::Variable(VariableAccess {
+                        name: token,
+                        is_write: false,
+                    }),
                 }
             }),
             None => None,
@@ -360,83 +351,92 @@ impl<I: Iterator<Item = char>> Parser<I> {
 
         loop {
             match &mut previous {
-                Some(prev) => {
-                    match self.tokens.peek()?.token_type {
-                        TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
-                            let colon = self.tokens.next()?;
+                Some(prev) => match self.tokens.peek()?.token_type {
+                    TokenType::Symbol(tokenizer::Symbol::COLONCOLON) if !is_sql => {
+                        let colon = self.tokens.next()?;
 
-                            match prev.lvalue_type {
-                                LValueType::Super => {}
-                                LValueType::Variable(_) => prev.lvalue_type = LValueType::Super, // TODO ?
-                                _ => {
-                                    self.error(
-                                        &"Only super methods can be indexed using '::'".into(),
-                                        colon.range,
-                                    );
-                                }
+                        match prev.lvalue_type {
+                            LValueType::Variable(VariableAccess {
+                                name:
+                                    Token {
+                                        token_type:
+                                            tokenizer::TokenType::Keyword(tokenizer::Keyword::SUPER)
+                                            | tokenizer::TokenType::ID,
+                                        ..
+                                    },
+                                ..
+                            }) => {}
+                            _ => {
+                                self.error(
+                                    &"Only super or ancestor methods can be indexed using '::'"
+                                        .into(),
+                                    colon.range,
+                                );
                             }
                         }
-                        TokenType::Symbol(tokenizer::Symbol::DOT) => {
-                            let dot = self.tokens.next()?;
+                    }
+                    TokenType::Symbol(tokenizer::Symbol::DOT) => {
+                        let dot = self.tokens.next()?;
 
-                            if let LValueType::Super = prev.lvalue_type {
+                        if let LValueType::Variable(access) = &prev.lvalue_type {
+                            if let TokenType::Keyword(tokenizer::Keyword::SUPER) =
+                                &access.name.token_type
+                            {
                                 self.error(
                                     &"Super methods have to be indexed using '::'".into(),
                                     dot.range,
                                 );
                             }
                         }
-                        TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
-                            let lbrace = self.tokens.next()?;
-                            let res = match self.parse_expression(is_sql)? {
-                                Ok(exp) => {
-                                    match self
-                                        .expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))?
-                                    {
-                                        Ok(rbrace) => Ok((rbrace.range.end, exp)),
-                                        Err(err) => Err((err, Some((exp.range.end, exp)))),
-                                    }
-                                }
-                                Err((err, exp)) => Err((err, exp.map(|exp| (exp.range.end, exp)))),
-                            };
-                            let expression = match res {
-                                Ok((_, exp)) => exp,
-                                Err((err, res)) => {
-                                    let (end, exp) = res.unzip();
-                                    let lvalue = LValue {
-                                        range: prev
-                                            .range
-                                            .clone()
-                                            .expanded(&end.unwrap_or(lbrace.range.end)),
-                                        lvalue_type: LValueType::Index(
-                                            Box::new(previous.take().unwrap()),
-                                            Box::new(exp.unwrap_or(Expression {
-                                                expression_type: ExpressionType::Error,
-                                                range: Range::new_point(
-                                                    lbrace.range.end,
-                                                    self.file_id(),
-                                                ),
-                                            })),
-                                        ),
-                                    };
-
-                                    return Some(Err((err, Some(lvalue))));
-                                }
-                            };
-
-                            previous = Some(LValue {
-                                range: prev.range.clone().merged(&expression.range),
-                                lvalue_type: LValueType::Index(
-                                    Box::new(previous.take().unwrap()),
-                                    Box::new(expression),
-                                ),
-                            });
-
-                            continue;
-                        }
-                        _ => break,
                     }
-                }
+                    TokenType::Symbol(tokenizer::Symbol::LBRACE) if !is_sql => {
+                        let lbrace = self.tokens.next()?;
+                        let res = match self.parse_expression(is_sql)? {
+                            Ok(exp) => {
+                                match self.expect(TokenType::Symbol(tokenizer::Symbol::RBRACE))? {
+                                    Ok(rbrace) => Ok((rbrace.range.end, exp)),
+                                    Err(err) => Err((err, Some((exp.range.end, exp)))),
+                                }
+                            }
+                            Err((err, exp)) => Err((err, exp.map(|exp| (exp.range.end, exp)))),
+                        };
+                        let expression = match res {
+                            Ok((_, exp)) => exp,
+                            Err((err, res)) => {
+                                let (end, exp) = res.unzip();
+                                let lvalue = LValue {
+                                    range: prev
+                                        .range
+                                        .clone()
+                                        .expanded(&end.unwrap_or(lbrace.range.end)),
+                                    lvalue_type: LValueType::Index(
+                                        Box::new(previous.take().unwrap()),
+                                        Box::new(exp.unwrap_or(Expression {
+                                            expression_type: ExpressionType::Error,
+                                            range: Range::new_point(
+                                                lbrace.range.end,
+                                                self.file_id(),
+                                            ),
+                                        })),
+                                    ),
+                                };
+
+                                return Some(Err((err, Some(lvalue))));
+                            }
+                        };
+
+                        previous = Some(LValue {
+                            range: prev.range.clone().merged(&expression.range),
+                            lvalue_type: LValueType::Index(
+                                Box::new(previous.take().unwrap()),
+                                Box::new(expression),
+                            ),
+                        });
+
+                        continue;
+                    }
+                    _ => break,
+                },
 
                 None => {}
             }
@@ -513,10 +513,12 @@ impl<I: Iterator<Item = char>> Parser<I> {
                         );
                     }
 
-                    if let Some(LValueType::Super) =
+                    if let Some(LValueType::Variable(access)) =
                         previous.as_ref().map(|lvalue| &lvalue.lvalue_type)
                     {
-                        if let Some(dynamic) = dynamics.get(0) {
+                        if let (TokenType::Keyword(tokenizer::Keyword::SUPER), Some(dynamic)) =
+                            (&access.name.token_type, dynamics.get(0))
+                        {
                             self.error(
                                 &"'SUPER::' calls do not support DYNAMIC".into(),
                                 dynamic.range.clone(),
@@ -531,8 +533,8 @@ impl<I: Iterator<Item = char>> Parser<I> {
                             TokenType::Symbol(tokenizer::Symbol::RPAREN),
                         )?
                         .split();
-                    let (arguments, range) =
-                        res.unwrap_or((Vec::new(), Range::new_point(name.range.end, self.file_id())));
+                    let (arguments, range) = res
+                        .unwrap_or((Vec::new(), Range::new_point(name.range.end, self.file_id())));
 
                     let func = FunctionCall {
                         range: name.range.clone().merged(&range),
