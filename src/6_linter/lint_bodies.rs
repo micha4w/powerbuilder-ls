@@ -1,9 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
+use serde::de::value;
+
 use super::linter::{Linter, Scope};
 use crate::{
     builder, parser,
-    resolver::{self, ResolvedType},
+    resolver::{self, ResolvedLValue, ResolvedType},
     solution, tokenizer,
     types::*,
 };
@@ -22,10 +24,44 @@ impl<'sol> Linter<'sol> {
         let typ = self.annotations.must_type(&lvalue.range);
 
         match &lvalue.lvalue_type {
-            parser::LValueType::Variable(variable) => {
-                if !resolved.found() {
-                    // TODO(diagnostic): put the possibilities into the error message
-                    self.diagnostic_error("Variable not found".into(), variable.name.range.clone());
+            parser::LValueType::Variable(variable) => match resolved {
+                Found::Yes(ResolvedLValue::Variable(_, var)) => {
+                    if variable.is_write && var.parsed().constant {
+                        self.diagnostic_error(
+                            "Cannot write to a constant variable".into(),
+                            variable.name.range.clone(),
+                        );
+                    }
+                }
+                _ => {
+                    self.diagnostic_error("Variable not found".into(), variable.name.range.clone())
+                }
+            },
+            parser::LValueType::Member(lvalue, member) => {
+                let data_type = self.lint_lvalue(lvalue, scope);
+                match (data_type, resolved) {
+                    (ResolvedType::Class(_), Found::Yes(ResolvedLValue::Variable(_, var))) => {
+                        if member.is_write && var.parsed().constant {
+                            self.diagnostic_error(
+                                "Cannot write to a constant member".into(),
+                                member.name.range.clone(),
+                            );
+                        }
+                    }
+                    (ResolvedType::Class(_), Found::No) => {
+                        // TODO(diagnostic): ...
+                        self.diagnostic_error(
+                            "Member Variable not found or not accessible".into(),
+                            member.name.range.clone(),
+                        );
+                    }
+                    (ResolvedType::Base(builder::BaseType::Any) | ResolvedType::Unknown, _) => {}
+                    _ => {
+                        self.diagnostic_error(
+                            "Cannot get a member of a non Class".into(),
+                            member.name.range.clone(),
+                        );
+                    }
                 }
             }
             parser::LValueType::Function(call) => {
@@ -66,27 +102,6 @@ impl<'sol> Linter<'sol> {
                         self.diagnostic_error(
                             "Cannot call a method of a non Class".into(),
                             call.name.range.clone(),
-                        );
-                    }
-                }
-            }
-            parser::LValueType::Member(lvalue, member) => {
-                let data_type = self.lint_lvalue(lvalue, scope);
-                match data_type {
-                    ResolvedType::Class(_) => {
-                        if !resolved.found() {
-                            // TODO(diagnostic): ...
-                            self.diagnostic_error(
-                                "Member Variable not found or not accessible".into(),
-                                member.name.range.clone(),
-                            );
-                        }
-                    }
-                    ResolvedType::Base(builder::BaseType::Any) | ResolvedType::Unknown => {}
-                    _ => {
-                        self.diagnostic_error(
-                            "Cannot get a member of a non Class".into(),
-                            member.name.range.clone(),
                         );
                     }
                 }

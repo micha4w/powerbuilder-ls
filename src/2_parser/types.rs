@@ -535,12 +535,11 @@ pub struct LValue {
 impl LValue {
     pub fn set_write(&mut self) -> Option<(String, Range)> {
         match &mut self.lvalue_type {
-            LValueType::Variable(ref mut access) => {
+            LValueType::Variable(access) => {
                 access.is_write = true;
                 None
             }
-            LValueType::Member(lvalue, ref mut access) => {
-                lvalue.set_write();
+            LValueType::Member(_, access) => {
                 access.is_write = true;
                 None
             }
@@ -673,8 +672,8 @@ impl Expression {
     // }
 
     pub fn set_write(&mut self) -> Option<(String, Range)> {
-        match self.expression_type {
-            ExpressionType::LValue(ref mut lvalue) => lvalue.set_write(),
+        match &mut self.expression_type {
+            ExpressionType::LValue(lvalue) => lvalue.set_write(),
             _ => Some(("Cannot assign to non-LValue".into(), self.range.clone())),
         }
     }
