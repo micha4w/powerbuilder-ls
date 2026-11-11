@@ -20,7 +20,11 @@ impl<'sol> Solution {
                 match self.find_class(current_file, &Grouped::simple(name.clone())) {
                     // TODO(perf): unnecessary clone
                     Found::Yes(class) => ResolvedType::Class(class),
-                    Found::No => ResolvedType::Unknown,
+                    Found::No => self
+                        .builtins()
+                        .enums
+                        .get(name)
+                        .map_or(ResolvedType::Unknown, |en| ResolvedType::Enum(en)),
                 }
             }
             builder::PowerScriptType::Array(inner) => {
